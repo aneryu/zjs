@@ -1,11 +1,11 @@
-//! Function builtin records, dynamic-function construction, and source metadata.
+//! Function builtin records, dynamic-function construction, and standard-constructor [[Construct]].
 //!
 //! Call receivers and arguments are borrowed; created functions, compiled roots,
 //! and returned completion values carry owned references and are explicitly
 //! rooted across observable prototype work. Generic call/apply execution remains
 //! in `call_runtime.zig`; this module owns the Function-domain record seam and
 //! dynamic source compilation. The builtin table maps to QuickJS
-//! `js_function_proto_funcs` at quickjs.c.
+//! `js_function_proto_funcs`.
 
 const std = @import("std");
 const zjs_vm = @import("zjs_vm.zig");
@@ -15,17 +15,41 @@ const object_ops = @import("object_ops.zig");
 const parser = @import("../parser.zig");
 const string_ops = @import("string_ops.zig");
 const frame_mod = @import("frame.zig");
-const error_stack_ops = @import("exception_ops.zig");
 const bytecode = @import("../bytecode.zig");
 
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const native_legacy = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
-const exceptions = @import("exception_ops.zig");
-
-const HostError = exceptions.HostError;
+const array_ops = @import("array_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("value_ops.zig");
+const exception_ops = @import("exception_ops.zig");
+const disposable_ops = @import("disposable_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const regexp_fastpath = @import("regexp_ops.zig");
+const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
+const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
+const isCallableValue = call_runtime.isCallableValue;
+const objectRealmGlobal = object_ops.objectRealmGlobal;
+const aggregateErrorConstructWithPrototype = object_ops.aggregateErrorConstructWithPrototype;
+const arrayBufferMaxByteLengthOption = array_ops.arrayBufferMaxByteLengthOption;
+const asyncDisposableStackConstructWithPrototype = disposable_ops.asyncDisposableStackConstructWithPrototype;
+const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
+const constructFinalizationRegistryWithPrototype = object_ops.constructFinalizationRegistryWithPrototype;
+const constructWeakRefWithPrototype = object_ops.constructWeakRefWithPrototype;
+const dataViewConstructWithPrototype = object_ops.dataViewConstructWithPrototype;
+const dataViewConstructorArgs = builtin_glue.dataViewConstructorArgs;
+const disposableStackConstructWithPrototype = object_ops.disposableStackConstructWithPrototype;
+const errorConstructWithPrototype = object_ops.errorConstructWithPrototype;
+const promiseConstructWithPrototype = promise_ops.promiseConstructWithPrototype;
+const regExpConstructCall = regexp_fastpath.regExpConstructCall;
+const suppressedErrorConstructWithPrototype = object_ops.suppressedErrorConstructWithPrototype;
+const typedArrayConstructToIndex = array_ops.typedArrayConstructToIndex;
+const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
+const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
+const valueTruthy = coercion_ops.valueTruthy;
+const HostError = exception_ops.HostError;
 
 pub const PrototypeMethod = enum(u32) {
     to_string = 1,
@@ -35,26 +59,27 @@ pub const PrototypeMethod = enum(u32) {
     has_instance = 5,
 };
 
-/// Identity of the realm-installed default `Function.prototype[@@hasInstance]`
-/// record (qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`).
-/// Pointer compare against the densified table slot — not a name or shape cache.
-pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.NativeEntry) bool {
-    const expected = rt.internalBuiltinRecord(
-        @intCast(@intFromEnum(core.function.NativeBuiltinDomain.function)),
-        @intFromEnum(PrototypeMethod.has_instance),
-    );
-    return if (expected) |slot| record == slot else false;
-}
+/// `.function` domain callables that are not Function.prototype methods.
+pub const IntrinsicMethod = enum(u32) {
+    /// Global `eval` called indirectly. Direct eval never reaches this record:
+    /// `OP_eval` recognizes the realm's intrinsic `eval` by identity.
+    eval = 10,
+    /// `%Function.prototype%` is itself callable and returns undefined.
+    function_prototype = 11,
+};
 
-/// qjs compares the C function pointer (`js_function_hasInstance`).
-/// Same identity as `isDefaultHasInstanceRecord` without the runtime table.
+/// Whether `record` is the default `Function.prototype[@@hasInstance]`
+/// (qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`).
+/// qjs compares the C function pointer (`js_function_hasInstance`); this
+/// compares the entry's code target, which only the table's
+/// `[Symbol.hasInstance]` record carries — not a name or shape cache.
 pub inline fn recordIsDefaultHasInstance(record: *const core.NativeEntry) bool {
     return record.target == default_has_instance_target;
 }
 
 /// NB2: the comptime adapter is memoized per declaration, so the table's
 /// `[Symbol.hasInstance]` entry and this constant share one thunk pointer.
-const default_has_instance_target = native_legacy.entryFromInternal(functionHasInstanceEntry()).target;
+const default_has_instance_target = builtin_dispatch.entryFromInternal(functionHasInstanceEntry()).target;
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
 /// (QuickJS `js_function_proto_funcs` analogue, quickjs.c).
@@ -65,7 +90,7 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     functionEntry("bind", 1, @intFromEnum(PrototypeMethod.bind)),
     // qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`.
     // Every `instanceof` whose RHS does not override `Symbol.hasInstance` lands
-    // here, so it must resolve by record id rather than by name cascade.
+    // here.
     //
     // `JS_CFUNC_DEF` is `JS_CFUNC_generic`, not `JS_CFUNC_MAGIC_DEF`: qjs gives
     // this method its own C function rather than a magic selector into a shared
@@ -73,6 +98,8 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     // `instanceof` path out of `functionCall`'s magic switch, which the hot
     // `apply`/`bind`/`toString` trio shares.
     functionHasInstanceEntry(),
+    functionEntry("eval", 1, @intFromEnum(IntrinsicMethod.eval)),
+    functionEntry("", 0, @intFromEnum(IntrinsicMethod.function_prototype)),
 };
 
 fn functionHasInstanceEntry() core.host_function.InternalEntry {
@@ -87,70 +114,32 @@ fn functionHasInstanceEntry() core.host_function.InternalEntry {
     };
 }
 
-/// Exec-direct ABI twin of `functionHasInstance` (NB2-B): identical body
-/// routing, but the realm pair, output, and VM caller pair arrive by
-/// parameter, so no NativeCallEnvironment recovery is needed. Declared
-/// separately because `functionHasInstanceCall` carries an inferred error
-/// set and the direct ABI requires the exact `HostError` surface.
-fn functionHasInstanceDirect(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    argv: [*]const core.JSValue,
-    argc: u32,
-    _: *const core.NativeEntry,
-    _: ?*core.Object,
-) callconv(.c) core.JSValue {
-    const args = argv[0..argc];
-    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-    const caller = builtin_dispatch.vmCallerView(ctx);
-    const output = caller.output;
-    const caller_function = caller.caller_function;
-    const caller_frame = caller.caller_frame;
-    return builtin_dispatch.hostResultToValue(
-        ctx,
-        call_runtime.functionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame),
-    );
+/// The exec-direct ABI (NB2-B) for a Function.prototype method body: the realm
+/// pair, output and VM caller pair arrive by parameter, so no
+/// NativeCallEnvironment recovery is needed.
+fn directEntry(comptime body: anytype) fn (*core.JSContext, core.JSValue, [*]const core.JSValue, u32, *const core.NativeEntry, ?*core.Object) callconv(.c) core.JSValue {
+    return struct {
+        fn entry(
+            ctx: *core.JSContext,
+            this_value: core.JSValue,
+            argv: [*]const core.JSValue,
+            argc: u32,
+            _: *const core.NativeEntry,
+            _: ?*core.Object,
+        ) callconv(.c) core.JSValue {
+            const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+            const caller = builtin_dispatch.vmCallerView(ctx);
+            return builtin_dispatch.hostResultToValue(
+                ctx,
+                body(ctx, caller.output, global, this_value, argv[0..argc], caller.caller_function, caller.caller_frame),
+            );
+        }
+    }.entry;
 }
 
-fn functionCallDirect(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    argv: [*]const core.JSValue,
-    argc: u32,
-    _: *const core.NativeEntry,
-    _: ?*core.Object,
-) callconv(.c) core.JSValue {
-    const args = argv[0..argc];
-    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-    const caller = builtin_dispatch.vmCallerView(ctx);
-    const output = caller.output;
-    const caller_function = caller.caller_function;
-    const caller_frame = caller.caller_frame;
-    return builtin_dispatch.hostResultToValue(
-        ctx,
-        call_runtime.functionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame),
-    );
-}
-
-fn functionApplyDirect(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    argv: [*]const core.JSValue,
-    argc: u32,
-    _: *const core.NativeEntry,
-    _: ?*core.Object,
-) callconv(.c) core.JSValue {
-    const args = argv[0..argc];
-    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-    const caller = builtin_dispatch.vmCallerView(ctx);
-    const output = caller.output;
-    const caller_function = caller.caller_function;
-    const caller_frame = caller.caller_frame;
-    return builtin_dispatch.hostResultToValue(
-        ctx,
-        call_runtime.functionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame),
-    );
-}
+const functionHasInstanceDirect = directEntry(call_runtime.functionHasInstanceCall);
+const functionCallDirect = directEntry(call_runtime.functionCallCall);
+const functionApplyDirect = directEntry(call_runtime.functionApplyCall);
 
 /// qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
 /// argv[0], this_val)`. The receiver is the constructor, the first argument the
@@ -256,8 +245,8 @@ test "Function.call has a dedicated native record handler" {
 /// precedent), never the name. The comptime adapter is memoized per
 /// declaration, so the realm's table entry and these constants share one
 /// pointer.
-pub const call_entry_target = native_legacy.entryFromInternal(functionCallEntry()).target;
-pub const apply_entry_target = native_legacy.entryFromInternal(functionApplyEntry()).target;
+pub const call_entry_target = builtin_dispatch.entryFromInternal(functionCallEntry()).target;
+pub const apply_entry_target = builtin_dispatch.entryFromInternal(functionApplyEntry()).target;
 
 test "call/apply entry identity is the target code pointer" {
     try std.testing.expect(call_entry_target != apply_entry_target);
@@ -296,9 +285,9 @@ test "Function.apply has a dedicated forwarding native record handler" {
     return error.TestUnexpectedResult;
 }
 
-/// Shared record handler for the remaining `.function` methods. Function.call
-/// uses its own qjs-style function-list entry because it is a hot forwarding
-/// primitive; the bodies stay in exec because they read engine call/frame
+/// Shared record handler for the remaining `.function` methods. Function.call,
+/// Function.apply and `[Symbol.hasInstance]` use their own qjs-style
+/// function-list entries because they are hot forwarding primitives; the bodies stay in exec because they read engine call/frame
 /// internals.
 fn functionCall(
     native_ctx: *core.JSContext,
@@ -314,7 +303,12 @@ fn functionCall(
         @intFromEnum(PrototypeMethod.bind) => {
             const realm = try builtin_dispatch.callableRealm(host_call);
             std.debug.assert(realm.realm == ctx);
-            return call.functionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
+            return call.functionBindCall(ctx, host_call.output, realm.global, host_call.this_value, host_call.args);
+        },
+        @intFromEnum(IntrinsicMethod.function_prototype) => core.JSValue.undefinedValue(),
+        @intFromEnum(IntrinsicMethod.eval) => {
+            const realm = try builtin_dispatch.callableRealm(host_call);
+            return call_runtime.indirectEval(realm.realm, host_call.output, realm.global, host_call.args, builtin_dispatch.callerBytecode(host_call));
         },
         else => error.TypeError,
     };
@@ -363,36 +357,26 @@ fn functionCallRecord(
     );
 }
 
-pub fn constructFunctionFromSource(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .normal, caller_function, caller_frame);
-}
-
-pub fn constructGeneratorFunctionFromSource(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .generator, caller_function, caller_frame);
-}
-
 pub const DynamicFunctionKind = enum {
     normal,
     async_function,
     generator,
     async_generator,
 };
+
+/// The dynamic-function program compiled to exactly one function expression
+/// spanning `expected_source_len` bytes (the whole text minus its parens).
+fn isSingleDynamicFunction(root: *const bytecode.FunctionBytecode, expected_source_len: usize) bool {
+    var child: ?*const bytecode.FunctionBytecode = null;
+    for (root.cpoolSlice()) |value| {
+        const function = call_runtime.functionBytecodeFromValue(value) orelse continue;
+        if (child != null) return false;
+        child = function;
+    }
+    const function = child orelse return false;
+    const debug = function.debugInfo() orelse return true;
+    return debug.source_ptr == null or @as(usize, @intCast(@max(debug.source_len, 0))) == expected_source_len;
+}
 
 pub fn constructDynamicFunctionFromSource(
     ctx: *core.JSContext,
@@ -441,16 +425,40 @@ pub fn constructDynamicFunctionFromSource(
         .generator => "GeneratorFunction",
         .async_generator => "AsyncGeneratorFunction",
     };
-    var compiled = try parser.compile(.{ .realm = compile_realm }, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
+    // CreateDynamicFunction: [[ScriptOrModule]] is the active one, so a
+    // dynamic import() in the body resolves against the calling module.
+    const script_or_module = if (caller_function) |outer_function| outer_function.scriptOrModule() else null;
+    var compiled = try parser.compile(.{ .realm = compile_realm }, source.items, .{ .mode = .eval_direct, .filename = filename, .script_or_module = script_or_module, .strict = false });
     defer compiled.deinit();
     if (compiled.syntax_error) |*parse_error| {
         // Compile-error surface: own fileName/lineNumber/columnNumber +
         // leading stack line (build_backtrace filename branch,
         // quickjs.c).
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
-        return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+        return exception_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }
-    _ = compiled.functionBytecode() orelse return error.InvalidBytecode;
+    const root_fb = compiled.functionBytecode() orelse return error.InvalidBytecode;
+    // CreateDynamicFunction parses the parameters and the body on their own.
+    // Concatenated text can otherwise hide a comment or template spanning the
+    // two, or a body that closes the function early and runs code at
+    // construction: require the parameters to parse alone and the whole text
+    // to be exactly one function expression.
+    {
+        var params_source = std.ArrayList(u8).empty;
+        defer params_source.deinit(ctx.runtime.nativeAllocator());
+        try params_source.appendSlice(ctx.runtime.nativeAllocator(), prefix);
+        try params_source.appendSlice(ctx.runtime.nativeAllocator(), params.items);
+        try params_source.appendSlice(ctx.runtime.nativeAllocator(), "\n) {\n})");
+        var params_compiled = try parser.compile(.{ .realm = compile_realm }, params_source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
+        defer params_compiled.deinit();
+        if (params_compiled.syntax_error) |*parse_error| {
+            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
+            return exception_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+        }
+    }
+    if (!isSingleDynamicFunction(root_fb, source.items.len - "()".len)) {
+        return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid function body");
+    }
     const owned_root = compiled.takeFunctionBytecodeValue() orelse return error.InvalidBytecode;
     var root_function_value = try object_ops.createRootBytecodeFunctionObject(
         compile_realm,
@@ -471,8 +479,9 @@ pub fn constructDynamicFunctionFromSource(
     // full-heap `break_var_ref_cycles_on_exit` collection here marks live outer
     // values (e.g. an in-flight exception) as garbage and frees them. qjs never
     // runs GC on eval exit (only at allocation thresholds / explicit JS_RunGC), so
-    // pass `false`; the function expression makes no var_ref cycle of its own and
-    // any cycle in the result is reclaimed by the top-level collection.
+    // leave `break_var_ref_cycles_on_exit` at its default false; the function
+    // expression makes no var_ref cycle of its own and any cycle in the result
+    // is reclaimed by the top-level collection.
     const result = try runWithCallEnv(.{
         .ctx = compile_realm,
         .stack = &nested_stack,
@@ -484,274 +493,248 @@ pub fn constructDynamicFunctionFromSource(
         .current_function_value = root_function_value,
         .is_eval_code = true,
     });
-    // `runWithArgs` returns the completion value owned, but ALSO leaves an owned
-    // copy on `nested_stack`. When that stack is a `vm_stack` arena window (the
+    // `runWithCallEnv` returns the completion value but also leaves a copy on
+    // `nested_stack`. When that stack is a `vm_stack` arena window (the
     // carved-frame fast path), the leftover slot sits ABOVE the arena watermark
-    // restored on frame exit. The `new_target.prototype` read below can run a
-    // proxy `get` trap whose bytecode frame re-carves the same arena and
-    // overwrites that orphaned slot; `nested_stack.deinit` would then free an
-    // alias'd value (e.g. a `Proxy.revocable` `revoke` closure still owned by its
-    // wrapper) — a refcount under-flow that dangles into a later cycle GC. Drain
-    // the stack's owned copy now so the window is empty before any further
-    // bytecode runs; `result` keeps the independently-owned reference.
+    // restored on frame exit, and the `new_target.prototype` read below can run
+    // a proxy `get` trap whose frame re-carves the same arena. Empty the window
+    // before any further bytecode runs; `result` keeps the value.
     for (nested_stack.liveValues()) |*slot| {
         slot.* = core.JSValue.undefinedValue();
     }
     nested_stack.setLen(0);
     if (object_ops.functionObjectFromValue(result)) |function_object| {
-        var prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
-        defer prototype.deinit(ctx.runtime);
-        try function_object.setPrototype(ctx.runtime, prototype.object());
+        const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
+        try function_object.setPrototype(ctx.runtime, prototype);
     }
     return result;
 }
 
-// ----- merged from class_init_ops.zig -----
-// Class construction and super helpers.
-const construct_mod = @import("construct.zig");
-const date_ops = @import("date_ops.zig");
-const array_construct_ref = core.function.NativeBuiltinRef{
-    .domain = .array,
-    .id = @intFromEnum(core.host_function.builtin_method_ids.array.ConstructorMethod.construct),
-};
-const array_ops = @import("array_ops.zig");
-const builtin_glue = @import("builtin_glue.zig");
-const coercion_ops = @import("value_ops.zig");
-const exception_ops = @import("exception_ops.zig");
-const promise_ops = @import("promise_ops.zig");
-const regexp_fastpath = @import("regexp_ops.zig");
-const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
-const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
-const isCallableValue = call_runtime.isCallableValue;
-const isErrorConstructorName = exception_ops.isErrorConstructorName;
-const objectFromValue = object_ops.objectFromValue;
-const objectRealmGlobal = object_ops.objectRealmGlobal;
-const aggregateErrorConstructWithPrototype = object_ops.aggregateErrorConstructWithPrototype;
-const arrayBufferMaxByteLengthOption = array_ops.arrayBufferMaxByteLengthOption;
-const asyncDisposableStackConstructWithPrototype = promise_ops.asyncDisposableStackConstructWithPrototype;
-const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
-const constructFinalizationRegistryWithPrototype = object_ops.constructFinalizationRegistryWithPrototype;
-const constructWeakRefWithPrototype = object_ops.constructWeakRefWithPrototype;
-const dataViewConstructWithPrototype = object_ops.dataViewConstructWithPrototype;
-const dataViewConstructorArgs = builtin_glue.dataViewConstructorArgs;
-const disposableStackConstructWithPrototype = object_ops.disposableStackConstructWithPrototype;
-const errorConstructWithPrototype = object_ops.errorConstructWithPrototype;
-const promiseConstructWithPrototype = promise_ops.promiseConstructWithPrototype;
-const regExpConstructCall = regexp_fastpath.regExpConstructCall;
-const stringConstructWithPrototype = string_ops.stringConstructWithPrototype;
-const suppressedErrorConstructWithPrototype = object_ops.suppressedErrorConstructWithPrototype;
-const typedArrayConstructToIndex = array_ops.typedArrayConstructToIndex;
-const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
-const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
-const valueTruthy = coercion_ops.valueTruthy;
+// ----- Standard-constructor [[Construct]] helpers -----
 
-pub fn constructIteratorWithNewTarget(
+fn constructIteratorWithNewTarget(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     constructor: core.JSValue,
-    args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
-    _ = args;
-    if (new_target.sameValue(constructor)) return error.TypeError;
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Iterator", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
+    if (new_target.sameValue(constructor)) return exception_ops.throwTypeErrorMessage(ctx, global, "Iterator is an abstract class");
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Iterator", new_target, caller_function, caller_frame);
+    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     return instance.value();
 }
 
-pub fn numberConstructWithNewTarget(
+fn numberConstructWithNewTarget(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    constructor: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
-    _ = constructor;
-    if (args.len >= 1 and args[0].is(.symbol)) return error.TypeError;
     const primitive = try builtin_glue.numberFunctionCall(ctx, output, global, args);
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Number", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype.object(), primitive);
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Number", new_target, caller_function, caller_frame);
+    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype, primitive);
 }
 
-pub fn booleanConstructWithNewTarget(
+fn booleanConstructWithNewTarget(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    constructor: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
-    _ = constructor;
     const primitive = core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0]));
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Boolean", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype.object(), primitive);
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Boolean", new_target, caller_function, caller_frame);
+    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype, primitive);
 }
 
-pub fn weakRefConstructWithNewTarget(
+fn weakRefConstructWithNewTarget(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    constructor: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
-    _ = constructor;
-    const target = if (args.len >= 1) args[0] else return error.TypeError;
-    if (!canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "WeakRef", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    return try constructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
+    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!canBeHeldWeakly(ctx.runtime, target)) return exception_ops.throwTypeErrorMessage(ctx, global, "invalid target");
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "WeakRef", new_target, caller_function, caller_frame);
+    return try constructWeakRefWithPrototype(ctx.runtime, target, prototype);
 }
 
-pub fn finalizationRegistryConstructWithNewTarget(
+fn finalizationRegistryConstructWithNewTarget(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    constructor: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
-    _ = constructor;
-    const cleanup_callback = if (args.len >= 1) args[0] else return error.TypeError;
-    if (!isCallableValue(cleanup_callback)) return error.TypeError;
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "FinalizationRegistry", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    return try constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
+    const cleanup_callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!isCallableValue(cleanup_callback)) return error.NotAFunction;
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "FinalizationRegistry", new_target, caller_function, caller_frame);
+    return try constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype);
 }
 
-pub fn constructBuiltinSuperConstructor(
+/// [[Construct]] of a standard constructor, for a direct `new C()` and for a
+/// foreign `new.target` (derived-class `super(...)`, `Reflect.construct`)
+/// alike. Null for `.none`: the caller continues with its own dispatch.
+pub fn constructBuiltin(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    constructor: core.JSValue,
-    name: []const u8,
+    constructor: *core.Object,
+    kind: core.host_function.NativeConstructorKind,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !?core.JSValue {
-    if (std.mem.eql(u8, name, "Symbol") or std.mem.eql(u8, name, "BigInt")) return error.TypeError;
-
-    if (std.mem.eql(u8, name, "Iterator")) {
-        return try constructIteratorWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
-    }
-
-    if (std.mem.eql(u8, name, "Function")) return try constructDynamicFunctionFromSource(ctx, output, global, constructor, new_target, args, .normal, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "AsyncFunction")) return try constructDynamicFunctionFromSource(ctx, output, global, constructor, new_target, args, .async_function, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "GeneratorFunction")) return try constructDynamicFunctionFromSource(ctx, output, global, constructor, new_target, args, .generator, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return try constructDynamicFunctionFromSource(ctx, output, global, constructor, new_target, args, .async_generator, caller_function, caller_frame);
-
-    if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
-        const byte_length = if (args.len >= 1)
-            try typedArrayConstructToIndex(ctx, output, global, args[0])
-        else
-            @as(usize, 0);
-        const max_byte_length = try arrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
-        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-        defer prototype.deinit(ctx.runtime);
-        if (std.mem.eql(u8, name, "SharedArrayBuffer")) {
-            return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype.object());
-        }
-        return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype.object());
-    }
-
-    if (std.mem.eql(u8, name, "DataView")) {
-        const coerced = try dataViewConstructorArgs(ctx, output, global, args);
-        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-        defer prototype.deinit(ctx.runtime);
-        return try dataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
-    }
-
-    if (std.mem.eql(u8, name, "RegExp")) {
-        return try regExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
-    }
-    if (std.mem.eql(u8, name, "Promise")) {
-        const function_object = objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
-        return try constructPromiseBuiltinSuperNativeVm(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
-    }
-
-    if (std.mem.eql(u8, name, "Number")) {
-        return try numberConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
-    }
-    if (std.mem.eql(u8, name, "Boolean")) {
-        return try booleanConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
-    }
-    if (std.mem.eql(u8, name, "WeakRef")) {
-        return try weakRefConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
-    }
-    if (std.mem.eql(u8, name, "FinalizationRegistry")) {
-        return try finalizationRegistryConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
-    }
-    if (construct_mod.typedArrayElement(name)) |_| {
-        const function_object = objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
-        return try array_ops.typedArrayConstructVm(ctx, output, global, new_target, function_object, args, caller_function, caller_frame);
-    }
-    if (std.mem.eql(u8, name, "Proxy")) {
-        const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const handler = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-        return @as(?core.JSValue, object_ops.constructProxyInstance(ctx, target, handler) catch |err| switch (err) {
-            error.TypeError => return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object")),
+    const name = kind.name();
+    const constructor_value = constructor.value();
+    switch (kind) {
+        .none => return null,
+        .symbol => return try exception_ops.throwTypeErrorMessage(ctx, global, "Symbol is not a constructor"),
+        .bigint => return try exception_ops.throwTypeErrorMessage(ctx, global, "BigInt is not a constructor"),
+        // §23.2.1.1: the abstract constructor throws before reading newTarget.
+        .typed_array => return try exception_ops.throwTypeErrorMessage(ctx, global, "abstract class TypedArray not directly constructable"),
+        .iterator => return try constructIteratorWithNewTarget(ctx, output, global, constructor_value, caller_function, caller_frame, new_target),
+        .function => return try constructDynamicFunctionFromSource(ctx, output, global, constructor_value, new_target, args, .normal, caller_function, caller_frame),
+        .async_function => return try constructDynamicFunctionFromSource(ctx, output, global, constructor_value, new_target, args, .async_function, caller_function, caller_frame),
+        .generator_function => return try constructDynamicFunctionFromSource(ctx, output, global, constructor_value, new_target, args, .generator, caller_function, caller_frame),
+        .async_generator_function => return try constructDynamicFunctionFromSource(ctx, output, global, constructor_value, new_target, args, .async_generator, caller_function, caller_frame),
+        .array_buffer, .shared_array_buffer => {
+            const byte_length = if (args.len >= 1)
+                try typedArrayConstructToIndex(ctx, output, global, args[0])
+            else
+                @as(usize, 0);
+            const max_byte_length = try arrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
+            const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+            if (kind == .shared_array_buffer) {
+                return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+            }
+            return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+        },
+        .data_view => {
+            const coerced = try dataViewConstructorArgs(ctx, output, global, args);
+            const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+            return try dataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
+        },
+        .regexp => return try regExpConstructCall(ctx, output, global, constructor, new_target, args, caller_function, caller_frame),
+        .promise => return try constructPromiseNativeVm(ctx, output, global, constructor, new_target, args, caller_function, caller_frame),
+        .number => return try numberConstructWithNewTarget(ctx, output, global, args, caller_function, caller_frame, new_target),
+        .boolean => return try booleanConstructWithNewTarget(ctx, output, global, args, caller_function, caller_frame, new_target),
+        .weak_ref => return try weakRefConstructWithNewTarget(ctx, output, global, args, caller_function, caller_frame, new_target),
+        .finalization_registry => return try finalizationRegistryConstructWithNewTarget(ctx, output, global, args, caller_function, caller_frame, new_target),
+        .int8_array,
+        .uint8_array,
+        .uint8_clamped_array,
+        .int16_array,
+        .uint16_array,
+        .int32_array,
+        .uint32_array,
+        .float16_array,
+        .float32_array,
+        .float64_array,
+        .bigint64_array,
+        .biguint64_array,
+        => return array_ops.typedArrayConstructVm(ctx, output, global, new_target, constructor, args, caller_function, caller_frame) catch |err| switch (err) {
+            // Name a bare RangeError; keep one that already has a message.
+            error.RangeError => if (ctx.hasException()) return err else return try exception_ops.throwRangeErrorMessage(ctx, global, "invalid array index"),
             else => return err,
-        });
+        },
+        .proxy => {
+            const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const handler = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+            return @as(?core.JSValue, object_ops.constructProxyInstance(ctx, target, handler) catch |err| switch (err) {
+                error.TypeError => return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object")),
+                else => return err,
+            });
+        },
+        // Their arguments are converted before the prototype is read
+        // (§21.4.2.1, §22.1.1.1); the direct-construct bodies own that order.
+        .string, .date => {
+            const native_ref = core.function.decodeNativeBuiltinId(constructor.nativeFunctionId()) orelse return error.InvalidBuiltinRegistry;
+            return if (kind == .string)
+                try call_runtime.constructStringBuiltinNativeVm(ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame)
+            else
+                try call_runtime.constructDateBuiltinNativeVm(ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame);
+        },
+        .object,
+        .array,
+        .error_,
+        .eval_error,
+        .range_error,
+        .reference_error,
+        .syntax_error,
+        .type_error,
+        .uri_error,
+        .internal_error,
+        .aggregate_error,
+        .suppressed_error,
+        .disposable_stack,
+        .async_disposable_stack,
+        .map,
+        .set,
+        .weak_map,
+        .weak_set,
+        => {},
     }
 
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    if (std.mem.eql(u8, name, "Object")) {
-        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].is(.object)) return args[0];
-        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
-        return instance.value();
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+    switch (kind) {
+        .object => {
+            const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+            return instance.value();
+        },
+        .array => return try call_runtime.constructArrayNativeRecordVm(ctx, output, global, constructor, prototype, args, caller_function, caller_frame),
+        .aggregate_error => {
+            const constructor_global = objectRealmGlobal(constructor) orelse global;
+            return try aggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+        },
+        .suppressed_error => return try suppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame),
+        .error_,
+        .eval_error,
+        .range_error,
+        .reference_error,
+        .syntax_error,
+        .type_error,
+        .uri_error,
+        .internal_error,
+        => return try errorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame),
+        .disposable_stack => return try disposableStackConstructWithPrototype(ctx, prototype),
+        .async_disposable_stack => return try asyncDisposableStackConstructWithPrototype(ctx, global, prototype),
+        .map, .set, .weak_map, .weak_set => return try constructCollectionWithPrototypeFromVm(ctx, output, global, collectionConstructorId(kind), args, prototype),
+        else => unreachable,
     }
-    if (std.mem.eql(u8, name, "Array")) {
-        const constructor_object = object_ops.objectFromValue(constructor) orelse return null;
-        if (constructor_object.arrayBuiltinMarker() != .constructor) return null;
-        return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, constructor_object, array_construct_ref, prototype.object(), args, caller_function, caller_frame) catch |err| switch (err) {
-            error.RangeError => {
-                if (exception_ops.pendingExceptionMatchesError(ctx, err)) return err;
-                return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length"));
-            },
-            else => return err,
-        };
-    }
-    if (std.mem.eql(u8, name, "String")) return try stringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Date")) return try date_ops.dateConstructWithPrototype(ctx, output, global, prototype.object(), args);
-    if (std.mem.eql(u8, name, "AggregateError")) {
-        const constructor_global = if (objectFromValue(constructor)) |constructor_object|
-            objectRealmGlobal(constructor_object) orelse global
-        else
-            global;
-        return try aggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype.object(), args, caller_function, caller_frame);
-    }
-    if (std.mem.eql(u8, name, "SuppressedError")) return try suppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
-    if (isErrorConstructorName(name)) return try errorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "DisposableStack")) return try disposableStackConstructWithPrototype(ctx, global, prototype.object());
-    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try asyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
-    if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
-
-    return null;
 }
 
-/// Promise construction with a distinct `new.target` must keep the observable
-/// VM `[[Get]]` used by GetPrototypeFromConstructor. The direct Promise helper
-/// can use its ordinary intrinsic data property, but Reflect.construct and
-/// derived `super()` must run an accessor/Proxy `newTarget.prototype` while
-/// the Promise native frame is active.
-fn constructPromiseBuiltinSuperNativeVm(
+/// The `builtin_method_ids.collection.ConstructorKind` of a Map / Set /
+/// WeakMap / WeakSet constructor.
+fn collectionConstructorId(kind: core.host_function.NativeConstructorKind) u32 {
+    const Collection = core.host_function.builtin_method_id_lookup.collection.ConstructorKind;
+    const collection: Collection = switch (kind) {
+        .map => .map,
+        .set => .set,
+        .weak_map => .weak_map,
+        .weak_set => .weak_set,
+        else => unreachable, // the caller's arm admits only the four collections
+    };
+    return @intFromEnum(collection);
+}
+
+/// `new Promise(executor)`: GetPrototypeFromConstructor runs a VM `[[Get]]`
+/// (an accessor or Proxy `newTarget.prototype`) inside the Promise native frame.
+fn constructPromiseNativeVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -766,13 +749,13 @@ fn constructPromiseBuiltinSuperNativeVm(
     native_scope.push();
     defer native_scope.deinit();
 
-    return constructPromiseBuiltinSuperInScope(ctx, output, global, new_target, args, caller_function, caller_frame) catch |err| {
+    return constructPromiseInScope(ctx, output, global, new_target, args, caller_function, caller_frame) catch |err| {
         try builtin_dispatch.materializeRuntimeError(ctx, global, err);
         return err;
     };
 }
 
-fn constructPromiseBuiltinSuperInScope(
+fn constructPromiseInScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -787,7 +770,6 @@ fn constructPromiseBuiltinSuperInScope(
         return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     if (!isCallableValue(executor)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
 
-    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Promise", new_target, caller_function, caller_frame);
-    defer prototype.deinit(ctx.runtime);
-    return promiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Promise", new_target, caller_function, caller_frame);
+    return promiseConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
 }

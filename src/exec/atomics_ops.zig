@@ -4,26 +4,19 @@
 //! The bodies lived in `call_runtime.zig` until 2026-08-20 (backlog H1): a
 //! thousand lines of a self-contained domain -- waiter registry, typed
 //! read-modify-write, the `*ForAtomics` coercions -- in the file that owns the
-//! call chain. Method IDs and wait primitives live with their handlers here;
-//! Promise construction/settlement is borrowed through `promise_ops.zig`.
+//! call chain. Method IDs, wait primitives, and the waitAsync Promise
+//! lifecycle live with their handlers here.
 
 const std = @import("std");
-const atomics_ops = @This();
 const core = @import("../core/root.zig");
 const jobs_mod = core.jobs;
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");
-const array_ops = @import("array_ops.zig");
-const coercion_ops = @import("value_ops.zig");
-const frame_mod = @import("frame.zig");
 const bytecode = @import("../bytecode.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const value_ops = @import("value_ops.zig");
-const HostError = @import("exception_ops.zig").HostError;
-const atomicsBufferObject = object_ops.atomicsBufferObject;
-const atomicsTypedArray = array_ops.atomicsTypedArray;
-const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
+const HostError = exception_ops.HostError;
 const defineValueProperty = object_ops.defineValueProperty;
 const objectFromValue = object_ops.objectFromValue;
 const promisePrototypeFromGlobal = promise_ops.promisePrototypeFromGlobal;
@@ -114,12 +107,10 @@ fn atomicsCall(
         realm.global,
         host_call.magic,
         host_call.args,
-        builtin_dispatch.callerBytecode(host_call),
-        builtin_dispatch.callerFrame(host_call),
     );
 }
 
-pub const AtomicsReadModifyOp = enum {
+const AtomicsReadModifyOp = enum {
     add,
     @"and",
     compareExchange,
@@ -130,12 +121,12 @@ pub const AtomicsReadModifyOp = enum {
     xor,
 };
 
-pub const AtomicsWaiterKey = struct {
+const AtomicsWaiterKey = struct {
     store: ?*core.object.SharedBufferStore = null,
     offset_or_ptr: usize,
 };
 
-pub const AtomicsWaiterCompletion = enum {
+const AtomicsWaiterCompletion = enum {
     waiting,
     notified,
     timed_out,
@@ -157,98 +148,84 @@ pub const AtomicsWaiter = struct {
     next: ?*AtomicsWaiter = null,
 };
 
-pub var atomics_waiter_mutex: std.Io.Mutex = .init;
-pub var atomics_waiters: ?*AtomicsWaiter = null;
+var atomics_waiter_mutex: std.Io.Mutex = .init;
+var atomics_waiters: ?*AtomicsWaiter = null;
 
-pub fn atomicsCallForNativeRecord(
+fn atomicsCallForNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return switch (id) {
-        @intFromEnum(StaticMethod.is_lock_free) => try atomicsIsLockFree(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.pause) => try atomicsPause(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.notify) => try atomicsNotify(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.wait) => try atomicsWait(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.wait_async) => try promise_ops.atomicsWaitAsync(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.store) => try atomicsStore(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.load) => try atomicsReadModifyWrite(ctx, output, global, args, .load, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.add) => try atomicsReadModifyWrite(ctx, output, global, args, .add, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.@"and") => try atomicsReadModifyWrite(ctx, output, global, args, .@"and", caller_function, caller_frame),
-        @intFromEnum(StaticMethod.@"or") => try atomicsReadModifyWrite(ctx, output, global, args, .@"or", caller_function, caller_frame),
-        @intFromEnum(StaticMethod.sub) => try atomicsReadModifyWrite(ctx, output, global, args, .sub, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.xor) => try atomicsReadModifyWrite(ctx, output, global, args, .xor, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .exchange, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.compare_exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .compareExchange, caller_function, caller_frame),
-        else => error.TypeError,
+    return switch (std.enums.fromInt(StaticMethod, id) orelse return error.TypeError) {
+        .is_lock_free => try atomicsIsLockFree(ctx, output, global, args),
+        .pause => try atomicsPause(ctx, output, global, args),
+        .notify => try atomicsNotify(ctx, output, global, args),
+        .wait => try atomicsWait(ctx, output, global, args),
+        .wait_async => try atomicsWaitAsync(ctx, output, global, args),
+        .store => try atomicsStore(ctx, output, global, args),
+        .load => try atomicsReadModifyWrite(ctx, output, global, args, .load),
+        .add => try atomicsReadModifyWrite(ctx, output, global, args, .add),
+        .@"and" => try atomicsReadModifyWrite(ctx, output, global, args, .@"and"),
+        .@"or" => try atomicsReadModifyWrite(ctx, output, global, args, .@"or"),
+        .sub => try atomicsReadModifyWrite(ctx, output, global, args, .sub),
+        .xor => try atomicsReadModifyWrite(ctx, output, global, args, .xor),
+        .exchange => try atomicsReadModifyWrite(ctx, output, global, args, .exchange),
+        .compare_exchange => try atomicsReadModifyWrite(ctx, output, global, args, .compareExchange),
     };
 }
 
-pub fn atomicsIsLockFree(
+fn atomicsIsLockFree(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const size_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const size = try toInt32ForAtomics(ctx, output, global, size_value, caller_function, caller_frame);
+    // ToIntegerOrInfinity, not ToInt32: 2^32 + 4 is not a lock-free size.
+    const size = @trunc(try toNumberForAtomics(ctx, output, global, size_value));
     return core.JSValue.boolean(size == 1 or size == 2 or size == 4 or size == 8);
 }
 
-pub fn atomicsPause(
+fn atomicsPause(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    _ = ctx;
     _ = output;
-    _ = global;
-    _ = caller_function;
-    _ = caller_frame;
     if (args.len >= 1 and !args[0].is(.undefined_value)) {
-        if (!args[0].isNumber()) return error.TypeError;
-        const number = value_ops.numberValue(args[0]) orelse std.math.nan(f64);
-        if (!std.math.isFinite(number) or @trunc(number) != number) return error.TypeError;
+        const number = value_ops.numberValue(args[0]) orelse return throwAtomicsTypeError(ctx, global, "not an integral number");
+        if (!std.math.isFinite(number) or @trunc(number) != number) return throwAtomicsTypeError(ctx, global, "not an integral number");
     }
     return core.JSValue.undefinedValue();
 }
 
-pub fn atomicsReadModifyWrite(
+fn atomicsReadModifyWrite(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
     atomic_op: AtomicsReadModifyOp,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try array_ops.atomicsTypedArray(view_value, false);
-    if (atomic_op != .load) try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, view);
+    const view = try atomicsTypedArray(ctx, global, view_value, false);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value, caller_function, caller_frame);
+    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value);
 
-    const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
+    const is_bigint = view.typedArrayKind().isBigInt();
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     const replacement_arg = if (args.len >= 4) args[3] else core.JSValue.undefinedValue();
     const operand = if (atomic_op == .load) @as(u64, 0) else if (is_bigint)
-        try toBigIntBitsForAtomics(ctx, output, global, value_arg, caller_function, caller_frame)
+        try toBigIntBitsForAtomics(ctx, output, global, value_arg)
     else
-        try toUint32ForAtomics(ctx, output, global, value_arg, caller_function, caller_frame);
+        try toUint32ForAtomics(ctx, output, global, value_arg);
     const replacement = if (atomic_op == .compareExchange) blk: {
         break :blk if (is_bigint)
-            try toBigIntBitsForAtomics(ctx, output, global, replacement_arg, caller_function, caller_frame)
+            try toBigIntBitsForAtomics(ctx, output, global, replacement_arg)
         else
-            try toUint32ForAtomics(ctx, output, global, replacement_arg, caller_function, caller_frame);
+            try toUint32ForAtomics(ctx, output, global, replacement_arg);
     } else @as(u64, 0);
     // js_atomics_op: LOAD coerces no operand, so qjs skips
     // the post-coercion re-check for it; every other op re-validates after
@@ -262,30 +239,27 @@ pub fn atomicsReadModifyWrite(
     return atomicsValueFromBits(ctx.runtime, view, old);
 }
 
-pub fn atomicsStore(
+fn atomicsStore(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try array_ops.atomicsTypedArray(view_value, false);
-    try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, view);
+    const view = try atomicsTypedArray(ctx, global, view_value, false);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value, caller_function, caller_frame);
+    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value);
 
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
+    const is_bigint = view.typedArrayKind().isBigInt();
     const stored_value = if (is_bigint)
-        try toBigIntValueForAtomics(ctx, output, global, value_arg, caller_function, caller_frame)
+        try toBigIntValueForAtomics(ctx, output, global, value_arg)
     else
-        try toIntegerValueForAtomics(ctx, output, global, value_arg, caller_function, caller_frame);
+        try toIntegerValueForAtomics(ctx, output, global, value_arg);
     const bits = if (is_bigint)
         try bigintBitsForAtomics(ctx.runtime, stored_value)
     else
-        try uint32FromIntegerValueForAtomics(ctx.runtime, stored_value);
+        uint32FromIntegerValueForAtomics(stored_value);
     // Mirrors js_atomics_store: re-check
     // typed_array_is_oob (TypeError) then the fresh count (RangeError) after
     // the value coercion ran user code.
@@ -295,21 +269,18 @@ pub fn atomicsStore(
     return stored_value;
 }
 
-pub fn atomicsNotify(
+fn atomicsNotify(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try array_ops.atomicsTypedArray(view_value, true);
+    const view = try atomicsTypedArray(ctx, global, view_value, true);
     const buffer = try object_ops.atomicsBufferObject(view);
-    if (buffer.class_id != core.class.ids.shared_array_buffer and buffer.arrayBufferDetached()) return error.TypeError;
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
-    const count = try atomicsNotifyCount(ctx, output, global, args, caller_function, caller_frame);
+    const index = try atomicsValidateAccess(ctx, output, global, view, index_value);
+    const count = try atomicsNotifyCount(ctx, output, global, args);
     if (buffer.class_id != core.class.ids.shared_array_buffer or count == 0) return core.JSValue.int32(0);
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
@@ -317,31 +288,29 @@ pub fn atomicsNotify(
     return core.JSValue.int32(@intCast(atomicsWakeWaiters(key, count)));
 }
 
-pub fn atomicsWait(
+fn atomicsWait(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try array_ops.atomicsTypedArray(view_value, true);
-    if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const view = try atomicsTypedArray(ctx, global, view_value, true);
+    if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return throwAtomicsTypeError(ctx, global, "not a SharedArrayBuffer TypedArray");
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
+    const index = try atomicsValidateAccess(ctx, output, global, view, index_value);
     const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const expected = if (array_ops.atomicsTypedArrayIsBigInt(view))
-        try toBigIntBitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame)
+    const expected = if (view.typedArrayKind().isBigInt())
+        try toBigIntBitsForAtomics(ctx, output, global, expected_arg)
     else
-        try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
+        try toUint32ForAtomics(ctx, output, global, expected_arg);
     const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.inf(f64));
-    const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
+    const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg);
     // Mirrors js_atomics_wait: the can-block check
     // runs after the operand coercions but BEFORE the memory load/compare, so
     // a non-blockable thread throws TypeError instead of returning
     // "not-equal".
-    if (!ctx.runtime.canBlock()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
+    if (!ctx.runtime.can_block) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
@@ -352,29 +321,32 @@ pub fn atomicsWait(
     return atomicsWaitForNotification(ctx.runtime, key, wait_ms);
 }
 
-pub fn atomicsNotifyCount(
+fn atomicsNotifyCount(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !usize {
     if (args.len < 3 or args[2].is(.undefined_value)) return std.math.maxInt(usize);
-    const count_value = try toIntegerValueForAtomics(ctx, output, global, args[2], caller_function, caller_frame);
-    const count_number = value_ops.numberValue(count_value) orelse return 0;
-    if (std.math.isNan(count_number) or count_number <= 0) return 0;
+    const count_value = try toIntegerValueForAtomics(ctx, output, global, args[2]);
+    // toIntegerValueForAtomics yields a non-NaN number.
+    const count_number = value_ops.numberValue(count_value).?;
+    if (count_number <= 0) return 0;
     if (!std.math.isFinite(count_number)) return std.math.maxInt(usize);
     return @intFromFloat(@min(count_number, @as(f64, @floatFromInt(std.math.maxInt(i32)))));
 }
 
-pub fn atomicsWaitTimeoutMilliseconds(timeout: f64) ?i64 {
-    if (std.math.isNan(timeout) or !std.math.isFinite(timeout)) return null;
+/// DoWait steps 7-8: NaN and +Infinity wait forever; -Infinity and negative
+/// timeouts do not wait. Saturates at the largest i64 milliseconds.
+fn atomicsWaitTimeoutMilliseconds(timeout: f64) ?i64 {
+    if (std.math.isNan(timeout) or timeout == std.math.inf(f64)) return null;
     if (timeout <= 0) return 0;
-    return @intFromFloat(@min(timeout, @as(f64, @floatFromInt(std.math.maxInt(i64)))));
+    // maxInt(i64) is not representable in f64; 0x1p63 is the first f64 past it.
+    if (timeout >= 0x1p63) return std.math.maxInt(i64);
+    return @intFromFloat(timeout);
 }
 
-pub fn atomicsWaiterKey(view: *core.Object, bytes: []const u8) !AtomicsWaiterKey {
+fn atomicsWaiterKey(view: *core.Object, bytes: []const u8) !AtomicsWaiterKey {
     const buffer = try object_ops.atomicsBufferObject(view);
     if (buffer.class_id == core.class.ids.shared_array_buffer) {
         if (buffer.sharedByteStorageStore()) |store| {
@@ -386,15 +358,15 @@ pub fn atomicsWaiterKey(view: *core.Object, bytes: []const u8) !AtomicsWaiterKey
     return .{ .offset_or_ptr = @intFromPtr(bytes.ptr) };
 }
 
-pub fn atomicsWaiterKeysEqual(a: AtomicsWaiterKey, b: AtomicsWaiterKey) bool {
+fn atomicsWaiterKeysEqual(a: AtomicsWaiterKey, b: AtomicsWaiterKey) bool {
     return a.store == b.store and a.offset_or_ptr == b.offset_or_ptr;
 }
 
-pub fn atomicsRetainWaiterKey(key: AtomicsWaiterKey) void {
+fn atomicsRetainWaiterKey(key: AtomicsWaiterKey) void {
     if (key.store) |store| store.retain();
 }
 
-pub fn atomicsReleaseWaiterKey(key: *AtomicsWaiterKey) void {
+fn atomicsReleaseWaiterKey(key: *AtomicsWaiterKey) void {
     if (key.store) |store| {
         store.release();
         key.store = null;
@@ -486,8 +458,8 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
             waiter_ctx,
             waiter,
             &waiter.promise.?,
-            promise_ops.atomicsRunAsyncWaiterCompletion,
-            promise_ops.atomicsDestroyAsyncWaiterOpaque,
+            atomicsRunAsyncWaiterCompletion,
+            atomicsDestroyAsyncWaiterOpaque,
         ) catch |err| {
             // Entry preparation may allocate or run GC. Retry the same frozen
             // completion later, but never while the global waiter mutex is
@@ -504,20 +476,6 @@ fn atomicsAsyncWaiterRuntime(waiter: *const AtomicsWaiter) ?*core.JSRuntime {
     if (waiter.promise == null) return null;
     const waiter_ctx = waiter.realm.borrow() orelse return null;
     return waiter_ctx.runtime;
-}
-
-/// Whether this Runtime owns a linked waitAsync node. This is host scheduling
-/// state only: callers use it to avoid blocking an OS poll that cannot observe
-/// the Runtime's allocation-free completion signal.
-pub fn atomicsRuntimeHasPendingAsyncWaiters(rt: *core.JSRuntime) bool {
-    const io = atomicsWaiterIo();
-    atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_waiter_mutex.unlock(io);
-    var cursor = atomics_waiters;
-    while (cursor) |waiter| : (cursor = waiter.next) {
-        if (atomicsAsyncWaiterRuntime(waiter) == rt) return true;
-    }
-    return false;
 }
 
 /// Wait for either a foreign waitAsync notification, the earliest finite
@@ -606,11 +564,11 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
         atomics_waiter_mutex.unlock(io);
 
         const waiter = removed orelse return;
-        promise_ops.atomicsDestroyAsyncWaiter(waiter);
+        atomicsDestroyAsyncWaiter(waiter);
     }
 }
 
-pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, timeout_ms: ?i64) !core.JSValue {
+fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, timeout_ms: ?i64) !core.JSValue {
     rt.assertOwnerThread();
     atomicsRetainWaiterKey(key);
     var retained_key = key;
@@ -621,16 +579,25 @@ pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, ti
     atomics_waiter_mutex.lockUncancelable(io);
     atomicsLinkWaiter(&waiter);
 
-    if (timeout_ms == null) {
-        while (waiter.completion == .waiting) waiter.cond.waitUncancelable(io, &atomics_waiter_mutex);
-    } else {
-        const deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms.?));
-        while (waiter.completion == .waiting) {
-            const now = std.Io.Timestamp.now(io, .awake);
-            if (now.nanoseconds >= deadline.nanoseconds) break;
+    // Waits in 1 ms slices so the interrupt handler and terminateExecution
+    // are observed while blocked (contract C8); a notification is seen at
+    // the next slice.
+    const deadline: ?std.Io.Timestamp = if (timeout_ms) |ms|
+        std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(ms))
+    else
+        null;
+    while (waiter.completion == .waiting) {
+        if (deadline) |limit| {
+            if (std.Io.Timestamp.now(io, .awake).nanoseconds >= limit.nanoseconds) break;
+        }
+        atomics_waiter_mutex.unlock(io);
+        const interrupted = rt.runInterruptHandler();
+        if (!interrupted) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        atomics_waiter_mutex.lockUncancelable(io);
+        if (interrupted and waiter.completion == .waiting) {
+            atomicsUnlinkWaiter(&waiter);
             atomics_waiter_mutex.unlock(io);
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-            atomics_waiter_mutex.lockUncancelable(io);
+            return error.Interrupted;
         }
     }
     const was_notified = waiter.completion == .notified;
@@ -641,7 +608,7 @@ pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, ti
     return value_ops.createStringValue(rt, if (was_notified) "ok" else "timed-out");
 }
 
-pub fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
+fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
     if (atomicsAsyncWaiterRuntime(waiter)) |rt| {
         rt.assertOwnerThread();
         rt.roots.assertMutable();
@@ -657,7 +624,7 @@ pub fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
     tail.next = waiter;
 }
 
-pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
+fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
     if (atomicsAsyncWaiterRuntime(waiter)) |rt| {
         rt.assertOwnerThread();
         rt.roots.assertMutable();
@@ -681,6 +648,15 @@ pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
     }
 }
 
+test "Atomics wait timeout follows DoWait and saturates" {
+    try std.testing.expectEqual(@as(?i64, null), atomicsWaitTimeoutMilliseconds(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(?i64, null), atomicsWaitTimeoutMilliseconds(std.math.inf(f64)));
+    try std.testing.expectEqual(@as(?i64, 0), atomicsWaitTimeoutMilliseconds(-std.math.inf(f64)));
+    try std.testing.expectEqual(@as(?i64, 0), atomicsWaitTimeoutMilliseconds(-1));
+    try std.testing.expectEqual(@as(?i64, 5), atomicsWaitTimeoutMilliseconds(5.9));
+    try std.testing.expectEqual(@as(?i64, std.math.maxInt(i64)), atomicsWaitTimeoutMilliseconds(1e300));
+}
+
 test "foreign Atomics notify only publishes a no-allocation completion" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -694,7 +670,7 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
         .promise = core.JSValue.int32(73),
         .realm = core.RealmRef.retain(ctx),
     };
-    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    atomicsLinkAsyncWaiter(waiter);
     var waiter_live = true;
     defer if (waiter_live) cleanupAtomicsWaitersForContext(ctx);
 
@@ -706,13 +682,13 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
             self.woken = atomicsWakeWaiters(self.key, 1);
         }
     };
-    const memory_before = rt.diagnostics.allocations.allocated_bytes;
+    const memory_before = rt.allocation_diagnostics.allocated_bytes;
     var attempt = Attempt{ .key = key };
     const thread = try std.Thread.spawn(.{}, Attempt.run, .{&attempt});
     thread.join();
 
     try std.testing.expectEqual(@as(usize, 1), attempt.woken);
-    try std.testing.expectEqual(memory_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(memory_before, rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expect(waiter.linked);
     try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
     try std.testing.expectEqual(@as(?i32, 73), waiter.promise.?.as(.int));
@@ -737,7 +713,7 @@ test "waitAsync finite deadline is driven by the owner host clock queue" {
         .realm = core.RealmRef.retain(ctx),
         .deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(1)),
     };
-    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    atomicsLinkAsyncWaiter(waiter);
     var waiter_linked = true;
     defer if (waiter_linked) cleanupAtomicsWaitersForContext(ctx);
 
@@ -773,7 +749,7 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
         .promise = promise.value(),
         .realm = core.RealmRef.retain(ctx),
     };
-    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    atomicsLinkAsyncWaiter(waiter);
     var waiter_live = true;
     defer if (waiter_live) cleanupAtomicsWaitersForContext(ctx);
 
@@ -804,8 +780,8 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     while (filler < 4) : (filler += 1) {
         try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(@intCast(filler)));
     }
-    // Fail in the backing allocator, after Runtime allocation helpers has invoked the GC
-    // trigger. A hard Runtime allocation helpers limit is rejected before that trigger and
+    // Fail in the backing allocator, after the runtime allocator has invoked
+    // the GC trigger. A hard runtime allocation limit is rejected before that trigger and
     // therefore cannot prove that the allocation site is outside the mutex.
     failing_allocator.fail_index = failing_allocator.alloc_index;
 
@@ -831,51 +807,51 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     try std.testing.expect(!promise.promiseIsRejected());
 }
 
-pub fn atomicsWaiterIo() std.Io {
+fn atomicsWaiterIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-pub fn atomicsValidateAccess(
+fn atomicsValidateAccess(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     object: *core.Object,
     index_value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !usize {
     const length = try core.object.typedArrayLength(ctx.runtime, object);
-    const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
-    if (index >= length) return error.RangeError;
+    const index = try toIndexForAtomics(ctx, output, global, index_value);
+    if (index >= length) {
+        _ = try exception_ops.throwRangeErrorMessage(ctx, global, "out-of-bound access");
+        unreachable;
+    }
     return index;
 }
 
-pub fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
+fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const length = try core.object.typedArrayLength(rt, object);
-    if (index >= length) return error.RangeError;
+    if (index >= length) return error.InvalidArrayIndex;
 }
 
 /// Mirrors js_atomics_get_buf for the non-waitable Atomics
-/// ops (is_waitable == 0): after the class check, a detached non-shared buffer
-/// throws TypeError BEFORE ToIndex; the view length is captured BEFORE ToIndex
+/// ops (is_waitable == 0): the caller's atomicsTypedArray already threw
+/// TypeError for a detached buffer BEFORE ToIndex; the view length is captured BEFORE ToIndex
 /// (`old_len`) so an index-coercion side effect that grows a length-tracking
 /// view cannot legitimize an index that was out of bounds at validation time
 /// (`idx >= old_len` -> RangeError); then RevalidateAtomicAccess re-checks
 /// typed_array_is_oob (-> TypeError) and the fresh count (-> RangeError).
-pub fn atomicsGetBufIndex(
+fn atomicsGetBufIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     view: *core.Object,
     index_value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !usize {
-    const buffer = try object_ops.atomicsBufferObject(view);
-    if (buffer.class_id != core.class.ids.shared_array_buffer and buffer.arrayBufferDetached()) return error.TypeError;
     const old_len = try core.object.typedArrayLength(ctx.runtime, view);
-    const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
-    if (index >= old_len) return error.RangeError;
+    const index = try toIndexForAtomics(ctx, output, global, index_value);
+    if (index >= old_len) {
+        _ = try exception_ops.throwRangeErrorMessage(ctx, global, "out-of-bound access");
+        unreachable;
+    }
     try atomicsRevalidateIndex(ctx.runtime, view, index);
     return index;
 }
@@ -883,12 +859,12 @@ pub fn atomicsGetBufIndex(
 /// Mirrors the js_atomics_op / js_atomics_store
 /// post-coercion re-check: typed_array_is_oob (detached or shrunk-resizable)
 /// -> TypeError, then the fresh count -> RangeError.
-pub fn atomicsRevalidateIndex(rt: *core.JSRuntime, view: *core.Object, index: usize) !void {
-    if (try core.object.typedArrayDetached(view) or try core.object.typedArrayOutOfBounds(view)) return error.TypeError;
+fn atomicsRevalidateIndex(rt: *core.JSRuntime, view: *core.Object, index: usize) !void {
+    if (try core.object.typedArrayDetached(view) or try core.object.typedArrayOutOfBounds(view)) return error.TypedArrayOutOfBounds;
     try atomicsValidateIndex(rt, view, index);
 }
 
-pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
+fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
     const buffer = try object_ops.atomicsBufferObject(object);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const offset = object.typedArrayByteOffset() + index * object.typedArrayElementSize();
@@ -901,7 +877,7 @@ pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
 /// atomic_load). Element pointers are naturally aligned: a typed array's
 /// byteOffset is a multiple of the element size and the backing allocation is
 /// at least 8-aligned.
-pub fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
+fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
     return switch (object.typedArrayElementSize()) {
         1 => @atomicLoad(u8, &bytes[0], .seq_cst),
         2 => @atomicLoad(u16, @as(*const u16, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
@@ -913,7 +889,7 @@ pub fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
 
 /// Seq-cst atomic element store (qjs js_atomics_store, quickjs.c
 /// atomic_store per width).
-pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
+fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
     switch (object.typedArrayElementSize()) {
         1 => @atomicStore(u8, &bytes[0], @truncate(value), .seq_cst),
         2 => @atomicStore(u16, @as(*u16, @ptrCast(@alignCast(bytes.ptr))), @truncate(value), .seq_cst),
@@ -925,10 +901,8 @@ pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
 
 /// Single-instruction atomic read-modify-write on one typed-array element,
 /// mirroring qjs js_atomics_op's per-width `OP(...)` atomic builtins
-/// plus the LOAD (60659-60669) and COMPARE_EXCHANGE
-/// (60671-60697) arms. The pre-fix read/compute/write sequence lost concurrent
-/// updates (two agents' Atomics.add could interleave), deadlocking the
-/// multi-agent test262 wait protocols.
+/// plus the LOAD and COMPARE_EXCHANGE arms. Each op is one atomic builtin so
+/// concurrent agents' updates cannot interleave.
 fn atomicsRmwTyped(
     comptime T: type,
     ptr: *T,
@@ -953,7 +927,7 @@ fn atomicsRmwTyped(
 
 /// Width-dispatched atomic RMW; returns the previous element value
 /// zero-extended to u64 (the same convention as `atomicsReadBits`).
-pub fn atomicsReadModifyWriteBits(
+fn atomicsReadModifyWriteBits(
     object: *core.Object,
     bytes: []u8,
     atomic_op: AtomicsReadModifyOp,
@@ -969,7 +943,7 @@ pub fn atomicsReadModifyWriteBits(
     };
 }
 
-pub fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
+fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
     return switch (object.typedArrayElementSize()) {
         1 => value & 0xff,
         2 => value & 0xffff,
@@ -978,161 +952,132 @@ pub fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
     };
 }
 
-pub fn atomicsValueFromBits(rt: *core.JSRuntime, object: *core.Object, bits: u64) !core.JSValue {
+fn atomicsValueFromBits(rt: *core.JSRuntime, object: *core.Object, bits: u64) !core.JSValue {
     return switch (object.typedArrayKind()) {
         .int8 => core.JSValue.int32(@as(i8, @bitCast(@as(u8, @truncate(bits))))),
         .uint8 => core.JSValue.int32(@as(u8, @truncate(bits))),
         .int16 => core.JSValue.int32(@as(i16, @bitCast(@as(u16, @truncate(bits))))),
         .uint16 => core.JSValue.int32(@as(u16, @truncate(bits))),
         .int32 => core.JSValue.int32(@as(i32, @bitCast(@as(u32, @truncate(bits))))),
-        .uint32 => atomicsNumberResult(@floatFromInt(@as(u32, @truncate(bits)))),
+        .uint32 => value_ops.numberToValue(@floatFromInt(@as(u32, @truncate(bits)))),
         .bigint64 => value_ops.createBigIntI128(rt, @as(i64, @bitCast(bits))),
         .biguint64 => value_ops.createBigIntI128(rt, @as(i128, bits)),
         else => error.TypeError,
     };
 }
 
-pub fn toIndexForAtomics(
+fn toIndexForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !usize {
-    const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
+    const number = try toNumberForAtomics(ctx, output, global, value);
     if (std.math.isNan(number)) return 0;
-    if (!std.math.isFinite(number)) return error.RangeError;
     const truncated = @trunc(number);
-    if (truncated < 0) return error.RangeError;
+    // ToIndex: RangeError outside [0, 2^53 - 1]; this also bounds the cast.
+    if (!(truncated >= 0 and truncated <= std.math.maxInt(u53))) {
+        _ = try exception_ops.throwRangeErrorMessage(ctx, global, "invalid array index");
+        unreachable;
+    }
     return @intFromFloat(truncated);
 }
 
-pub fn toNumberForAtomics(
+/// Install a TypeError with `message` and return the error to propagate.
+fn throwAtomicsTypeError(ctx: *core.JSContext, global: *core.Object, message: []const u8) HostError {
+    _ = try exception_ops.throwTypeErrorMessage(ctx, global, message);
+    unreachable;
+}
+
+/// ValidateIntegerTypedArray (25.4.3.1), plus the waitable restriction to
+/// Int32Array / BigInt64Array.
+fn atomicsTypedArray(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, waitable: bool) !*core.Object {
+    const object = objectFromValue(value) orelse return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
+    if (!core.object.isTypedArrayObject(object)) return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
+    const kind = object.typedArrayKind();
+    const ok = if (waitable)
+        kind == .int32 or kind == .bigint64
+    else
+        (kind.isInteger() and kind != .uint8_clamped) or kind.isBigInt();
+    if (!ok) return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
+    // ValidateTypedArray step 4: out of bounds (or detached) is a TypeError
+    // before the index is converted.
+    if (try core.object.typedArrayDetached(object)) return throwAtomicsTypeError(ctx, global, "ArrayBuffer is detached");
+    if (try core.object.typedArrayOutOfBounds(object)) return throwAtomicsTypeError(ctx, global, "TypedArray is out of bounds");
+    return object;
+}
+
+fn toNumberForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !f64 {
-    _ = caller_function;
-    _ = caller_frame;
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isBigInt()) return error.TypeError;
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, value);
+    if (primitive.isBigInt()) return throwAtomicsTypeError(ctx, global, "cannot convert bigint to number");
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     return value_ops.numberValue(number_value) orelse std.math.nan(f64);
 }
 
-pub fn toInt32ForAtomics(
+fn toUint32ForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !i32 {
-    const bits = try toUint32ForAtomics(ctx, output, global, value, caller_function, caller_frame);
-    return @bitCast(@as(u32, @truncate(bits)));
-}
-
-pub fn toInt32BitsForAtomics(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !u64 {
-    const int_value = try toInt32ForAtomics(ctx, output, global, value, caller_function, caller_frame);
-    return @as(u32, @bitCast(int_value));
+    return value_ops.toUint32Number(try toNumberForAtomics(ctx, output, global, value));
 }
 
-pub fn toUint32ForAtomics(
+fn toIntegerValueForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !u64 {
-    const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
-    const two32 = 4294967296.0;
-    var modulo = @mod(@trunc(number), two32);
-    if (modulo < 0) modulo += two32;
-    return @intFromFloat(modulo);
-}
-
-pub fn toIntegerValueForAtomics(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
+    const number = try toNumberForAtomics(ctx, output, global, value);
     if (std.math.isNan(number) or number == 0) return core.JSValue.int32(0);
     if (!std.math.isFinite(number)) return core.JSValue.float64(number);
-    return atomicsNumberResult(@trunc(number));
+    return value_ops.numberToValue(@trunc(number));
 }
 
-pub fn uint32FromIntegerValueForAtomics(rt: *core.JSRuntime, value: core.JSValue) !u64 {
-    _ = rt;
-    const number = value_ops.numberValue(value) orelse return 0;
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
-    const two32 = 4294967296.0;
-    var modulo = @mod(@trunc(number), two32);
-    if (modulo < 0) modulo += two32;
-    return @intFromFloat(modulo);
+fn uint32FromIntegerValueForAtomics(value: core.JSValue) u64 {
+    return value_ops.toUint32Number(value_ops.numberValue(value) orelse return 0);
 }
 
-pub fn toBigIntValueForAtomics(
+fn toBigIntValueForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    _ = caller_function;
-    _ = caller_frame;
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    var big = try value_ops.toBigIntValue(ctx.runtime, primitive);
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, value);
+    var big = value_ops.toBigIntValue(ctx.runtime, primitive) catch |err| switch (err) {
+        error.TypeError => return throwAtomicsTypeError(ctx, global, "cannot convert to BigInt"),
+        else => return err,
+    };
     defer big.deinit();
     return value_ops.createBigIntValue(ctx.runtime, big);
 }
 
-pub fn toBigIntBitsForAtomics(
+fn toBigIntBitsForAtomics(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !u64 {
-    const bigint_value = try toBigIntValueForAtomics(ctx, output, global, value, caller_function, caller_frame);
+    const bigint_value = try toBigIntValueForAtomics(ctx, output, global, value);
     return bigintBitsForAtomics(ctx.runtime, bigint_value);
 }
 
-pub fn atomicsNumberResult(value: f64) core.JSValue {
-    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !std.math.isNegativeZero(value)) {
-        return core.JSValue.int32(@intFromFloat(value));
-    }
-    return core.JSValue.float64(value);
-}
-
-pub fn bigintBitsForAtomics(rt: *core.JSRuntime, value: core.JSValue) !u64 {
+fn bigintBitsForAtomics(rt: *core.JSRuntime, value: core.JSValue) !u64 {
     var big = try value_ops.toBigIntValue(rt, value);
     defer big.deinit();
-    var low: u64 = 0;
-    if (big.limbs.len >= 1) low |= big.limbs[0];
-    if (big.limbs.len >= 2) low |= @as(u64, big.limbs[1]) << 32;
+    // ToBigInt64/ToBigUint64: the value modulo 2^64 (limbs are 64-bit).
+    const low: u64 = if (big.limbs.len != 0) big.limbs[0] else 0;
     return if (big.negative) 0 -% low else low;
 }
 
-pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
+fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     const rt = ctx.runtime;
     rt.assertOwnerThread();
@@ -1142,7 +1087,7 @@ pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     rt.nativeAllocator().destroy(waiter);
 }
 
-pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
+fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
     const waiter: *AtomicsWaiter = @ptrCast(@alignCast(raw_waiter));
     atomicsDestroyAsyncWaiter(waiter);
 }
@@ -1150,9 +1095,10 @@ pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
 /// Run one owner-thread waitAsync completion. `drainOnePendingJob` reserves the
 /// unlinked entry's queue slot before calling this function. Every failure is
 /// before Promise publication and leaves that reservation untouched so the
-/// typed completion can be restored at the FIFO head. Success consumes the
-/// reservation with the follow-up Promise job as its final no-fail step.
-pub fn atomicsRunAsyncWaiterCompletion(
+/// typed completion can be restored at the FIFO head. Success fulfills the
+/// promise like any other (its reactions are queued) and releases the
+/// reservation.
+fn atomicsRunAsyncWaiterCompletion(
     ctx: *core.JSContext,
     payload: *const jobs_mod.AtomicsWaiterPayload,
 ) core.errors.RuntimeError!void {
@@ -1184,46 +1130,17 @@ fn runAsyncWaiterCompletionRooted(ctx: *core.JSContext, payload: *const jobs_mod
     // End the borrowed object view at string allocation, then derive it from
     // the collector-updated root before touching any Promise fields.
     promise_object = objectFromValue(try promise_root.get(ctx.runtime)) orelse return error.TypeError;
-    const result_value = try result_root.get(ctx.runtime);
-    var prepared_job = jobs_mod.Job.initPromise(ctx, try promise_root.get(ctx.runtime));
-    var prepared_job_owned = true;
-    errdefer if (prepared_job_owned) prepared_job.deinit();
-
-    var reaction_arg_value: ?core.JSValue = null;
-    const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
-    if (needs_reaction_arg) {
-        reaction_arg_value = result_value;
-    }
-
-    if (promise_object.promiseReactionCallback() != null) {
-        // A .then/await already installed the lazy single reaction callback.
-        // Leave the promise result unset: settlePendingPromiseReaction runs that
-        // callback and then fires this promise's reaction list (which settles the
-        // chained .then promise). Pre-setting the result here would make that
-        // drain early-return (promiseResult != null) and drop the chain after the
-        // first reaction. The callback receives the settle value via the reaction
-        // arg below, which is where `result_value` ends up.
-    } else {
-        try promise_object.setPromiseResult(ctx.runtime, result_value);
-        promise_object.promiseIsRejectedSlot().* = false;
-    }
-    if (reaction_arg_value) |value| {
-        try promise_object.setPromiseReactionArg(ctx.runtime, value);
-        reaction_arg_value = null;
-    }
-    ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
-    prepared_job_owned = false;
+    try promise_ops.promiseSettleValue(ctx, promise_object, try result_root.get(ctx.runtime), false);
+    ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
 }
 
-pub fn atomicsWaitAsync(
+fn atomicsWaitAsync(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return waitAsyncRooted(ctx, output, global, args, caller_function, caller_frame) catch |err| switch (err) {
+    return waitAsyncRooted(ctx, output, global, args) catch |err| switch (err) {
         error.RootGenerationExhausted => error.OutOfMemory,
         error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("waitAsync input root contract: {s}", .{@errorName(err)}),
         else => |other| other,
@@ -1235,8 +1152,6 @@ fn waitAsyncRooted(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const rt = ctx.runtime;
     var roots = core.runtime.ExactValueRoots(6){};
@@ -1253,17 +1168,17 @@ fn waitAsyncRooted(
     try index_root.set(rt, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
     try expected_root.set(rt, if (args.len >= 3) args[2] else core.JSValue.undefinedValue());
     try timeout_root.set(rt, if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64)));
-    var view = try atomicsTypedArray(try view_root.get(rt), true);
-    if ((try atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
-    const index = try atomicsValidateAccess(ctx, output, objectFromValue(try global_root.get(rt)).?, view, try index_root.get(rt), caller_function, caller_frame);
-    view = try atomicsTypedArray(try view_root.get(rt), true);
+    var view = try atomicsTypedArray(ctx, objectFromValue(try global_root.get(rt)).?, try view_root.get(rt), true);
+    if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return throwAtomicsTypeError(ctx, objectFromValue(try global_root.get(rt)).?, "not a SharedArrayBuffer TypedArray");
+    const index = try atomicsValidateAccess(ctx, output, objectFromValue(try global_root.get(rt)).?, view, try index_root.get(rt));
+    view = try atomicsTypedArray(ctx, objectFromValue(try global_root.get(rt)).?, try view_root.get(rt), true);
     const expected_arg = try expected_root.get(rt);
-    const expected = if (atomicsTypedArrayIsBigInt(view))
-        try toBigIntBitsForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg, caller_function, caller_frame)
+    const expected = if (view.typedArrayKind().isBigInt())
+        try toBigIntBitsForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg)
     else
-        try toInt32BitsForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg, caller_function, caller_frame);
-    const timeout = try toNumberForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, try timeout_root.get(rt), caller_function, caller_frame);
-    view = try atomicsTypedArray(try view_root.get(rt), true);
+        try toUint32ForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg);
+    const timeout = try toNumberForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, try timeout_root.get(rt));
+    view = try atomicsTypedArray(ctx, objectFromValue(try global_root.get(rt)).?, try view_root.get(rt), true);
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
@@ -1284,9 +1199,6 @@ fn waitAsyncRooted(
     defer if (key_owned) atomicsReleaseWaiterKey(&key);
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, objectFromValue(try global_root.get(rt)).?));
     try promise_root.set(rt, promise);
-    if (objectFromValue(promise)) |promise_object| {
-        promise_object.promiseAtomicsWaitAsyncSlot().* = true;
-    }
     const deadline = if (atomicsWaitTimeoutMilliseconds(timeout)) |timeout_ms|
         std.Io.Timestamp.now(atomicsWaiterIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms))
     else
@@ -1317,15 +1229,14 @@ pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     ctx.runtime.assertOwnerThread();
     ctx.runtime.roots.assertMutable();
-    if (comptime core.runtime.value_root_frames_enabled) installWaitAsyncRootAdapter();
+    installWaitAsyncRootAdapter();
     const io = atomicsWaiterIo();
-    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_ops.atomics_waiter_mutex.unlock(io);
+    atomics_waiter_mutex.lockUncancelable(io);
+    defer atomics_waiter_mutex.unlock(io);
     atomicsLinkWaiter(waiter);
 }
 
 fn installWaitAsyncRootAdapter() void {
-    if (comptime !core.runtime.value_root_frames_enabled) return;
     if (core.runtime.trace_atomics_wait_async != null) return;
     core.runtime.trace_atomics_wait_async = traceWaitAsyncRoots;
 }
@@ -1383,7 +1294,7 @@ test "waitAsync detached handoff remains rooted during queue allocation" {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             if (self.called) return;
             self.called = true;
-            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch {
+            _ = self.rt.collectFull(null, .declared_only) catch {
                 self.failed = true;
             };
         }
@@ -1540,13 +1451,13 @@ test "waitAsync root trace repairs original slots outside the waiter lock" {
     try std.testing.expect(probe.lock_free);
     for (expected) |slot| try std.testing.expectEqual(@as(?i32, 73), slot.as(.int));
     try std.testing.expectEqual(@as(?i32, 99), foreign.promise.?.as(.int));
-    const native_before = rt.diagnostics.allocations.allocated_bytes;
+    const native_before = rt.allocation_diagnostics.allocated_bytes;
     for (expected) |slot| slot.* = core.JSValue.int32(0);
     probe.visits = 0;
     probe.fail_after = 3;
     try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
     try std.testing.expectEqual(@as(usize, 3), probe.visits);
-    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expect(!rt.roots.isTracing());
     for (expected, 0..) |slot, index| try std.testing.expectEqual(@as(?i32, if (index < 3) 73 else 0), slot.as(.int));
     probe.visits = 0;
@@ -1554,14 +1465,14 @@ test "waitAsync root trace repairs original slots outside the waiter lock" {
     try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
     try std.testing.expectEqual(@as(usize, 0), probe.visits);
     try std.testing.expect(!rt.roots.isTracing());
-    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
     probe.fail_header = false;
     rt.setNativeBytesLimitForTest(native_before);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
     try std.testing.expectEqual(@as(usize, 0), probe.visits);
     try std.testing.expect(!rt.roots.isTracing());
-    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "waitAsync root trace follows nursery relocation and foreign notification" {
@@ -1612,13 +1523,13 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     const io = atomicsWaiterIo();
     var storage: [16]*AtomicsWaiter = undefined;
 
-    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    atomics_waiter_mutex.lockUncancelable(io);
     var count: usize = 0;
-    var cursor = atomics_ops.atomics_waiters;
+    var cursor = atomics_waiters;
     while (cursor) |waiter| : (cursor = waiter.next) {
-        if (atomicsAsyncWaiterRuntime(waiter) == rt and waiter.promise != null) count += 1;
+        if (atomicsAsyncWaiterRuntime(waiter) == rt) count += 1;
     }
-    atomics_ops.atomics_waiter_mutex.unlock(io);
+    atomics_waiter_mutex.unlock(io);
     if (count == 0) return;
 
     // This allocator does not invoke GC/probes. Only this Runtime's owner
@@ -1630,9 +1541,9 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     defer if (extra.len != 0) rt.nativeAllocator().free(extra);
     const buf = if (extra.len != 0) extra else storage[0..count];
 
-    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    atomics_waiter_mutex.lockUncancelable(io);
     var filled: usize = 0;
-    cursor = atomics_ops.atomics_waiters;
+    cursor = atomics_waiters;
     while (cursor) |waiter| : (cursor = waiter.next) {
         if (atomicsAsyncWaiterRuntime(waiter) != rt) continue;
         // Snapshot nodes, never next pointers or copied values: foreign
@@ -1641,7 +1552,7 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
         buf[filled] = waiter;
         filled += 1;
     }
-    atomics_ops.atomics_waiter_mutex.unlock(io);
+    atomics_waiter_mutex.unlock(io);
 
     if (filled != count) @panic("async waiter population changed during tracing");
     for (buf[0..filled]) |waiter| {
@@ -1667,7 +1578,7 @@ fn waitAsyncResultRooted(ctx: *core.JSContext, is_async: bool, value: core.JSVal
     const input = try roots.ref(0);
     const output = try roots.ref(1);
     try input.set(ctx.runtime, value);
-    const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    const result = try core.Object.create(ctx.runtime, core.class.ids.object, ctx.classPrototypeObject(core.class.ids.object));
     try output.set(ctx.runtime, result.value());
     errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
     // Property definition still borrows its receiver and descriptor across
@@ -1700,7 +1611,7 @@ test "waitAsync result construction roots and pins survive allocation GC" {
             self.busy = true;
             defer self.busy = false;
             self.calls += 1;
-            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch {
+            _ = self.rt.collectFull(null, .declared_only) catch {
                 self.failed = true;
             };
         }
@@ -1751,7 +1662,7 @@ test "waitAsync result allocation failures unwind construction roots and pins" {
         }
         try std.testing.expectEqual(pins_before, rt.gc.pins.count());
         try std.testing.expect(rt.active_value_roots == root_head);
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         try std.testing.expect(rt.gc.containsHeader((try input.get(rt)).cycleMarkHeader().?));
         if (succeeded) break;
     }
@@ -1797,11 +1708,6 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
 
     _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-pub fn atomicsWaitAsyncPromise(rt: *core.JSRuntime, promise: *core.Object) bool {
-    _ = rt;
-    return promise.promiseAtomicsWaitAsync();
 }
 
 pub fn wakeAtomicsWaitersForRuntimes(primary: *core.JSRuntime, related: []const *core.JSRuntime) void {

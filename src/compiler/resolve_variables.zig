@@ -1,10 +1,9 @@
-//! Variable resolution with exact block-CFG liveness.
-//!
-//! Pass A builds one immutable LabelId CFG from the read-only Builder, then
-//! establishes the transactional output, short-form label bookkeeping, atom
-//! ownership, source carry, and the simple QuickJS rewrites. Pass B keeps that
-//! pass structure while delegating every binding decision and lowering writer
-//! to the shared `bytecode.binding_rules` surface.
+//! Variable resolution: one linear walk over the read-only Builder (quickjs.c
+//! resolve_variables) that skips dead code by label reference counts, keeps
+//! the transactional output, short-form label bookkeeping, borrowed atom
+//! ids and source carry, applies the simple QuickJS rewrites, and delegates
+//! every binding decision and lowering writer to the shared
+//! `bytecode.binding_rules` surface.
 
 const std = @import("std");
 const core = @import("../core/root.zig");
@@ -19,10 +18,10 @@ const op = opcode.op;
 const binding_rules = bytecode.binding_rules;
 const rules = binding_rules.surface;
 
-/// The binding-rules error set; the two passes share it.
+/// The binding-rules error set.
 pub const Error = binding_rules.Error;
 
-/// Output of the exact-CFG resolve pass (qjs shape: a fresh growable output
+/// Output of the resolve pass (qjs shape: a fresh growable output
 /// buffer, quickjs.c resolve_variables bc_out, plus the function's label
 /// slots updated to output offsets as labels are passed).
 pub const ResolvedProduct = struct {
@@ -31,11 +30,11 @@ pub const ResolvedProduct = struct {
     code: []u8 = &.{},
     code_capacity: usize = 0,
     code_len: u32 = 0,
-    /// Owned (retained) atoms, lockstep with atom-bearing opcodes of code.
+    /// Borrowed atom ids, lockstep with atom-bearing opcodes of code.
     atom_operands: []core.atom.Atom = &.{},
     atom_capacity: usize = 0,
     atom_len: u32 = 0,
-    /// Same label indices as the input builder (Pass B may append new ones).
+    /// Same label indices as the input builder (this pass may append new ones).
     /// bound_offset = OUTPUT offset for labels passed in live code (qjs
     /// LabelSlot.pos2), labels.unbound for labels inside removed dead
     /// regions; ref_count = retained-reference count after qjs update_label
@@ -51,6 +50,23 @@ pub const ResolvedProduct = struct {
     source_len: u32 = 0,
     /// qjs s->jump_size analog counted by this pass.
     jump_size: u32 = 0,
+
+    /// Adjust `label_index`'s reference count by `delta` and return the new
+    /// count. A count that would go negative or overflow is corrupt input.
+    pub fn updateLabel(self: *ResolvedProduct, label_index: u32, delta: i32) error{InvalidBytecode}!u32 {
+        if (label_index >= self.label_len) return error.InvalidBytecode;
+        const slot = &self.label_slots[label_index];
+        if (delta < 0) {
+            const amount: u32 = @intCast(-@as(i64, delta));
+            if (slot.ref_count < amount) return error.InvalidBytecode;
+            slot.ref_count -= amount;
+        } else if (delta > 0) {
+            const amount: u32 = @intCast(delta);
+            slot.ref_count = std.math.add(u32, slot.ref_count, amount) catch
+                return error.InvalidBytecode;
+        }
+        return slot.ref_count;
+    }
 
     /// FREE AT THE CONSUMPTION POINT: the S4 walk is the last reader of the
     /// resolved stream, the atom ledger and the source markers. They become
@@ -80,54 +96,21 @@ pub const ResolvedProduct = struct {
     /// (rooted by the compile's CompileAtomScope), so there is nothing to
     /// release per item. Idempotent. Mirrors Builder.deinit discipline.
     pub fn deinitUncommitted(self: *ResolvedProduct) void {
-        if (self.code_capacity != 0) self.memory.free(self.code);
-        if (self.atom_capacity != 0) self.memory.free(self.atom_operands);
+        self.releaseConsumedStreams();
         if (self.label_capacity != 0) self.memory.free(self.label_slots);
-        if (self.source_capacity != 0) self.memory.free(self.source_slots);
-
-        self.code = &.{};
-        self.code_capacity = 0;
-        self.code_len = 0;
-        self.atom_operands = &.{};
-        self.atom_capacity = 0;
-        self.atom_len = 0;
         self.label_slots = &.{};
         self.label_capacity = 0;
         self.label_len = 0;
-        self.source_slots = &.{};
-        self.source_capacity = 0;
-        self.source_len = 0;
         self.jump_size = 0;
     }
 };
 
-/// Geometric grow walk is the already-linked `builder.reserve` /
-/// `reserveSlowBytes` body. This pass still owns its output slices.
 const TempInstruction = temp_stream.TempInstruction;
 // Sequential walks have the exact atom-ledger cursor for their current pc and
 // enforce the QuickJS phase-1 opcode view. Random-access pattern probes compare
 // their exact fixed-width opcodes directly, like QuickJS `code_match`.
 const phase1Instruction = temp_stream.phase1Instruction;
 const BindEntry = temp_stream.BindEntry;
-
-fn updateLabel(product: *ResolvedProduct, label_index: u32, delta: i32) Error!u32 {
-    if (label_index >= product.label_len) return error.InvalidBytecode;
-    std.debug.assert(label_index < product.label_len);
-    const slot = &product.label_slots[label_index];
-
-    if (delta < 0) {
-        const amount: u32 = @intCast(-@as(i64, delta));
-        if (slot.ref_count < amount) return error.InvalidBytecode;
-        std.debug.assert(slot.ref_count >= amount);
-        slot.ref_count -= amount;
-    } else if (delta > 0) {
-        const amount: u32 = @intCast(delta);
-        slot.ref_count = std.math.add(u32, slot.ref_count, amount) catch
-            return error.InvalidBytecode;
-    }
-    std.debug.assert(@as(i64, slot.ref_count) >= 0);
-    return slot.ref_count;
-}
 
 const PendingTailRewrite = struct {
     input_offset: u32,
@@ -207,8 +190,7 @@ const Resolver = struct {
     /// recorded by `FunctionDef.closure_var_may_have_dynamic_env` at its single
     /// append point.  `false` therefore proves `needsDynamicEnvProbes` would
     /// return false for every (atom, level); `true` merely opens the precise
-    /// existing chain.  Audit builds run the full chain regardless and assert
-    /// the gate never suppresses a required probe walk (see callers).
+    /// existing chain.
     inline fn dynamicEnvProbesPossible(self: *const Resolver) bool {
         if (self.has_dynamic_env_objects) return true;
         // Fail closed: a missing FunctionDef opens the gate so the full chain
@@ -324,6 +306,25 @@ const Resolver = struct {
         if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
     }
 
+    const Write = struct {
+        code: []u8,
+        atoms: []core.atom.Atom,
+        idx: usize = 0,
+        atom_idx: usize = 0,
+    };
+
+    /// Reserve `code_need` bytes and `atom_need` atom operands at the end of
+    /// the product; pair with `defer self.finishLegacyWrite(w.idx, w.atom_idx)`.
+    fn beginWrite(self: *Resolver, code_need: usize, atom_need: usize) Error!Write {
+        try self.prepareLegacyWrite(code_need, atom_need);
+        const code_start: usize = @intCast(self.product.code_len);
+        const atom_start: usize = @intCast(self.product.atom_len);
+        return .{
+            .code = self.product.code[code_start..][0..code_need],
+            .atoms = self.product.atom_operands[atom_start..][0..atom_need],
+        };
+    }
+
     fn finishLegacyWrite(
         self: *Resolver,
         code_used: usize,
@@ -369,22 +370,18 @@ const Resolver = struct {
     ) Error!void {
         const code_need = rules.scopeVarActionSize(action);
         const atom_need = rules.scopeVarActionAtomCount(action);
-        try self.prepareLegacyWrite(code_need, atom_need);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
+        var w = try self.beginWrite(code_need, atom_need);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
         try rules.writeScopeVarAction(
             self.ctx.function,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            self.product.atom_operands[atom_start..][0..atom_need],
-            &out_atom_idx,
+            w.code,
+            &w.idx,
+            w.atoms,
+            &w.atom_idx,
             atom_id,
             action,
         );
-        if (out_idx != code_need or out_atom_idx != atom_need)
+        if (w.idx != code_need or w.atom_idx != atom_need)
             return error.InvalidBytecode;
     }
 
@@ -438,30 +435,26 @@ const Resolver = struct {
         if (probe_size != 10) return error.InvalidBytecode;
         const code_need = std.math.add(usize, accessor_size, probe_size) catch
             return error.BytecodeOverflow;
-        try self.prepareLegacyWrite(code_need, 1);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
+        var w = try self.beginWrite(code_need, 1);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
 
-        const output = self.product.code[code_start..][0..code_need];
-        try rules.writeEvalVarObjectProbeAccessor(self.ctx, output, &out_idx, probe);
-        if (out_idx != accessor_size or out_idx + probe_size > output.len)
+        const output = w.code;
+        try rules.writeEvalVarObjectProbeAccessor(self.ctx, output, &w.idx, probe);
+        if (w.idx != accessor_size or w.idx + probe_size > output.len)
             return error.InvalidBytecode;
-        output[out_idx] = op.dyn_env_probe;
-        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id.raw(), .little);
-        std.mem.writeInt(u32, output[out_idx + 5 ..][0..4], label_done, .little);
-        output[out_idx + 9] = (opcode.dyn_env.Flags{
+        output[w.idx] = op.dyn_env_probe;
+        std.mem.writeInt(u32, output[w.idx + 1 ..][0..4], atom_id.raw(), .little);
+        std.mem.writeInt(u32, output[w.idx + 5 ..][0..4], label_done, .little);
+        output[w.idx + 9] = (opcode.dyn_env.Flags{
             .kind = kind,
             .is_with = rules.evalVarObjectProbeIsWith(probe),
         }).encode();
-        self.product.atom_operands[atom_start] = atom_id;
-        out_atom_idx = 1;
-        out_idx += probe_size;
-        if (out_idx != code_need) return error.InvalidBytecode;
+        w.atoms[0] = atom_id;
+        w.atom_idx = 1;
+        w.idx += probe_size;
+        if (w.idx != code_need) return error.InvalidBytecode;
 
-        _ = try updateLabel(self.product, label_done, 1);
+        _ = try self.product.updateLabel(label_done, 1);
         try self.incrementJumpSize();
     }
 
@@ -485,12 +478,8 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
         scope_level: i32,
     ) Error!bool {
-        if (!rules.scopeVarDynamicProbeEligible(atom_id, scope_level) or
-            !try self.hasDynamicEnvObjects())
-        {
-            return false;
-        }
-        return true;
+        return rules.scopeVarDynamicProbeEligible(atom_id, scope_level) and
+            try self.hasDynamicEnvObjects();
     }
 
     /// QuickJS emits dynamic-environment probes while walking the binding
@@ -504,11 +493,15 @@ const Resolver = struct {
         scope_level: i32,
         kind: opcode.dyn_env.ProbeKind,
         binding: rules.ScopeVarBindingAlias,
+        var_env_only: bool,
     ) Error!?u32 {
         var label_done: ?u32 = null;
 
+        // A variable-environment store (Annex B's eval copy) skips `with`
+        // objects and probes only the eval var objects.
         var with_iter = rules.localWithProbeIteratorInit(self.ctx, atom_id, scope_level);
         while (rules.localWithProbeIteratorNext(&with_iter)) |idx| {
+            if (var_env_only) continue;
             const label_index = try self.ensureDynamicEnvLabel(&label_done);
             try self.emitDynamicEnvProbe(atom_id, .{ .with_local = idx }, kind, label_index);
         }
@@ -540,9 +533,13 @@ const Resolver = struct {
                     label_index,
                 );
             }
+            // A function expression's own name stops before the enclosing
+            // environments.
+            if (rules.resolvedBindingIsLocalFunctionName(self.ctx, binding)) return label_done;
             var closure_iter = rules.closureDynamicEnvProbeIteratorInitResolved(self.ctx, binding);
             while (rules.closureDynamicEnvProbeIteratorNext(&closure_iter)) |idx| {
                 if (idx >= fd.closure_var.len) return error.InvalidBytecode;
+                if (var_env_only and fd.closure_var[idx].var_name == core.atom.ids.with_object) continue;
                 const label_index = try self.ensureDynamicEnvLabel(&label_done);
                 try self.emitDynamicEnvProbe(
                     atom_id,
@@ -561,21 +558,17 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
     ) Error!void {
         const code_need = rules.throw_error_instr_size;
-        try self.prepareLegacyWrite(code_need, 1);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
+        var w = try self.beginWrite(code_need, 1);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
         rules.writeThrowVarRedeclaration(
             self.ctx.function,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            self.product.atom_operands[atom_start..][0..1],
-            &out_atom_idx,
+            w.code,
+            &w.idx,
+            w.atoms,
+            &w.atom_idx,
             atom_id,
         );
-        if (out_idx != code_need or out_atom_idx != 1)
+        if (w.idx != code_need or w.atom_idx != 1)
             return error.InvalidBytecode;
     }
 
@@ -584,25 +577,20 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
         scope_level: i32,
     ) Error!void {
-        const code_need = rules.loweredScopeDeleteVarSize(self.ctx, atom_id, scope_level);
-        const atom_need: usize = @intFromBool(code_need == 5);
-        try self.prepareLegacyWrite(code_need, atom_need);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
-        try rules.writeLoweredScopeDeleteVar(
-            self.ctx,
-            self.ctx.function,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            self.product.atom_operands[atom_start..][0..atom_need],
-            &out_atom_idx,
+        const is_dynamic = rules.loweredScopeDeleteVarIsDynamic(self.ctx, atom_id, scope_level);
+        const code_need: usize = if (is_dynamic) 5 else 1;
+        const atom_need: usize = @intFromBool(is_dynamic);
+        var w = try self.beginWrite(code_need, atom_need);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
+        rules.writeLoweredScopeDeleteVar(
+            w.code,
+            &w.idx,
+            w.atoms,
+            &w.atom_idx,
             atom_id,
-            scope_level,
+            is_dynamic,
         );
-        if (out_idx != code_need or out_atom_idx != atom_need)
+        if (w.idx != code_need or w.atom_idx != atom_need)
             return error.InvalidBytecode;
     }
 
@@ -611,7 +599,8 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
         scope_level: i32,
     ) Error!void {
-        const code_need = rules.loweredScopeGetRefSize(self.ctx, atom_id, scope_level);
+        const plan = rules.loweredScopeGetRefPlan(self.ctx, atom_id, scope_level);
+        const code_need = plan.size();
         try self.prepareLegacyWrite(code_need, 0);
         const code_start: usize = @intCast(self.product.code_len);
         var out_idx: usize = 0;
@@ -621,7 +610,7 @@ const Resolver = struct {
             self.product.code[code_start..][0..code_need],
             &out_idx,
             atom_id,
-            scope_level,
+            plan,
         );
         if (out_idx != code_need) return error.InvalidBytecode;
     }
@@ -631,25 +620,21 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
         scope_level: i32,
     ) Error!void {
-        const code_need = rules.loweredScopeMakeRefSize(self.ctx, atom_id, scope_level);
-        const atom_need = rules.loweredScopeMakeRefAtomCount(self.ctx, atom_id, scope_level);
-        try self.prepareLegacyWrite(code_need, atom_need);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
-        try rules.writeLoweredScopeMakeRef(
-            self.ctx,
+        const plan = rules.loweredScopeMakeRefPlan(self.ctx, atom_id, scope_level);
+        const code_need = plan.size();
+        const atom_need = plan.atomCount();
+        var w = try self.beginWrite(code_need, atom_need);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
+        rules.writeLoweredScopeMakeRef(
             self.ctx.function,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            self.product.atom_operands[atom_start..][0..atom_need],
-            &out_atom_idx,
+            w.code,
+            &w.idx,
+            w.atoms,
+            &w.atom_idx,
             atom_id,
-            scope_level,
+            plan,
         );
-        if (out_idx != code_need or out_atom_idx != atom_need)
+        if (w.idx != code_need or w.atom_idx != atom_need)
             return error.InvalidBytecode;
     }
 
@@ -668,24 +653,20 @@ const Resolver = struct {
             resolution,
         );
         const atom_need = rules.loweredPrivateFieldAtomCount(op_id, resolution);
-        try self.prepareLegacyWrite(code_need, atom_need);
-        const code_start: usize = @intCast(self.product.code_len);
-        const atom_start: usize = @intCast(self.product.atom_len);
-        var out_idx: usize = 0;
-        var out_atom_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, out_atom_idx);
+        var w = try self.beginWrite(code_need, atom_need);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
         try rules.writeLoweredPrivateField(
             self.ctx,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            self.product.atom_operands[atom_start..][0..atom_need],
-            &out_atom_idx,
+            w.code,
+            &w.idx,
+            w.atoms,
+            &w.atom_idx,
             op_id,
             atom_id,
             scope_level,
             resolution,
         );
-        if (out_idx != code_need or out_atom_idx != atom_need)
+        if (w.idx != code_need or w.atom_idx != atom_need)
             return error.InvalidBytecode;
     }
 
@@ -752,12 +733,12 @@ const Resolver = struct {
     fn emitProductJump(self: *Resolver, op_id: u8, label_index: u32) Error!void {
         if (label_index >= self.product.label_len) return error.InvalidBytecode;
         try self.emitWideU32(op_id, label_index);
-        _ = try updateLabel(self.product, label_index, 1);
+        _ = try self.product.updateLabel(label_index, 1);
         try self.incrementJumpSize();
     }
 
-    /// qjs instantiate_hoisted_definitions at the function-body scope
-    ///. Keep every branch operand label-native; Stage
+    /// qjs instantiate_hoisted_definitions at the function-body scope.
+    /// Keep every branch operand label-native; Stage
     /// 4 alone converts the module-body LabelId into a relative displacement.
     fn emitBodyHoists(self: *Resolver) Error!void {
         const fd = self.ctx.function_def orelse return error.NoFunctionDef;
@@ -798,10 +779,9 @@ const Resolver = struct {
                         // EvalDeclarationInstantiation creates a new var
                         // object property only when the name is absent, so a
                         // repeated direct-eval `var x` must preserve the
-                        // existing value and binding cell. Identity-native
-                        // twin of the legacy `writeBodyHoists` guard: the
-                        // branch destination is a LabelId here, and Stage 4
-                        // alone turns it into a displacement.
+                        // existing value and binding cell. The branch
+                        // destination is a LabelId; Stage 4 turns it into a
+                        // displacement.
                         const defined_label = try self.newProductLabel();
                         try self.emitAtomWide(op.get_field2, gv.var_name);
                         try self.emitInstruction(&.{ op.ext0, opcode.ext0_sub.is_undefined }, null);
@@ -1000,7 +980,6 @@ const Resolver = struct {
 
     fn consumeInputAtom(
         self: *Resolver,
-        _: u32,
         instruction: TempInstruction,
     ) Error!?core.atom.Atom {
         if (!instruction.has_atom) return null;
@@ -1220,7 +1199,7 @@ const Resolver = struct {
         aux_label: u32,
         binding: rules.ScopeVarBindingAlias,
     ) Error!?MakeRefFold {
-        if (rules.evalVarObjectProbePlan(
+        if (try rules.evalVarObjectProbePlan(
             self.ctx,
             atom_id,
             scope_operand.level,
@@ -1323,13 +1302,12 @@ const Resolver = struct {
         self: *Resolver,
         start: u32,
         expected_branch: u8,
-        transparent_start_binds: bool,
     ) Error!?BranchDropMatch {
         if (start >= self.code.len) return null;
         if (self.code[start] != op.dup) return null;
         const branch_start = start + 1;
         const tail = (try self.matchBranchDrop(branch_start, expected_branch, true)) orelse return null;
-        if (self.hasBindInRange(start, tail.after, transparent_start_binds)) return null;
+        if (self.hasBindInRange(start, tail.after, true)) return null;
         return tail;
     }
 
@@ -1342,7 +1320,6 @@ const Resolver = struct {
         self: *Resolver,
         start: u32,
         expected_branch: u8,
-        transparent_start_binds: bool,
     ) Error!?BareBranchMatch {
         if (start >= self.code.len) return null;
         if (self.code[start] != expected_branch) return null;
@@ -1350,7 +1327,7 @@ const Resolver = struct {
         if (branch_size != 5 or branch_size > self.code.len - start)
             return error.InvalidBytecode;
         const after = start + branch_size;
-        if (self.hasBindInRange(start, after, transparent_start_binds)) return null;
+        if (self.hasBindInRange(start, after, true)) return null;
         return .{ .label_index = try self.labelAt(start, 1), .after = after };
     }
 
@@ -1360,12 +1337,10 @@ const Resolver = struct {
         after: u32,
     };
 
-    /// The legacy phase-1 stream materializes a changed source position as an
-    /// inline `line_num` instruction. Its local indexed-store matcher requires
-    /// the three opcodes to be byte-adjacent, so an effective transition at an
-    /// interior offset is a fold barrier. Builder retains repeated marker calls
-    /// too; those are not barriers because legacy `emitSourcePos` suppresses an
-    /// unchanged source offset.
+    /// A changed source position between the opcodes of an indexed-store fold
+    /// is a fold barrier (folding would drop that position).
+    /// Builder retains repeated marker calls too; a marker that repeats the
+    /// previous position changes nothing and is not a barrier.
     fn hasSourceTransitionAt(self: *const Resolver, input_pos: u32) bool {
         var low: usize = 0;
         var high: usize = self.input_sources.len;
@@ -1457,19 +1432,19 @@ const Resolver = struct {
                 position,
                 self.atom_index,
             );
-            _ = try self.consumeInputAtom(position, instruction);
+            _ = try self.consumeInputAtom(instruction);
             const op_id = self.code[position];
 
             // qjs:34137-34152.
             switch (op_id) {
                 op.if_false, op.if_true, op.goto, op.@"catch", op.gosub => {
                     const label_index = try self.labelAt(position, 1);
-                    _ = try updateLabel(self.product, label_index, -1);
+                    _ = try self.product.updateLabel(label_index, -1);
                 },
                 op.scope_make_ref => {
                     if (instruction.is_temp) {
                         const label_index = try self.labelAt(position, 5);
-                        _ = try updateLabel(self.product, label_index, -1);
+                        _ = try self.product.updateLabel(label_index, -1);
                     }
                 },
                 else => {
@@ -1479,7 +1454,7 @@ const Resolver = struct {
                         opcode.formatOf(op_id);
                     if (format == .atom_label_u8 or format == .atom_label_u16) {
                         const label_index = try self.labelAt(position, 5);
-                        _ = try updateLabel(self.product, label_index, -1);
+                        _ = try self.product.updateLabel(label_index, -1);
                     }
                 },
             }
@@ -1502,18 +1477,20 @@ const Resolver = struct {
             atom_id,
             scope_operand.level,
             op_id,
+            scope_operand.no_dynamic_env,
         );
         var label_done: ?u32 = null;
         // Gate the whole qualification chain on the per-function predicate
         // (qjs:32973 is only reached from walk events, never per op).
         if (self.dynamicEnvProbesPossible()) {
-            if (rules.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env)) |kind| {
+            if (rules.scopeVarProbeKind(op_id)) |kind| {
                 if (try self.needsDynamicEnvProbes(atom_id, scope_operand.level)) {
                     label_done = try self.emitDynamicEnvProbes(
                         atom_id,
                         scope_operand.level,
                         rules.scopeVarProbeWireKind(kind),
                         rules.resolvedScopeVarPlanBinding(plan),
+                        scope_operand.no_dynamic_env,
                     );
                 }
             }
@@ -1552,6 +1529,7 @@ const Resolver = struct {
                     scope_operand.level,
                     rules.scopeVarProbeWireKind(probe_kind),
                     binding,
+                    false,
                 );
             }
         }
@@ -1574,7 +1552,7 @@ const Resolver = struct {
         const pc: usize = @intCast(position);
         const aux_label = try self.labelAt(position, 5);
         // qjs:34284. The parser's auxiliary association is never a runtime jump.
-        _ = try updateLabel(self.product, aux_label, -1);
+        _ = try self.product.updateLabel(aux_label, -1);
 
         const scope_operand = rules.decodeScopeOperand(self.code[pc + 9 ..][0..2]);
         const binding = try rules.resolveScopeVarBindingTopology(
@@ -1595,9 +1573,6 @@ const Resolver = struct {
                 fold.emit_dup,
                 fold.put_action,
             );
-            // Product offset the consumed head resolves to. Nothing has been
-            // emitted since the caller's passBindsAt(position), so this is
-            // exactly where a label bound at `position` was bound.
             var next = position_next;
             if (fold.reads_value) {
                 try self.passSideEventsThrough(position_next);
@@ -1617,6 +1592,7 @@ const Resolver = struct {
                 scope_operand.level,
                 .make_ref,
                 binding,
+                false,
             )
         else
             null;
@@ -1639,10 +1615,11 @@ const Resolver = struct {
             atom_id,
             scope_operand.level,
         );
-        const resolution = rules.resolvePrivateField(
+        const resolution = rules.resolvePrivate(
             self.ctx,
             atom_id,
             scope_operand.level,
+            .name,
         ) orelse return error.ClosureVarNotFound;
         try self.writeLoweredPrivateField(
             op_id,
@@ -1661,8 +1638,10 @@ const Resolver = struct {
                 try self.emitThrowVarRedeclaration(global_var.var_name);
             }
         }
+        const interrupt_runtime = self.ctx.function.interrupt_runtime;
         var position: u32 = 0;
         while (position < self.input.code_len) {
+            if (interrupt_runtime) |rt| try rt.pollNativeWork();
             try self.passSideEventsThrough(position);
 
             if (try self.pendingTailRewriteAt(position)) |rewrite_index| {
@@ -1679,7 +1658,7 @@ const Resolver = struct {
             // phase1Instruction proved this cursor advance is within the
             // u32-sized input stream.
             var position_next = position + instruction.size;
-            const input_atom = try self.consumeInputAtom(position, instruction);
+            const input_atom = try self.consumeInputAtom(instruction);
             const op_id = self.code[position];
 
             switch (op_id) {
@@ -1696,7 +1675,7 @@ const Resolver = struct {
                     if (slot.bound_offset < self.input.code_len and
                         self.code[slot.bound_offset] == op.ret)
                     {
-                        _ = try updateLabel(self.product, label_index, -1);
+                        _ = try self.product.updateLabel(label_index, -1);
                     } else {
                         try self.copyInputInstruction(position, instruction, input_atom);
                     }
@@ -1733,11 +1712,7 @@ const Resolver = struct {
                     if (try self.matchBranchDrop(position_next, null, false)) |first| {
                         var target_position = try self.getLabelPos(first.label_index);
                         var chain_count: u8 = 0;
-                        while (try self.matchDupBranchDrop(
-                            target_position,
-                            first.branch_op,
-                            true,
-                        )) |chain| {
+                        while (try self.matchDupBranchDrop(target_position, first.branch_op)) |chain| {
                             // qjs:34466-34496 has no semantic depth limit. The
                             // cap is only bounded search work: stop chasing and
                             // let the final match fail back to the plain dup.
@@ -1745,14 +1720,10 @@ const Resolver = struct {
                             chain_count += 1;
                             target_position = try self.getLabelPos(chain.label_index);
                         }
-                        if (try self.matchBareBranch(
-                            target_position,
-                            first.branch_op,
-                            true,
-                        )) |target| {
+                        if (try self.matchBareBranch(target_position, first.branch_op)) |target| {
                             try self.incrementJumpSize();
-                            _ = try updateLabel(self.product, first.label_index, -1);
-                            _ = try updateLabel(self.product, target.label_index, 1);
+                            _ = try self.product.updateLabel(first.label_index, -1);
+                            _ = try self.product.updateLabel(target.label_index, 1);
                             var rewritten: [5]u8 = undefined;
                             rewritten[0] = first.branch_op;
                             std.mem.writeInt(u32, rewritten[1..5], target.label_index, .little);
@@ -1841,58 +1812,23 @@ const Resolver = struct {
                     try self.emitInstruction(&rewritten, null);
                 },
 
-                // qjs:34263.
-                op.scope_get_var_checkthis => {
+                // qjs:34263-34266, 34269.
+                op.scope_get_var_checkthis,
+                op.scope_get_var_undef,
+                op.scope_get_var,
+                op.scope_put_var,
+                op.scope_put_var_init,
+                => {
                     if (instruction.is_temp)
                         try self.lowerScopeVar(position, op_id, input_atom.?)
                     else
                         try self.copyInputInstruction(position, instruction, input_atom);
                 },
 
-                // qjs:34264.
-                op.scope_get_var_undef => {
-                    if (instruction.is_temp)
-                        try self.lowerScopeVar(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34265.
-                op.scope_get_var => {
-                    if (instruction.is_temp)
-                        try self.lowerScopeVar(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34266.
-                op.scope_put_var => {
-                    if (instruction.is_temp)
-                        try self.lowerScopeVar(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34267.
-                op.scope_delete_var => {
+                // qjs:34267-34268.
+                op.scope_delete_var, op.scope_get_ref => {
                     if (instruction.is_temp)
                         try self.lowerScopeRef(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34268.
-                op.scope_get_ref => {
-                    if (instruction.is_temp)
-                        try self.lowerScopeRef(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34269.
-                op.scope_put_var_init => {
-                    if (instruction.is_temp)
-                        try self.lowerScopeVar(position, op_id, input_atom.?)
                     else
                         try self.copyInputInstruction(position, instruction, input_atom);
                 },
@@ -1909,32 +1845,12 @@ const Resolver = struct {
                         try self.copyInputInstruction(position, instruction, input_atom);
                 },
 
-                // qjs:34290.
-                op.scope_get_private_field => {
-                    if (instruction.is_temp)
-                        try self.lowerPrivateField(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34291.
-                op.scope_get_private_field2 => {
-                    if (instruction.is_temp)
-                        try self.lowerPrivateField(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34292.
-                op.scope_put_private_field => {
-                    if (instruction.is_temp)
-                        try self.lowerPrivateField(position, op_id, input_atom.?)
-                    else
-                        try self.copyInputInstruction(position, instruction, input_atom);
-                },
-
-                // qjs:34293.
-                op.scope_in_private_field => {
+                // qjs:34290-34293.
+                op.scope_get_private_field,
+                op.scope_get_private_field2,
+                op.scope_put_private_field,
+                op.scope_in_private_field,
+                => {
                     if (instruction.is_temp)
                         try self.lowerPrivateField(position, op_id, input_atom.?)
                     else
@@ -2105,11 +2021,11 @@ fn buildBindIndex(
     return binds;
 }
 
-/// Exact block-CFG resolve pass over fd.builder. The input Builder is
-/// strictly read-only: output atom ids are copied from the input ledger with no
-/// retain (this pass makes no retain/release call), and every fallible output
-/// allocation is owned by the uncommitted product or scratch topology until the
-/// caller commits or deinitializes it.
+/// The resolve pass over fd.builder. The input Builder is strictly read-only:
+/// output atom ids are copied from the input ledger with no retain (this pass
+/// makes no retain/release call), and every fallible output allocation is
+/// owned by the uncommitted product or the pass's scratch until the caller
+/// commits or deinitializes it.
 pub fn run(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
@@ -2130,9 +2046,6 @@ pub fn run(
     errdefer product.deinitUncommitted();
     try initializeLabels(&product, input);
     try preallocateProductStreams(&product, input);
-
-    // Exact-scope accelerator is deferred; the linked-chain walk is the
-    // semantic path.
 
     const initial_bind_offset: u64 = if (binds.len != 0)
         binds[0].input_offset
@@ -2724,8 +2637,8 @@ test "compiler.resolve_variables: source transitions bound insert3 fold" {
     try input.addSourceMarker(30, 4);
     try input.emitOp(op.drop);
 
-    // Repeated calls at the same source position are suppressed by legacy
-    // `emitSourcePos`, so they must not manufacture a fold barrier.
+    // A marker that repeats the previous source position must not
+    // manufacture a fold barrier.
     try input.addSourceMarker(40, 5);
     try input.emitOp(op.insert3);
     try input.addSourceMarker(40, 5);
@@ -2898,7 +2811,7 @@ test "compiler.resolve_variables: lexical TDZ get and put match the pinned Quick
     try expectOwnedAtomRelease(&harness, &product, lexical);
 }
 
-test "compiler.resolve_variables: const scope_put_var throw matches the pinned QuickJS form" {
+test "compiler.resolve_variables: const scope_put_var checks the TDZ before the read-only throw" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2918,10 +2831,9 @@ test "compiler.resolve_variables: const scope_put_var throw matches the pinned Q
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
-    try std.testing.expectEqual(op.throw_error, product.code[0]);
     try std.testing.expectEqual(@as(u32, 1), product.atom_len);
-    var expected_code = [_]u8{ op.throw_error, 0, 0, 0, 0, 0, op.return_undef };
-    std.mem.writeInt(u32, expected_code[1..5], constant.raw(), .little);
+    var expected_code = [_]u8{ op.get_loc_check, 0, 0, op.drop, op.throw_error, 0, 0, 0, 0, 0, op.return_undef };
+    std.mem.writeInt(u32, expected_code[5..9], constant.raw(), .little);
     try expectProductCode(&product, &expected_code);
     try std.testing.expectEqualSlices(
         core.atom.Atom,
@@ -2958,7 +2870,7 @@ test "compiler.resolve_variables: lexical scope_put_var_init matches the pinned 
     try expectOwnedAtomRelease(&harness, &product, lexical);
 }
 
-test "compiler.resolve_variables: enter and leave scope match the pinned QuickJS form" {
+test "compiler.resolve_variables: enter scope detaches captured bindings before re-arming them" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2975,9 +2887,10 @@ test "compiler.resolve_variables: enter and leave scope match the pinned QuickJS
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
-    try std.testing.expectEqual(op.set_loc_uninitialized, product.code[0]);
-    try std.testing.expectEqual(op.close_loc, product.code[3]);
+    // Entry detaches the previous entry's captured binding (a throw skips
+    // the leave-scope close), then re-arms the TDZ; leave closes it.
     try expectProductCode(&product, &.{
+        op.close_loc,             0, 0,
         op.set_loc_uninitialized, 0, 0,
         op.close_loc,             0, 0,
         op.return_undef,
@@ -3269,7 +3182,7 @@ test "compiler.resolve_variables: eval function declaration hoist enters v2 prod
 
     const declared = try harness.rt.atoms.internString("qcp1-s3-eval-function-hoist");
     harness.fd.is_eval = true;
-    harness.fd.body_scope = harness.fd.appendScope(-1) catch return error.OutOfMemory;
+    harness.fd.body_scope = try harness.fd.appendScope(-1);
     try harness.fd.appendGlobalVar(.{
         .cpool_idx = 0,
         .scope_level = 0,

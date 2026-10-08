@@ -5,6 +5,222 @@ roadmaps, plans, and measurement snapshots are available in Git history.
 
 ## Unreleased
 
+- **Memory limit:** array element storage runs the heap-limit collection
+  retry like objects and strings do; it used to fail with `out of memory`
+  while the budget was full of garbage (16 of 1000 short-lived 1000-element
+  arrays at a 300 KB limit). An out-of-memory error while linking a module is
+  reported as `InternalError: out of memory` instead of a SyntaxError naming
+  `OutOfMemory`, and the CLI reports an uncaught exception it cannot format
+  (out of memory while reading it) instead of exiting with `error: OutOfMemory`.
+- **Embedding and semantics fixes:** `Context.createError` / `throwError`
+  with a name that has no global constructor (`"NotFoundError"`) builds an
+  ordinary Error on `%Error.prototype%` (it had a null prototype, so
+  `String(e)` threw). A loader `resolve()` failing with `ModuleNotFound` for a
+  static import or the entry module reports `ReferenceError: could not load
+  module filename '<specifier>'` instead of `Error: ModuleNotFound`.
+  `Context.isArray`/`arrayLength`/`functionName` type errors carry a message.
+  In a sloppy arrow function a block-level `function arguments() {}` now binds
+  the arrow's `arguments` (Annex B.3.2.1: an arrow has no arguments object),
+  as node and QuickJS do. The public API contract states that a Value belongs
+  to its Runtime.
+- **Builtin conformance:** `Number.isNaN`/`Number.isFinite` and the global
+  `isNaN`/`isFinite` have separate entry points; they used to share one that
+  picked the non-coercing behaviour only when `this` was `Number`, so
+  `['abc'].map(Number.isNaN)` coerced and `isNaN.call(Number, 'abc')` did not.
+  The Iterator.prototype `constructor`/`@@toStringTag` setters probe, set and
+  define through the receiver's internal methods (Proxy traps, own accessor
+  setters), and `isPrototypeOf` with a primitive `this` still walks the
+  argument's prototype chain (observable through a Proxy `getPrototypeOf`).
+  TypedArray methods/accessors on a primitive receiver and Set methods called
+  without an argument throw a TypeError with a message instead of an empty one.
+- **Parser lookahead:** the token-level scans that skip template
+  substitutions (class private-name pre-scan, direct-eval detection) took
+  every `function` token as the head of a function to skip, including the
+  property name in `` `${e.function}` `` or `{ function: 1 }`; inside a class
+  body that desynchronized the scan and failed with
+  `SyntaxError: unterminated template literal` / `invalid identifier`
+  (prettier's minified postcss plugin did not load).
+- **Parser nesting depth:** binary expressions parse by precedence climbing
+  (one native frame per nesting level instead of one per precedence level)
+  and `parsePrimary` keeps its leaf arms out of the nesting path, so the
+  default native stack accepts about 720 levels of parentheses / array /
+  object literal nesting instead of about 330 (ReleaseFast), and about 200
+  nested function literals instead of about 130, before
+  `SyntaxError: stack overflow`. Emitted bytecode is unchanged.
+- **CLI and host robustness:** a command-line argument (or script path) that
+  is not valid UTF-8 no longer aborts with `scriptArgs setup failed:
+  JSException`; it is decoded lossily into `scriptArgs`, as node does.
+  `atob`/`btoa` errors fall back to the Realm's intrinsic `Error.prototype`
+  when the global `DOMException` was deleted or replaced by a non-object
+  (they used to have a null prototype, so `String(e)` threw). An Error that
+  never captured a stack (the preallocated out-of-memory error) reports an
+  empty `stack` instead of one rebuilt from wherever it is read.
+- **GC:** a bytecode call's pending argument window (the operand slots a
+  call site has retreated past before its callee frame takes them) was
+  never retired after the call; the tracer accepted it again whenever the
+  caller's operand top returned to the same slot, e.g. a native call such as
+  `Array.from(x)` at the depth of an earlier `g()`, and traced dead slots
+  (Debug: `containsExtent` assertion under the nursery; Release: a read of
+  freed memory). Retiring an inline frame or catching an exception now ends
+  the window, and a host callback that re-enters the running Machine
+  (`callFunction` from a weak-handle callback or the interrupt handler,
+  while a call site is mid-push) restores the outer site's window when it
+  returns. Found by a runtime fuzz under `ZJS_GC_STRESS` + `ZJS_GC_NURSERY`
+  and a follow-up audit.
+- **Compile time:** several more per-item linear scans became hash
+  lookups, each quadratic in the number of items (ReleaseFast, 64k items):
+  function and arrow parameters' duplicate check (0.89 s -> 0.01 s), enum
+  members (0.93 s -> 0.05 s) and namespace exports (1.58 s -> 0.07 s)
+  through the TypeScript member sets, and class computed fields (1.87 s ->
+  0.10 s): closure-variable threading matches its (type, index) identity
+  through a new FunctionDef index, and module-lexical lookups use the name
+  index.
+- **Compile time:** a reference to a global name finds its closure row
+  through the function's existing name index instead of scanning every
+  closure row (64k distinct globals: 1.12 s -> 0.06 s in a ReleaseFast
+  build; it was quadratic).
+- **RegExp:** a `v`-flag class intersection followed by a third `&`
+  (`/[a&&&]/v`) is a SyntaxError, as the `[lookahead ≠ &]` in
+  ClassIntersection requires; it used to be accepted.
+- **GC:** the sliced-destruction machinery left from the retired incremental
+  major (`Morgue.pending`, which nothing ever set, its slice/resume state
+  and the incremental stats) is removed; every collection destroys what it
+  condemned before it returns. `--gc-stats` drops three lines that always
+  printed 0 ("marking barrier calls", "destroyed counted objects", "major
+  cycles completed"), and the `--gc-gate-settle` doomed-state lines drop the
+  always-false `doomed_pending` / `doomed_cursor` fields.
+- **Parser robustness** (from a parser fuzz): a source ending in a private
+  name followed by `\` (`#\`, `x.#\`) read past the end of the source; it
+  is now `SyntaxError: invalid Unicode escape sequence`. A generator or async
+  class member with a computed name and no parameter list (`class A {
+  *[m] }`) reported `internal compiler error: ParserInvariant`; it is now
+  `expected '('`.
+- **TypeScript:** an erased class member with a computed name (an
+  overload or optional method signature, an abstract method, field or
+  accessor) no longer evaluates its key expression. `abstract get [k]()`
+  and `abstract set [k](v)`, and `get [k]()` / `set [k](v)` in interfaces
+  and type literals, are accepted.
+- **Parser:** a destructuring pattern nested 256 or more levels deep
+  (`const [[[…a…]]] = s`, `({x:{x:…}} = s)`, parameters, `for…of` heads)
+  is accepted; the lookahead that sizes the pattern used a fixed 256-entry
+  delimiter stack and failed with `expected ']', got '['`. An unbalanced
+  pattern now names the closer the innermost open delimiter needs
+  (`let [a, {b] = s` reports `expected '}', got ']'`, not `expected ']',
+  got ']'`).
+- **Compile time:** a private name (`#x`) resolves through a hash index of
+  the enclosing class bodies' private names instead of comparing the name of
+  every one, which was quadratic in the number of private elements (a class
+  with 16k private fields: 1.93 s → 0.65 s in a ReleaseFast build).
+- **Compile time:** resolving a name no longer walks every same-named
+  binding of the function (`{let a=1;a;}` repeated 40k times: 3.8 s → 0.05
+  s), and a `for (…;…;update)` loop no longer scans every label of the
+  function when it moves the update code (`for(let i…)` repeated 20k times:
+  1.0 s → 0.06 s). Both were quadratic in machine-generated code. A sloppy
+  global write checks the global object's property through its hash index.
+- **GC:** minor collections drop WeakMap/WeakSet entries, WeakRef targets,
+  FinalizationRegistry cells and embedder weak handles whose referents died
+  young. Entries with short-lived keys used to accumulate until a major
+  collection their own growth never triggered: `w.set({}, i)` in a loop was
+  quadratic (800k entries took 5.4 s and 108 MB; now 0.18 s and 6 MB).
+- **Parser (found by an accept/reject differential fuzz against node):**
+  `continue` may target any label of a label chain (`a: b: while (…) continue
+  a;`); a line break after `yield` ends the YieldExpression (`x = yield\n+1`
+  used to yield `+1`, `yield\n/re/` was rejected); `static async {}` and
+  `static * {}` are SyntaxErrors; escaped strict-only words are accepted as
+  sloppy shorthand properties (`({l\u0065t})`); an escaped `await`/`yield`
+  function-expression name is checked in the function's own context; without
+  `u`, an astral class-range endpoint counts as two code units (`/[😀-😁]/` is
+  a SyntaxError, `[😀-\uffff]` matches `\ude50`).
+- **Arrays:** a blocked `length` shrink reports the non-deletable element
+  instead of claiming `length` is read-only.
+- **Embedding API:** `globalObject`, `createError`, `throwError`,
+  `realmGlobalObject`, `functionRealmGlobal` and `defineScriptArgs` follow the
+  `Context.Error` contract too (`realmGlobalObject` on a non-realm and
+  `defineScriptArgs` on a frozen global returned bare `TypeError` /
+  `NotExtensible` with nothing pending). The contract lists the calls it does
+  not cover; the cookbook documents that an interrupt inside an async function
+  or promise job rejects that promise instead of returning `Interrupted`.
+- **Direct eval:** a function declared at the top level of a direct eval
+  inside `catch (e)` (`eval("function e(){}")`) is created in the function's
+  variable environment; it was stored into the catch parameter.
+- **Spec fixes (duplicate-helper census):** an Array's `length` is converted
+  by ArraySetLength inside [[DefineOwnProperty]], so a Proxy without a
+  `defineProperty` trap converts it too, `Object.defineProperties` reads all
+  descriptors before converting, and a Proxy `getOwnPropertyDescriptor`
+  result is no longer converted. `%AsyncIteratorPrototype%[@@asyncDispose]`
+  resolves `return()`'s result through PromiseResolve and fulfils with
+  undefined (non-object results, promises and thenables).
+  `%RegExpStringIteratorPrototype%` is one object per realm. String and
+  template literals in `eval`/`Function` source may contain lone surrogates.
+- **Arrays:** setting `length` (assignment, `Reflect.set`, `defineProperty`)
+  throws RangeError when the value's two conversions (ToUint32, then
+  ToNumber) disagree, as ArraySetLength requires. It used to keep the second.
+- **Date:** `Date.parse` reads a signed number after the year as a UTC offset
+  (`"Jan 1 2020 GMT-0500"`, `"... UTC+5"`, `"... GMT+0000"`). It used to replace
+  the year (year -500, 5, 0). An invalid offset there now gives NaN.
+- **CLI modules:** the file loader resolves `file:` URLs, so
+  `import(import.meta.url)`-style imports (e.g. a URL received from another
+  module) load the file instead of failing with "could not load module".
+- **TypeScript:** an enum and a namespace of the same name no longer resolve
+  each other's members unqualified (`enum E { A }` + `namespace E { ... A ... }`
+  now reads the outer `A`, as tsc does). Object-literal methods named
+  `get`/`set` accept type parameters (`{ get<T>() {} }`). Exported namespace
+  `var`/`let`/`const` members (including destructuring defaults) infer no
+  function name, matching tsc's `N.x = ...` emit.
+- **CLI:** `--gc-stats` no longer prints the `gc: cycle envelope ...` line.
+  Its counters were never populated after the incremental major was retired.
+- **Language:** an elided slot in an array pattern (`[a, , b] = it`,
+  `let [, x] = it`, parameters) only steps the iterator; it no longer reads
+  the result's `value` (QuickJS does). New cold-plane sub-op
+  `ext0 iterator_step`.
+- **Language:** in sloppy code `for (f() of xs)` / `for (f() in o)` evaluates
+  the call when an iteration assigns it, then throws the ReferenceError (and
+  closes the iterator). It used to call `f()` before evaluating `xs`, even
+  with no iterations (QuickJS does).
+- **Language:** a tagged template object (and its `raw` array) inherits the
+  `Array.prototype` of the realm whose code evaluates it. It used to take the
+  prototype of whichever realm headed the runtime's context list, and none at
+  all when a Context compiled its first script before its global existed.
+- **Embedding API:** an allocation failure before a Context's global exists
+  is reported as `error.OutOfMemory` again (it surfaced as `JSException`).
+- **Language:** a `for await` loop left by a throw now awaits the iterator's
+  `return()` result before rethrowing (spec AsyncIteratorClose); it used to
+  close synchronously like QuickJS. Leaving an `await using` scope no longer
+  adds an extra tick: each async disposal is a bytecode-level call plus
+  `await`, and errors still aggregate into `SuppressedError`.
+- **Embedding API (breaking):** a host function is a constructor exactly
+  when it is created with `with_prototype` or `constructor`; a later
+  `prototype` property no longer makes a plain function constructible (or
+  removes the ability). A `constructor` function no longer needs an own
+  `prototype`.
+- **Embedding API (breaking):** every fallible `Context` call now returns
+  `Context.Error` (`error{ JSException, OutOfMemory, Interrupted }`) with the
+  exception always pending, as QuickJS reports `JS_EXCEPTION`. Calls used to
+  return assorted engine error names (`error.TypeError`,
+  `error.SymbolToNumber`, `error.IncompatibleDescriptor`, ...), some without
+  a pending exception. Branch on `error.JSException` and inspect the
+  exception with `pendingExceptionMatchesErrorName` /
+  `consumePendingExceptionIfErrorName`. `formatExceptionStack` no longer
+  replaces a pending exception.
+- **Embedding API:** export `zjs.ModuleSourceLoader` and add
+  `Context.setModuleSourceLoader`. With a loader installed,
+  `Context.eval(.module)` links the module graph through it (static imports
+  and `import()`), as QuickJS `JS_Eval` does with `JS_SetModuleLoaderFunc`.
+- **Embedding API:** an entry from the host while no JavaScript runs (`eval`,
+  `evalScript*`, `callFunction`, `runJobs`, property and conversion helpers)
+  now discards an exception left pending by an earlier failed call. Before,
+  such a stale exception tripped an internal assertion (undefined behaviour in
+  ReleaseFast). Take the exception before the next call if you need it.
+- **Builtins (breaking):** remove Immutable ArrayBuffer
+  (`ArrayBuffer.prototype.transferToImmutable`, `sliceToImmutable`,
+  `immutable`). QuickJS does not implement it either. `test262.conf` now skips
+  `immutable-arraybuffer` and `import-bytes`. `type: "bytes"` module imports
+  now produce a `Uint8Array` over a plain, mutable ArrayBuffer. See
+  [COMPATIBILITY.md](COMPATIBILITY.md#configured-skips-and-excludes).
+- **Modules:** a dynamic `import()` of a bare specifier (no leading `./`,
+  `../` or `/`) loads it verbatim, relative to the working directory, like a
+  static import (QuickJS `js_default_module_normalize_name` policy). It used
+  to reject with `ModuleNotFound`.
 - **Host boundary / public API:** move bundled event scheduling, filesystem
   module policy, output formatting, and print/console/btoa/atob/queueMicrotask/gc
   installation to internal `zjs_host`. Remove `zjs.EventLoop` and `zjs.runtime`;

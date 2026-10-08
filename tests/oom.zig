@@ -26,6 +26,7 @@ const native_alloc = @import("zjs").core.runtime.native_allocation;
 const gc_alloc = @import("zjs").core.gc.allocation;
 const std = @import("std");
 const zjs = @import("zjs");
+const memory_modules = @import("harness/memory_modules.zig");
 
 const core = zjs.core;
 const BindingContext = zjs.JSContext;
@@ -368,6 +369,17 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "lit-ok:len=4,d=4" },
     },
     .{
+        // The parser builds the template object itself: per-part cooked and
+        // raw strings plus element growth on both arrays.
+        .name = "tagged-template-object",
+        .source =
+        \\const t = (s) => [s.length, s.map((x) => x.length), s[0].charCodeAt(5).toString(16),
+        \\  s[1].charCodeAt(4).toString(16), s.raw[3], Object.getPrototypeOf(s) === Array.prototype].join(":");
+        \\t`alpha\u00e9${1}beta\u2603${2}gamma${3}delta\n${4}epsilon${5}zeta`
+        ,
+        .expect = .{ .string = "6:6,5,5,6,7,4:e9:2603:delta\\n:true" },
+    },
+    .{
         // Refcounted object-literal fields through OP_define_field (qjs
         // CASE(OP_define_field) -> JS_DefinePropertyValue, quickjs.c,
         // has no value-form gate). The fast leg's failure contract is
@@ -553,7 +565,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
         // user exceptions and freshly-created InternalErrors remain failures.
         if (err == error.JSException and ctx.hasException()) {
             if (ctx.preallocated_oom_error) |preallocated| {
-                if (ctx.runtime.current_exception.sameValue(preallocated)) {
+                if (ctx.runtime.exception.value.sameValue(preallocated)) {
                     ctx.clearException();
                     return error.OutOfMemory;
                 }
@@ -653,57 +665,16 @@ const parse_only_source =
 ;
 
 // ---------------------------------------------------------------------------
-// In-memory ESM graph fixture (two modules, host-hook resolution)
+// In-memory ESM graph fixture (two modules, in-memory source loader)
 // ---------------------------------------------------------------------------
 
-const GraphModule = struct {
-    specifier: []const u8,
-    path: []const u8,
-    source: []const u8,
-};
-
-const graph_dep = GraphModule{
+const graph_dep = memory_modules.Module{
     .specifier = "./dep.js",
     .path = "/oom-fixture/dep.js",
     .source = "export function double(x) { return x * 2; }",
 };
 
-fn resolveGraphModule(
-    ptr: *anyopaque,
-    specifier: []const u8,
-    referrer: ?[]const u8,
-    allocator: std.mem.Allocator,
-) anyerror!module_graph.HostHooks.ResolvedModule {
-    _ = ptr;
-    _ = referrer;
-    if (!std.mem.eql(u8, specifier, graph_dep.specifier) and !std.mem.eql(u8, specifier, graph_dep.path)) {
-        return error.ModuleNotFound;
-    }
-    const specifier_copy = try allocator.dupe(u8, specifier);
-    errdefer allocator.free(specifier_copy);
-    return .{
-        .specifier = specifier_copy,
-        .path = try allocator.dupe(u8, graph_dep.path),
-        .kind = .esm,
-    };
-}
-
-fn loadGraphModule(
-    ptr: *anyopaque,
-    resolved: module_graph.HostHooks.ResolvedModule,
-    allocator: std.mem.Allocator,
-) anyerror!module_graph.HostHooks.LoadedModule {
-    _ = ptr;
-    if (!std.mem.eql(u8, resolved.path, graph_dep.path)) return error.ModuleNotFound;
-    return .{
-        .source = graph_dep.source,
-        .path = try allocator.dupe(u8, graph_dep.path),
-        .kind = .esm,
-        .owned = false,
-    };
-}
-
-/// ESM link lifecycle: two in-memory modules resolved through host hooks,
+/// ESM link lifecycle: two in-memory modules resolved through the source loader,
 /// exercising module records, link, instantiate, and evaluation order.
 fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     const rt = try core.JSRuntime.create(allocator, .{});
@@ -716,13 +687,10 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
 
     var sink: u8 = 0;
     var output = std.Io.Writer.fixed(@as(*[1]u8, &sink));
-    var hooks_ctx: u8 = 0;
-    const hooks = module_graph.HostHooks{
-        .ptr = &hooks_ctx,
-        .resolveModule = resolveGraphModule,
-        .loadModule = loadGraphModule,
-    };
-    _ = try module_graph.evalFileModuleGraphWithHostHooks(
+    const modules = [_]memory_modules.Module{graph_dep};
+    var loader = memory_modules.MemoryModules{ .modules = &modules };
+    loader.install(ctx);
+    _ = try module_graph.evalModuleGraph(
         rt,
         ctx,
         \\import { double } from './dep.js';
@@ -730,8 +698,9 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     ,
         &output,
         "/oom-fixture/main.mjs",
-        hooks,
+        std.testing.io,
         allocator,
+        std.math.maxInt(usize),
     );
 
     {
@@ -941,12 +910,11 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         }
 
         if (snippet.drain_jobs) {
+            // A then-callback failing on the injected OOM surfaces as a
+            // rejected promise with no handler; the rejection value is
+            // collected right below.
             wrapper.runJobs(null) catch |err| switch (err) {
                 error.OutOfMemory, error.JSException => {},
-                // A then-callback failing on the injected OOM surfaces as a
-                // rejected promise with no handler; the rejection value is
-                // collected right below.
-                error.UnhandledPromiseRejection => {},
                 else => return err,
             };
             if (ctx.hasException()) {
@@ -1022,16 +990,21 @@ test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
 
     const name = try rt.internAtom("__oomGlobalSelectorAutoInit");
-    try global.definePerformanceAutoInitProperty(
-        rt,
-        name,
-        core.property.Flags.data(.method),
-        global,
-    );
+    // Any allocating builder works; this one creates a plain object.
+    const Builder = struct {
+        fn make(header: *core.gc.Header) zjs.RuntimeError!core.JSValue {
+            const realm: *core.JSContext = @alignCast(@fieldParentPtr("header", header));
+            const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
+            const prototype = zjs.exec.object_ops.objectPrototypeFromGlobal(realm.runtime, realm_global);
+            return (try core.Object.createWithOwnPropertyCapacity(realm.runtime, core.class.ids.object, prototype, 2)).value();
+        }
+    };
+    const descriptor: core.property.AutoInit = .{ .name = "__oomGlobalSelectorAutoInit", .length = 0, .materialize_host = Builder.make };
+    try global.defineAutoInitPropertyFromDescriptor(rt, name, core.property.Flags.data(.method), global, &descriptor);
 
     // Pin the logical heap at its current size. This rejects the builder's
     // first allocation even when the small-object slab has a reusable block.
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
         zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name),
@@ -1127,7 +1100,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expect(anchor.isLive());
         try std.testing.expectEqual(anchor, rt.firstContext().?);
         try std.testing.expectEqual(@as(usize, 1), rt.roots.providers().len);
-        const native_count_before = rt.native_entries.items.len;
+        const native_count_before = rt.native_bindings.entries.items.len;
 
         injector.attempts = 0;
         injector.induced = false;
@@ -1145,12 +1118,12 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
                 // constructing Realm. The ordinary cycle pass must retire the
                 // whole unpublished graph without touching the anchor Realm.
                 _ = rt.collectForTest();
-                try std.testing.expect(rt.constructing_context_head == null);
-                try std.testing.expect(rt.constructing_context_tail == null);
+                try std.testing.expect(rt.contexts.constructing_head == null);
+                try std.testing.expect(rt.contexts.constructing_tail == null);
                 try std.testing.expectEqual(anchor, rt.firstContext().?);
                 try std.testing.expect(anchor.runtime_next == null);
                 try std.testing.expectEqual(@as(usize, 1), rt.roots.providers().len);
-                try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
+                try std.testing.expectEqual(native_count_before, rt.native_bindings.entries.items.len);
 
                 created = try BindingContext.create(rt, .{});
             },
@@ -1159,12 +1132,12 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         defer created.destroy();
 
         try std.testing.expect(created.core.isLive());
-        try std.testing.expect(rt.constructing_context_head == null);
-        try std.testing.expect(rt.constructing_context_tail == null);
+        try std.testing.expect(rt.contexts.constructing_head == null);
+        try std.testing.expect(rt.contexts.constructing_tail == null);
         try std.testing.expectEqual(@as(usize, 2), rt.roots.providers().len);
         // print/console share a static NativeEntry. Neither partial bootstrap
         // nor a retry may append any Runtime-owned native entries.
-        try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
+        try std.testing.expectEqual(native_count_before, rt.native_bindings.entries.items.len);
 
         const canary = try created.eval(canary_source, .{ .filename = "<binding-construction-retry>" });
         try expectStringValue(canary, "canary-ok");
@@ -1219,11 +1192,11 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     // collection has just walked -- so the baseline has to be taken from the
     // same quiesced state or the debris shows up as a spurious delta.
     _ = rt.collectForTest();
-    const baseline_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const baseline_allocations = rt.diagnostics.allocations.allocation_count;
+    const baseline_bytes = rt.allocation_diagnostics.allocated_bytes;
+    const baseline_allocations = rt.allocation_diagnostics.allocation_count;
     const baseline_live = rt.gc.liveCount();
-    const baseline_create_calls = rt.diagnostics.allocations.create_calls;
-    const baseline_destroy_calls = rt.diagnostics.allocations.destroy_calls;
+    const baseline_create_calls = rt.allocation_diagnostics.create_calls;
+    const baseline_destroy_calls = rt.allocation_diagnostics.destroy_calls;
 
     // All inline tables and exact code belong to the same createWithFam call.
     // Leave that full charge one byte short: no partial shell/table owner may
@@ -1241,11 +1214,11 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         rt.setNativeBytesLimitForTest(null);
         if (err != error.OutOfMemory) return err;
     }
-    try std.testing.expectEqual(baseline_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(baseline_allocations, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(baseline_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.allocation_diagnostics.allocation_count);
     try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
-    try std.testing.expectEqual(baseline_create_calls, rt.diagnostics.allocations.create_calls);
-    try std.testing.expectEqual(baseline_destroy_calls, rt.diagnostics.allocations.destroy_calls);
+    try std.testing.expectEqual(baseline_create_calls, rt.allocation_diagnostics.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls, rt.allocation_diagnostics.destroy_calls);
 
     // The same runtime must immediately create, publish, and then let the
     // collector retire the same full layout. Exactly one successful
@@ -1278,11 +1251,11 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         try std.testing.expectEqual(layout.total_size, recovered.layout().total_size);
         try std.testing.expectEqual(layout.total_size, recovered.heapByteSize());
         try std.testing.expect(recovered.header.meta().alloc_info.standalone);
-        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.diagnostics.allocations.allocated_bytes);
-        try std.testing.expectEqual(baseline_allocations + 1, rt.diagnostics.allocations.allocation_count);
+        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.allocation_diagnostics.allocated_bytes);
+        try std.testing.expectEqual(baseline_allocations + 1, rt.allocation_diagnostics.allocation_count);
         try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
-        try std.testing.expectEqual(baseline_create_calls + 1, rt.diagnostics.allocations.create_calls);
-        try std.testing.expectEqual(baseline_destroy_calls, rt.diagnostics.allocations.destroy_calls);
+        try std.testing.expectEqual(baseline_create_calls + 1, rt.allocation_diagnostics.create_calls);
+        try std.testing.expectEqual(baseline_destroy_calls, rt.allocation_diagnostics.destroy_calls);
         try std.testing.expectEqual(@as(usize, 64), recovered.cpoolSlice().len);
         try std.testing.expectEqual(@as(usize, 8), recovered.allVarDefs().len);
         try std.testing.expectEqual(@as(usize, 4), recovered.closureVar().len);
@@ -1291,16 +1264,16 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         recovered.publishFixtureNoFail(rt);
         recovered_published = true;
         try std.testing.expectEqual(baseline_live + 1, rt.gc.liveCount());
-        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.allocation_diagnostics.allocated_bytes);
     }
 
     _ = rt.collectForTest();
 
     try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
-    try std.testing.expectEqual(baseline_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(baseline_allocations, rt.diagnostics.allocations.allocation_count);
-    try std.testing.expectEqual(baseline_create_calls + 1, rt.diagnostics.allocations.create_calls);
-    try std.testing.expectEqual(baseline_destroy_calls + 1, rt.diagnostics.allocations.destroy_calls);
+    try std.testing.expectEqual(baseline_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.allocation_diagnostics.allocation_count);
+    try std.testing.expectEqual(baseline_create_calls + 1, rt.allocation_diagnostics.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls + 1, rt.allocation_diagnostics.destroy_calls);
 }
 
 fn corpusSnippetNamed(name: []const u8) Snippet {

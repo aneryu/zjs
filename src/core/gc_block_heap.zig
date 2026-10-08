@@ -458,13 +458,13 @@ pub const Block = extern struct {
     free_list: u32 = free_nil,
     size_class: u16 = 0,
     /// Physical block lifecycle marker. Observable blocks are active or
-    /// empty/swept; condemnation and sliced destruction intentionally use the
+    /// empty/swept; condemnation and destruction intentionally use the
     /// doomed bitmap/list rather than the historical five-state model.
     sweep_state: SweepState = .fresh,
     flags: Flags = .{},
     /// Intrusive doomed-block link (address; 0 = not linked; 1 = tail). A
     /// block joins at condemnation when its snapshot finds dead cells, and
-    /// leaves when the destruction slices empty its doomed bitmap.
+    /// leaves when the destruction pass empties its doomed bitmap.
     doomed_link: BlockLink = .unlinked,
     /// Intrusive young-block link (address; 0 = not linked). A block joins
     /// the list the first time a cycle publishes a young object into it --
@@ -520,7 +520,7 @@ pub const Block = extern struct {
         hot_rejected: bool = false, // bit 1
         _reserved: u2 = 0, // bits 2-3
         /// Stage-3 Pass-A settlement left holes that only the alloc bitmap
-        /// records: `settleDoomedCellInPassA` clears a cell's alloc bit without
+        /// records: `reclaimDoomedCells` clears a cell's alloc bit without
         /// writing a free link, so `free_list`/`bump` no longer enumerate every
         /// hole in this block. The bitmap is the sole canonical free-space
         /// representation until `rebuildFreeIntervals` reconstructs the allocator
@@ -897,7 +897,7 @@ pub const Block = extern struct {
         }
     }
 
-    /// Is this cell condemned and still awaiting its destruction slice?
+    /// Is this cell condemned and still awaiting its destruction pass?
     pub inline fn isDoomed(self: *Block, index: u32) bool {
         return (self.bitmaps().remember[index / 64] & (@as(u64, 1) << @intCast(index % 64))) != 0;
     }
@@ -1049,7 +1049,7 @@ pub const Heap = struct {
     /// Head of the young-block list (see `noteYoungCell`).
     young_blocks: ?*Block = null,
     /// Head of the doomed-block list: blocks whose snapshot found dead cells,
-    /// consumed by the destruction slices.
+    /// consumed by the destruction pass.
     doomed_blocks: ?*Block = null,
     stats: Stats = .{},
     mark_epoch: u64 = 0,
@@ -1593,12 +1593,7 @@ pub const Heap = struct {
     }
 
     fn generationFor(self: *Heap, block: *const Block, index: u32) *u32 {
-        comptime std.debug.assert(carrier_audit_enabled);
-        const sb = &self.superblocks.items[block.super_index];
-        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
-        std.debug.assert(block_index < blocks_per_superblock);
-        std.debug.assert(index < sb.cell_generations[block_index].len);
-        return &sb.cell_generations[block_index][index];
+        return @constCast(self.generationForConst(block, index));
     }
 
     fn generationForConst(self: *const Heap, block: *const Block, index: u32) *const u32 {
@@ -1611,12 +1606,7 @@ pub const Heap = struct {
     }
 
     fn lifecycleFor(self: *Heap, block: *const Block, index: u32) *CellLifecycle {
-        comptime std.debug.assert(carrier_audit_enabled);
-        const sb = &self.superblocks.items[block.super_index];
-        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
-        std.debug.assert(block_index < blocks_per_superblock);
-        std.debug.assert(index < sb.cell_lifecycles[block_index].len);
-        return &sb.cell_lifecycles[block_index][index];
+        return @constCast(self.lifecycleForConst(block, index));
     }
 
     fn lifecycleForConst(self: *const Heap, block: *const Block, index: u32) *const CellLifecycle {
@@ -1735,14 +1725,6 @@ pub const Heap = struct {
         return block.cell_size;
     }
 
-    pub fn setReuseSequenceForTest(self: *Heap, cell: [*]u8, sequence: u32) void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        comptime std.debug.assert(carrier_audit_enabled);
-        const block = Block.fromCellTrusted(@intFromPtr(cell));
-        const index = block.cellIndex(@intFromPtr(cell)).?;
-        self.generationFor(block, index).* = sequence;
-    }
-
     pub fn forEachOwnedIdentity(
         self: *const Heap,
         prefix_bytes: usize,
@@ -1814,9 +1796,9 @@ pub const Heap = struct {
     /// both an audit failure and a severed chain the moment `resetBlock` runs.
     ///
     /// Two cases keep the ordinary per-cell `freeSmall` path, for the reasons
-    /// `canSettleDoomedCellInPassA` names: the allocator-current block must
-    /// keep a maintained free-list/bump representation because the mutator
-    /// allocates out of it between destruction slices, and a release that
+    /// below: the allocator-current block must
+    /// keep a maintained free-list/bump representation because destructors
+    /// allocate out of it during destruction, and a release that
     /// empties a block has to run the empty-block transition (list membership,
     /// aged decommit). Both are bounded -- one block per size class, one block
     /// per emptying -- so the bulk path still covers essentially every corpse.
@@ -1910,13 +1892,6 @@ pub const Heap = struct {
         var set: u32 = 0;
         for (block.bitmaps().alloc) |word| set += @popCount(word);
         if (set != block.allocated_count) return error.AllocCountMismatch;
-    }
-
-    pub fn owns(self: *const Heap, ptr: [*]u8) bool {
-        const addr = @intFromPtr(ptr);
-        if (self.large.contains(addr)) return true;
-        if (self.medium.contains(addr)) return true;
-        return self.blockOf(ptr) != null;
     }
 
     /// First time this cycle that a young object lands in `block`: put the
@@ -3770,13 +3745,11 @@ test "string extents: table-held marks, containment probe, epoch sweep" {
         freed: usize = 0,
         last_base: usize = 0,
         last_bytes: usize = 0,
-        last_needs_finalizer: bool = false,
-        fn destroy(ctx: *anyopaque, base: usize, user_bytes: usize, needs_finalizer: bool) void {
+        fn destroy(ctx: *anyopaque, base: usize, user_bytes: usize, _: bool) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.freed += 1;
             self.last_base = base;
             self.last_bytes = user_bytes;
-            self.last_needs_finalizer = needs_finalizer;
             self.heap.free(@ptrFromInt(base));
         }
     };

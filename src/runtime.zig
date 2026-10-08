@@ -1,7 +1,7 @@
 //! Runtime-wide ownership, allocation, GC scheduling, roots, and host policy.
 //!
 //! `JSRuntime` owns the atom/class/shape registries, allocation diagnostics, job FIFO,
-//! contexts, deferred native cleanup, and persistent handles. It is
+//! contexts, host native entries, and persistent handles. It is
 //! owner-thread confined except at the explicitly synchronized host seams;
 //! handles and root frames keep values alive but never transfer Runtime
 //! ownership. QuickJS source map: `JSRuntime` and its registries at
@@ -21,9 +21,7 @@ pub fn createAllocationTestRuntime(allocator: std.mem.Allocator) !*JSRuntime {
     return rt;
 }
 const std = @import("std");
-const engine_services = @import("engine_services.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 const atom = @import("core/atom.zig");
 const class = @import("core/class.zig");
@@ -34,14 +32,11 @@ const gc_mod = @import("core/gc.zig");
 const GC = gc_mod.Registry;
 const gc_roots_mod = @import("core/gc_roots.zig");
 const gc_driver = @import("core/gc_driver.zig");
-const host_function = @import("core/host_function.zig");
 const native_entry = @import("core/native_entry.zig");
 const job_mod = @import("core/jobs.zig");
-const module = @import("core/module.zig");
 const object_mod = @import("core/object.zig");
 const shape = @import("core/shape.zig");
 const string = @import("core/string.zig");
-const unicode = @import("libs/unicode.zig");
 const var_ref_mod = @import("core/var_ref.zig");
 const JSValue = @import("core/value.zig").JSValue;
 const Object = object_mod.Object;
@@ -50,27 +45,36 @@ const property = @import("core/property.zig");
 const context_mod = @import("core/context.zig");
 const context_registry = @import("core/context_registry.zig");
 const errors = @import("core/errors.zig");
+const thread_stack = @import("core/thread_stack.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
-/// Current thread's call-stack budget for the recursion guard, matching QuickJS
-/// `JS_DEFAULT_STACK_SIZE` (quickjs.h). The guard trips once this many
-/// bytes of native stack have been consumed below the outermost eval frame,
-/// turning pathological recursion (parser/JSON tens of thousands deep) into a
-/// catchable error. 1 MiB leaves ample headroom under the real thread stack
-/// (the main thread has only a few MiB free below the eval entry after the CLI
-/// call chain; worker threads have ~16 MiB) while sitting far above any
-/// legitimate nesting depth — the same value QuickJS uses for conformance runs.
-pub const default_native_stack_size = 1024 * 1024;
-// Debug codegen has materially larger parser/VM frames. Scale the physical
-// allowance so it represents the same logical recursion budget as optimized
-// builds; Release modes retain QuickJS's exact 1 MiB native budget.
-const initial_native_stack_size = if (builtin.mode == .Debug)
-    default_native_stack_size * 4
-else
-    default_native_stack_size;
+/// Native stack budget for the recursion guard: once this many bytes have
+/// been consumed below the outermost eval frame, recursion becomes a
+/// catchable error. QuickJS uses 1 MiB (`JS_DEFAULT_STACK_SIZE`); a zjs
+/// native call level -- a builtin calling back into JavaScript -- costs two
+/// to four times a QuickJS one, so 4 MiB gives callback recursion (`map` over a deep
+/// tree, replacer and comparator callbacks) about QuickJS's depth. The
+/// limit never reaches past the current thread's own stack
+/// (`StackBudget.armNativeLimit`), so a small-stack thread is safe too.
+pub const default_native_stack_size = 4 * 1024 * 1024;
+// Debug and ReleaseSafe codegen have materially larger parser/VM frames
+// (about 3.4x and 1.6x ReleaseFast's per nesting level). Scale the physical
+// allowance so each represents roughly the logical recursion budget of the
+// shipped ReleaseFast build.
+const initial_native_stack_size = switch (builtin.mode) {
+    .Debug => default_native_stack_size * 4,
+    .ReleaseSafe => default_native_stack_size * 2,
+    .ReleaseFast, .ReleaseSmall => default_native_stack_size,
+};
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
+
+/// Host interrupt callback and its borrowed context.
+pub const Interrupt = struct {
+    handler: InterruptHandler,
+    context: ?*anyopaque,
+};
 
 /// Runtime-wide dynamic-import loader authority. A Runtime can execute many
 /// Realms; the active Realm is supplied to the callback at invocation time.
@@ -79,22 +83,23 @@ pub const DynamicImportLoader = struct {
     userdata: ?*anyopaque = null,
 };
 
-/// Scoped loader override. Scopes are intended to be restored in LIFO order;
-/// `restore`/`deinit` are idempotent so error-path defers are safe.
+/// Scoped loader override, restored by `deinit` in LIFO order. `deinit` is
+/// idempotent so error-path defers are safe.
 pub const DynamicImportLoaderScope = struct {
     runtime: *JSRuntime,
     previous: DynamicImportLoader,
+    installed: DynamicImportLoader,
     active: bool = true,
 
-    pub fn restore(self: *DynamicImportLoaderScope) void {
+    pub fn deinit(self: *DynamicImportLoaderScope) void {
         if (!self.active) return;
         self.runtime.assertOwnerThread();
+        // An inner scope still installed means scopes closed out of order;
+        // restoring here would reinstate a stale loader.
+        const current = self.runtime.dynamic_import_loader;
+        std.debug.assert(current.callback == self.installed.callback and current.userdata == self.installed.userdata);
         self.runtime.dynamic_import_loader = self.previous;
         self.active = false;
-    }
-
-    pub fn deinit(self: *DynamicImportLoaderScope) void {
-        self.restore();
     }
 };
 
@@ -122,6 +127,48 @@ pub const VmStackStorage = packed struct(u64) {
         var storage = forLimit(limit);
         storage.ownership = .frame_window;
         return storage;
+    }
+};
+
+/// Call-depth and stack-byte budgets of one runtime (`JSRuntime.stack`).
+pub const StackBudget = struct {
+    /// Runtime-shared logical call depth, including zero-byte nested entries.
+    call_depth: usize = 0,
+    /// Limit for both logical depth and accumulated planned VM-frame bytes.
+    limit: usize = default_stack_size,
+    /// Planned bytes for active bytecode frames, including tail-call callers
+    /// whose physical Entry storage has been reused.
+    bytecode_bytes: usize = 0,
+    /// Nesting count for calls admitted through `enterCallDepth`; it bounds
+    /// host C-stack recursion independently of inline VM call depth.
+    native_call_depth: usize = 0,
+    /// Lower bound for the current thread's call stack. Zero disables the
+    /// check or means it has not yet been initialized.
+    native_limit: usize = 0,
+    /// Address captured in an outermost JS entry frame, not the OS stack's
+    /// allocation start. GC uses it if the OS stack high bound is unavailable.
+    native_top: usize = 0,
+    /// Configured byte budget for descending below `native_top`.
+    native_size: usize = default_native_stack_size,
+    /// Frame-window template derived from `limit`; see `JSRuntime.setStackSize`.
+    frame_storage: VmStackStorage = VmStackStorage.frameWindowForLimit(default_stack_size),
+
+    /// Room the guard leaves at the low end of the thread's stack for the
+    /// frames between two checks and for raising the overflow error.
+    pub const thread_stack_reserve = 256 * 1024;
+
+    /// Derive `native_limit` from `native_top`; a zero budget disables it.
+    /// The limit stays `thread_stack_reserve` above the low end of the
+    /// thread's stack whatever the budget, so the guard's catchable error
+    /// always comes before a real stack overflow.
+    pub fn armNativeLimit(self: *StackBudget) void {
+        if (self.native_size == 0) {
+            self.native_limit = 0;
+            return;
+        }
+        var limit = self.native_top -| self.native_size;
+        if (thread_stack.bounds()) |stack| limit = @max(limit, stack.low +| thread_stack_reserve);
+        self.native_limit = limit;
     }
 };
 
@@ -233,7 +280,7 @@ pub const VmStackArena = struct {
                 first_chunk_slots
             else
                 chunk_slots;
-            const chunk = rt.allocRuntime(JSValue, allocation_slots) catch return null;
+            const chunk = rt.allocNative(JSValue, allocation_slots) catch return null;
             self.chunks[next_index] = chunk;
             self.chunk_count = next_index + 1;
         }
@@ -274,31 +321,6 @@ pub const VmStackArena = struct {
 pub const MicrotaskPolicy = job_mod.Policy;
 pub const MicrotaskScope = job_mod.Scope;
 pub const MicrotaskExceptionHandler = job_mod.ExceptionHandler;
-
-pub const RuntimeOptions = struct {
-    /// Optional diagnostic clock. Its borrowed state must outlive the Runtime.
-    diagnostic_clock: ?RuntimeDiagnosticClock = null,
-    microtask_policy: MicrotaskPolicy = .auto,
-    memory_limit: ?usize = null,
-    /// Initial collection threshold; collections adjust the next threshold.
-    gc_threshold: usize = default_gc_threshold,
-    gc_policy: gc_mod.Policy = .{},
-    stack_size: usize = default_stack_size,
-    native_stack_size: usize = initial_native_stack_size,
-    interrupt_handler: ?InterruptHandler = null,
-    interrupt_context: ?*anyopaque = null,
-    can_block: bool = false,
-};
-
-pub const Options = RuntimeOptions;
-
-/// Host-provided diagnostic time in monotonic nanoseconds. Called on the
-/// Runtime owner thread, including inside collection; must not allocate,
-/// reenter the engine, or mutate Runtime state. Never used for GC scheduling.
-const RuntimeDiagnosticClock = struct {
-    context: ?*anyopaque = null,
-    nowNanos: *const fn (?*anyopaque) u64,
-};
 
 pub const MemoryUsage = struct {
     /// Native allocation counters are unavailable when diagnostic instrumentation is off.
@@ -344,29 +366,6 @@ pub const ValueRootSlice = union(enum) {
 
 pub const ValueRootBuffer = roots_mod.ValueRootBuffer;
 
-/// Native copy of a typed var-ref cell slice. Unlike ValueRootBuffer, this
-/// storage requires an explicitly activated ValueRootFrame to keep cells live.
-pub const CellRootBuffer = struct {
-    cells: []*var_ref_mod.VarRef = &.{},
-
-    pub fn initCopy(rt: *JSRuntime, source: []const *var_ref_mod.VarRef) !CellRootBuffer {
-        if (source.len == 0) return .{};
-        const cells = try rt.allocNative(*var_ref_mod.VarRef, source.len);
-        for (source, 0..) |cell, idx| cells[idx] = cell;
-        return .{ .cells = cells };
-    }
-
-    pub fn deinit(self: *CellRootBuffer, rt: *JSRuntime) void {
-        const cells = self.cells;
-        self.cells = &.{};
-        if (cells.len != 0) rt.freeNative(*var_ref_mod.VarRef, cells);
-    }
-
-    pub fn slice(self: *CellRootBuffer) ValueRootSlice {
-        return .{ .cells = &self.cells };
-    }
-};
-
 /// A GC header (Shape, Module, VarRef, FunctionBytecode, realm) named as a
 /// root for a mutation or construction window. Tracing does not treat a Zig
 /// `*Shape` local as a root unless it is named here.
@@ -387,18 +386,13 @@ pub const AtomRootSlot = union(enum) {
     /// inside the window is visible to the tracer.
     single: *const atom.Atom,
     /// A native `[]Atom` array under construction. The pointer is to the
-    /// slice header, not to its bytes, so `appendOwnedAtom`-style reallocation
+    /// slice header, not to its bytes, so `AtomListBuilder` reallocation
     /// mid-build stays covered and the partially filled array is traced at its
     /// current length.
     list: *const []atom.Atom,
     /// Fixed immutable key snapshot. Atom identities never relocate.
     borrowed: []const atom.Atom,
 };
-
-/// Precise ValueRootFrame linking. Always on: tests need it because they have
-/// no conservative scanner, and the CLI links container/window frames
-/// (design §7.1).
-pub const value_root_frames_enabled = gc_roots_mod.value_root_frames_enabled;
 
 /// Production (non-test) does not list-link scalar Zig locals; those wait for
 /// conservative stack/register capture. Tests link every activate.
@@ -407,33 +401,20 @@ pub const value_root_link_containers_only = !builtin.is_test;
 /// Scalar scope helpers exist only when scalar frames can actually be linked.
 /// In production tracing builds the policy above rejects them, so keeping their
 /// storage and frame would preserve stack/TLS work without adding a root.
-const value_root_scalar_scopes_enabled = value_root_frames_enabled and !value_root_link_containers_only;
-
-pub const ValueRootFrameStats = struct {
-    activate_calls: usize = 0,
-    linked: usize = 0,
-    container_linked: usize = 0,
-    scalar_linked: usize = 0,
-
-    pub fn reset(self: *@This()) void {
-        self.* = .{};
-    }
-};
-
-/// Test-only observer counters. Production builds do not maintain them, even
-/// when container/window frames are linked by the tracing collector.
-pub threadlocal var value_root_frame_stats: ValueRootFrameStats = .{};
+const value_root_scalar_scopes_enabled = !value_root_link_containers_only;
 
 pub const ValueRootFrame = struct {
     previous: ?*const ValueRootFrame = null,
     slices: []const ValueRootSlice = &.{},
     values: []const *JSValue = &.{},
     objects: []const *?*Object = &.{},
-    headers: if (value_root_frames_enabled) []const HeaderRootValue else void =
-        if (value_root_frames_enabled) &.{} else {},
+    headers: []const HeaderRootValue = &.{},
     /// TGC S3 §4 class B atom-id roots; see `AtomRootSlot`.
-    atoms: if (value_root_frames_enabled) []const AtomRootSlot else void =
-        if (value_root_frames_enabled) &.{} else {},
+    atoms: []const AtomRootSlot = &.{},
+    /// Whether `activate` linked this frame. Only the container-only policy
+    /// skips frames, so only it needs to remember which ones it linked.
+    linked: if (value_root_link_containers_only) bool else void =
+        if (value_root_link_containers_only) false else {},
 
     /// True when this frame roots a native JSValue/cell array or window.
     /// Conservative scanning of the C stack sees the backing pointer, not the
@@ -444,20 +425,18 @@ pub const ValueRootFrame = struct {
     /// A frame without any window is not linked in production, whatever its
     /// `.values` pointers name, so heap-backed values must be rooted through
     /// `.slices` (see `RootedValueCopies`).
-    pub inline fn hasNativeWindow(self: *const ValueRootFrame) bool {
+    inline fn hasNativeWindow(self: *const ValueRootFrame) bool {
         return self.slices.len != 0;
     }
 
     /// Atom ids can never be recovered by the conservative scanner, so a
     /// frame naming any must link even in the container-only production
     /// policy that drops scalar JSValue frames.
-    pub inline fn hasAtomRoots(self: *const ValueRootFrame) bool {
-        if (comptime !value_root_frames_enabled) return false;
+    inline fn hasAtomRoots(self: *const ValueRootFrame) bool {
         return self.atoms.len != 0;
     }
 
-    pub inline fn hasHeaderRoots(self: *const ValueRootFrame) bool {
-        if (comptime !value_root_frames_enabled) return false;
+    inline fn hasHeaderRoots(self: *const ValueRootFrame) bool {
         return self.headers.len != 0;
     }
 
@@ -467,43 +446,31 @@ pub const ValueRootFrame = struct {
     /// native windows, atom roots and stable header roots always link.
     pub inline fn activate(self: *ValueRootFrame, rt: *JSRuntime) void {
         rt.roots.assertMutable();
-        if (comptime value_root_frames_enabled) {
-            const container = self.hasNativeWindow();
-            if (comptime builtin.is_test) value_root_frame_stats.activate_calls += 1;
-            if (comptime value_root_link_containers_only) {
-                if (!container and !self.hasAtomRoots() and !self.hasHeaderRoots()) {
-                    return;
-                }
+        if (comptime value_root_link_containers_only) {
+            if (!self.hasNativeWindow() and !self.hasAtomRoots() and !self.hasHeaderRoots()) {
+                return;
             }
-            std.debug.assert(rt.active_value_roots != self);
-            self.previous = rt.active_value_roots;
-            rt.active_value_roots = self;
-            if (comptime builtin.is_test) {
-                value_root_frame_stats.linked += 1;
-                if (container) {
-                    value_root_frame_stats.container_linked += 1;
-                } else {
-                    value_root_frame_stats.scalar_linked += 1;
-                }
-            }
+            self.linked = true;
         }
+        std.debug.assert(rt.active_value_roots != self);
+        self.previous = rt.active_value_roots;
+        rt.active_value_roots = self;
     }
 
     /// Restore the frame that was active before `activate`. Root frames are a
     /// strict LIFO stack; the assertion localizes mismatched scope teardown at
-    /// the registration seam. Shadow CLI may skip scalar activates, so a
-    /// skipped frame is not the current head and deactivate is a no-op.
+    /// the registration seam. A frame the container-only policy never linked
+    /// is a no-op; a linked frame that is not the head is a teardown-order bug
+    /// that would leave a dead frame on the chain.
     pub inline fn deactivate(self: *ValueRootFrame, rt: *JSRuntime) void {
         rt.roots.assertMutable();
-        if (comptime value_root_frames_enabled) {
-            if (comptime value_root_link_containers_only) {
-                if (rt.active_value_roots != self) return;
-            } else {
-                std.debug.assert(rt.active_value_roots == self);
-            }
-            rt.active_value_roots = self.previous;
-            self.previous = null;
+        if (comptime value_root_link_containers_only) {
+            if (!self.linked) return;
+            self.linked = false;
         }
+        if (rt.active_value_roots != self) @panic("ValueRootFrame deactivated out of LIFO order");
+        rt.active_value_roots = self.previous;
+        self.previous = null;
     }
 };
 
@@ -612,22 +579,18 @@ pub fn AtomRootScope(comptime count: usize) type {
     return struct {
         const Self = @This();
 
-        storage: if (value_root_frames_enabled) [count]AtomRootSlot else void =
-            if (value_root_frames_enabled) undefined else {},
-        frame: if (value_root_frames_enabled) ValueRootFrame else void =
-            if (value_root_frames_enabled) .{} else {},
+        storage: [count]AtomRootSlot = undefined,
+        frame: ValueRootFrame = .{},
 
         /// Bind the frame to this scope's storage at its final stack address,
         /// then link it — same reason as `ValueRootScope.activate`.
         pub inline fn activate(self: *Self, rt: *JSRuntime) void {
-            if (comptime value_root_frames_enabled) {
-                self.frame.atoms = &self.storage;
-                self.frame.activate(rt);
-            }
+            self.frame.atoms = &self.storage;
+            self.frame.activate(rt);
         }
 
         pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
-            if (comptime value_root_frames_enabled) self.frame.deactivate(rt);
+            self.frame.deactivate(rt);
         }
     };
 }
@@ -635,33 +598,24 @@ pub fn AtomRootScope(comptime count: usize) type {
 /// Build an inactive `AtomRootScope` over `slots`, a tuple of `*const Atom`
 /// (or `*Atom`). The caller activates it; see `AtomRootScope`.
 pub inline fn rootAtoms(slots: anytype) AtomRootScope(slots.len) {
-    if (comptime value_root_frames_enabled) {
-        var scope: AtomRootScope(slots.len) = .{};
-        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .single = slot };
-        return scope;
-    }
-    return .{};
+    var scope: AtomRootScope(slots.len) = .{};
+    inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .single = slot };
+    return scope;
 }
 
 /// Root a native `[]Atom` array through its slice header, so appends and the
 /// reallocations they cause stay covered for the whole build window.
 pub inline fn rootAtomList(list: *const []atom.Atom) AtomRootScope(1) {
-    if (comptime value_root_frames_enabled) {
-        var scope: AtomRootScope(1) = .{};
-        scope.storage[0] = .{ .list = list };
-        return scope;
-    }
-    return .{};
+    var scope: AtomRootScope(1) = .{};
+    scope.storage[0] = .{ .list = list };
+    return scope;
 }
 
 /// Root several `[]Atom` arrays (and/or single ids) with one frame.
 pub inline fn rootAtomSlots(slots: anytype) AtomRootScope(slots.len) {
-    if (comptime value_root_frames_enabled) {
-        var scope: AtomRootScope(slots.len) = .{};
-        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
-        return scope;
-    }
-    return .{};
+    var scope: AtomRootScope(slots.len) = .{};
+    inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
+    return scope;
 }
 
 pub const RootTraceError = gc_roots_mod.RootTraceError;
@@ -673,76 +627,55 @@ pub const RootVisitor = gc_roots_mod.RootVisitor;
 /// exec runs the dequeued entry.
 ///
 /// The chain is thread-local rather than a JSRuntime field: jobs execute on
-/// their Runtime's owner thread, nested drains must be LIFO, and default RC
-/// must not grow JSRuntime for a tracing-only root seam. A nested drain for a
-/// different Runtime is harmless; tracing filters each record by its typed
-/// Runtime pointer.
-pub const active_job_roots_enabled = value_root_frames_enabled;
-
+/// their Runtime's owner thread and nested drains must be LIFO. A nested
+/// drain for a different Runtime is harmless; tracing filters each record by
+/// its typed Runtime pointer.
 pub const ActiveJobRoot = struct {
-    previous: if (active_job_roots_enabled) ?*const ActiveJobRoot else void =
-        if (active_job_roots_enabled) null else {},
-    runtime: if (active_job_roots_enabled) *JSRuntime else void =
-        if (active_job_roots_enabled) undefined else {},
-    job: if (active_job_roots_enabled) *job_mod.Job else void =
-        if (active_job_roots_enabled) undefined else {},
+    previous: ?*const ActiveJobRoot = null,
+    runtime: *JSRuntime = undefined,
+    job: *job_mod.Job = undefined,
 
     pub inline fn activate(self: *ActiveJobRoot, rt: *JSRuntime, job: *job_mod.Job) void {
-        if (comptime active_job_roots_enabled) {
-            rt.assertOwnerThread();
-            std.debug.assert(job.runtime == rt);
-            std.debug.assert(active_job_root_head != self);
-            self.previous = active_job_root_head;
-            self.runtime = rt;
-            self.job = job;
-            active_job_root_head = self;
-        }
+        rt.assertOwnerThread();
+        std.debug.assert(job.runtime == rt);
+        std.debug.assert(active_job_root_head != self);
+        self.previous = active_job_root_head;
+        self.runtime = rt;
+        self.job = job;
+        active_job_root_head = self;
     }
 
     pub inline fn deactivate(self: *ActiveJobRoot, rt: *JSRuntime) void {
-        if (comptime active_job_roots_enabled) {
-            rt.assertOwnerThread();
-            std.debug.assert(self.runtime == rt);
-            std.debug.assert(active_job_root_head == self);
-            active_job_root_head = self.previous;
-            self.previous = null;
-            self.runtime = undefined;
-            self.job = undefined;
-        }
+        rt.assertOwnerThread();
+        std.debug.assert(self.runtime == rt);
+        std.debug.assert(active_job_root_head == self);
+        active_job_root_head = self.previous;
+        self.previous = null;
+        self.runtime = undefined;
+        self.job = undefined;
     }
 };
 
-threadlocal var active_job_root_head: if (active_job_roots_enabled) ?*const ActiveJobRoot else void =
-    if (active_job_roots_enabled) null else {};
+threadlocal var active_job_root_head: ?*const ActiveJobRoot = null;
 
 comptime {
-    if (active_job_roots_enabled) {
-        std.debug.assert(@sizeOf(ActiveJobRoot) == 3 * @sizeOf(usize));
-    } else {
-        std.debug.assert(@sizeOf(ActiveJobRoot) == 0);
-    }
+    std.debug.assert(@sizeOf(ActiveJobRoot) == 3 * @sizeOf(usize));
 }
 
 /// First word of the exec-owned `active_invocation` record (design §7.1).
 /// Core only knows this prefix; the rest of the record is exec-private.
-/// Exec fills `traceRoots` with a no-fail live-window walk. Default `rc`
-/// erases the call at comptime so production `.text` stays identical.
+/// Exec fills `traceRoots` with a no-fail live-window walk.
 pub const ActiveInvocationTrace = struct {
     traceRoots: *const fn (invocation: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
 };
 
 /// Exec-owned snapshot of the process-global Atomics.waitAsync waiter
-/// registry (design §7.1). Core calls this from `traceActiveRoots` when
-/// `value_root_frames_enabled`. Default `rc` stores `void`. Exec retains
-/// Promise roots under the waiter mutex, unlocks, then visits.
+/// registry (design §7.1). Core calls this from `traceActiveRoots`. Exec
+/// retains Promise roots under the waiter mutex, unlocks, then visits.
 pub const AtomicsWaitAsyncTrace = *const fn (rt: *anyopaque, visitor: *RootVisitor) RootTraceError!void;
 
-pub var trace_atomics_wait_async: if (value_root_frames_enabled)
-    ?AtomicsWaitAsyncTrace
-else
-    void = if (value_root_frames_enabled) null else {};
+pub var trace_atomics_wait_async: ?AtomicsWaitAsyncTrace = null;
 
-const deferred_cleanup = @import("core/deferred_cleanup.zig");
 const native_bindings = @import("core/native_bindings.zig");
 const property_state = @import("core/property_state.zig");
 const string_cache = @import("core/string_cache.zig");
@@ -764,324 +697,125 @@ pub const JSValueHandle = roots_mod.JSValueHandle;
 pub const LocalHandle = roots_mod.LocalHandle;
 pub const HandleScope = roots_mod.HandleScope;
 pub const WeakPersistentValue = roots_mod.WeakPersistentValue;
-pub const WeakPersistent = roots_mod.WeakPersistent;
 pub const NativePin = roots_mod.NativePin;
 pub const pinValueForNative = roots_mod.pinValueForNative;
 pub const pinHeaderForNative = roots_mod.pinHeaderForNative;
 
-pub const NativeCleanupJob = struct {
-    finalizer: host_function.ExternalFinalizer,
-    ptr: *anyopaque,
-
-    pub fn run(self: NativeCleanupJob) void {
-        self.finalizer(self.ptr);
-    }
-};
-
-pub const DeferredClassPayloadFinalizer = struct {
-    class_id: class.ClassId = class.invalid_class_id,
-    generation: u64 = 0,
-    finalizer: class.PayloadFinalizer,
-    mark: ?class.PayloadMark = null,
-    payload: class.Payload = null,
-    payload_kind: class.PayloadKind = .none,
-    object_identity: usize = 0,
-
-    pub fn run(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime) void {
-        defer rt.classes.releaseDeferredPayloadCallbacks(self.class_id, self.generation);
-        // Keep the canonical payload slot populated while the callback runs:
-        // `active_deferred_class_payload_finalizer` publishes this exact job as
-        // a root across callback reentry. Moving it to an unregistered local
-        // before the call recreates the dequeue-to-callback root gap the active
-        // slot exists to close.
-        self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &self.payload);
-        object_mod.destroyDetachedClassPayload(rt, self.class_id, self.payload_kind, &self.payload);
-    }
-
-    pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        if (self.payload == null) return;
-        const mark = self.mark orelse return;
-        const PayloadTraceAdaptor = struct {
-            root_visitor: *RootVisitor,
-            err: ?RootTraceError = null,
-
-            pub fn visitValue(context: *anyopaque, value_ptr: *anyopaque) void {
-                const adaptor: *@This() = @ptrCast(@alignCast(context));
-                const value: *JSValue = @ptrCast(@alignCast(value_ptr));
-                adaptor.root_visitor.value(value) catch |err| {
-                    adaptor.err = err;
-                };
-            }
-
-            pub fn visitObject(context: *anyopaque, object_ptr: *anyopaque) void {
-                const adaptor: *@This() = @ptrCast(@alignCast(context));
-                const object: *?*Object = @ptrCast(@alignCast(object_ptr));
-                adaptor.root_visitor.optionalObject(object) catch |err| {
-                    adaptor.err = err;
-                };
-            }
-        };
-        var adaptor = PayloadTraceAdaptor{ .root_visitor = visitor };
-        var payload_visitor = class.PayloadVisitor{
-            .context = @ptrCast(&adaptor),
-            .visit_value = PayloadTraceAdaptor.visitValue,
-            .visit_object = PayloadTraceAdaptor.visitObject,
-        };
-        mark(@ptrCast(rt), @ptrCast(&self.object_identity), &self.payload, &payload_visitor);
-        if (adaptor.err) |err| return err;
-    }
-};
-
-pub const CachedIteratorNextEntry = property_state.CachedIteratorNextEntry;
-
-/// A Runtime and every Realm/heap structure owned by it are mutated only by
-/// the thread that initialized the Runtime. Process-global facilities with
-/// their own synchronization (notably ClassId allocation) are independent of
-/// this contract.
+/// A Runtime and every Realm/heap structure owned by it (class ids included:
+/// each Runtime has its own ClassTable) are mutated only by the thread that
+/// initialized the Runtime.
 pub const RuntimeMutationError = error{WrongRuntimeThread};
 
-pub const RuntimeCollectionError = gc_mod.CollectionError || RuntimeMutationError;
-
-pub const NativeEntryFinalizer = struct {
-    ptr: *anyopaque,
-    finalize: *const fn (*anyopaque) void,
-};
-
-pub const Diagnostics = struct {
-    allocations: native_allocation.AllocationDiagnostics = .{},
-};
-
 pub const JSRuntime = struct {
-    pub const Options = RuntimeOptions;
-    pub const DiagnosticClock = RuntimeDiagnosticClock;
-    diagnostic_clock: ?RuntimeDiagnosticClock = null,
+    /// Iterations a long native loop runs between interrupt polls.
+    pub const native_poll_interval: u32 = 4096;
 
-    /// Runtime-shared logical call depth, including zero-byte nested entries.
-    call_depth: usize = 0,
-    /// Limit for both logical depth and accumulated planned VM-frame bytes.
-    stack_size: usize = default_stack_size,
-    /// Planned bytes for active bytecode frames, including tail-call callers
-    /// whose physical Entry storage has been reused.
-    active_bytecode_stack_bytes: usize = 0,
-    /// Lower bound for the current thread's call stack. Zero disables the
-    /// check or means it has not yet been initialized.
-    native_stack_limit: usize = 0,
-    /// Nesting count for calls admitted through `enterCallDepth`; it bounds
-    /// host C-stack recursion independently of inline VM call depth.
-    native_call_depth: usize = 0,
-    /// Address captured in an outermost JS entry frame, not the OS stack's
-    /// allocation start. GC uses it if the OS stack high bound is unavailable.
-    native_stack_top: usize = 0,
-    /// Configured byte budget for descending below `native_stack_top`.
-    native_stack_size: usize = default_native_stack_size,
-    /// Head of the stack-local observable backtrace chain. Native calls and
-    /// synchronous native fences replace it on entry and restore it on return.
-    current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
+    pub const Options = struct {
+        /// Optional diagnostic clock. Its borrowed state must outlive the Runtime.
+        diagnostic_clock: ?DiagnosticClock = null,
+        microtask_policy: MicrotaskPolicy = .auto,
+        memory_limit: ?usize = null,
+        /// Initial collection threshold; collections adjust the next threshold.
+        gc_threshold: usize = default_gc_threshold,
+        gc_policy: gc_mod.Policy = .{},
+        stack_size: usize = default_stack_size,
+        native_stack_size: usize = initial_native_stack_size,
+        interrupt_handler: ?InterruptHandler = null,
+        interrupt_context: ?*anyopaque = null,
+        can_block: bool = false,
+    };
 
-    /// Borrowed exec-owned authority for the currently running bytecode
-    /// invocation. Core deliberately keeps this opaque: synchronous native
-    /// callbacks recover the concrete Machine through exec without creating
-    /// a core -> exec import cycle. Routing reads it on every eligible native
-    /// callback; this pointer is separate from the stack-accounting state.
-    active_invocation: ?*anyopaque = null,
-    /// Exec-owned resident execution root for embedder -> JS calls
-    /// (`exec/call_site.zig`), created on first use and retired
-    /// through `host_invocation_retire` before the destroy invariants run.
-    host_invocation: ?*anyopaque = null,
-    host_invocation_retire: ?*const fn (*JSRuntime, *anyopaque) void = null,
-    /// R-1 small-function-inlining budget: published production bytecode bytes
-    /// and bytes consumed by specialized copies. Exec reads these; core only
-    /// accounts.
-    small_inline_published_bytes: usize = 0,
-    small_inline_specialized_bytes: usize = 0,
-    small_inline_destroy: ?*const fn (rt: *JSRuntime, fb: *anyopaque) void = null,
-    /// TGC S3 §2.2 edge H. The small-inline `CallerState` hangs off a
-    /// FunctionBytecode's hot pad and holds atom ids (`callee_name`,
-    /// `callee_file`, `apply_forward[].method_atom`); it lives in exec, which
-    /// core must not import, so the FB trace reports those ids through this
-    /// hook -- the same seam `small_inline_destroy` uses for teardown.
-    small_inline_trace_atoms: ?*const fn (
-        rt: *JSRuntime,
-        fb: *anyopaque,
-        ctx: *anyopaque,
-        visit: *const fn (ctx: *anyopaque, id: atom.Atom) void,
-    ) void = null,
-    owner_thread_id: std.Thread.Id,
+    /// Host-provided diagnostic time in monotonic nanoseconds. Called on the
+    /// Runtime owner thread, including inside collection; must not allocate,
+    /// reenter the engine, or mutate Runtime state. Never used for GC scheduling.
+    pub const DiagnosticClock = struct {
+        context: ?*anyopaque = null,
+        nowNanos: *const fn (?*anyopaque) u64,
+    };
+
+    // Ownership and engine-wide registries.
+
     /// Allocator that owns this stable Runtime allocation.
     allocator: std.mem.Allocator,
-    /// Four-way atom-string cache cursor. Same align-1 slot the old
-    /// `compact_state` packed byte occupied, so `vm_stack` stays put.
-    recent_atom_string_next: u8 = 0,
+    owner_thread_id: std.Thread.Id,
     gc: *GC,
-    /// Optional allocation counters and test-only failure injection.
-    diagnostics: Diagnostics = .{},
-    /// Allocation-debt pacing for object-boundary incremental mark/destruction
-    /// assists. Scheduler/callback/idle polls bypass this counter.
-    /// Account immediately after the previous major slice. During destruction,
-    /// net growth catches backing/storage allocations between safe object
-    /// boundaries without polling inside an unpublished backing allocation.
-    /// Force a partial destruction slice in route-asserting tests. Absent
-    /// from production layout and code; shipped slices always use GC policy.
     atoms: *AtomTable,
     classes: *ClassTable,
     shapes: *ShapeRegistry,
-    dynamic_import_loader: DynamicImportLoader = .{},
-    auto_init_descriptors: std.ArrayListUnmanaged(*property.AutoInit) = .empty,
-    /// QuickJS `context_list`: intrusive membership only.  Realm ownership is
-    /// carried by `RealmRef` and the GC header, never by these links.
-    context_head: ?*context_mod.JSContext = null,
-    context_tail: ?*context_mod.JSContext = null,
-    /// Construction-only membership. These realms are deliberately absent
-    /// from `context_head` and root-provider traversal until publication.
-    constructing_context_head: ?*context_mod.JSContext = null,
-    constructing_context_tail: ?*context_mod.JSContext = null,
+    /// Optional allocation counters and test-only failure injection.
+    allocation_diagnostics: native_allocation.AllocationDiagnostics = .{},
+    diagnostic_clock: ?DiagnosticClock = null,
 
-    borrowed_reference_holders: std.ArrayListUnmanaged(*Object) = .empty,
-    weak_reference_holder_head: ?*Object = null,
-    weak_reference_holder_tail: ?*Object = null,
-    /// Host handles and root providers. Inline storage views are derived on
-    /// access from the default-initialized root set.
-    roots: roots_mod.RootSet = .{},
-    active_no_gc_scope: if (gc_scope.checks_enabled) ?*NoGcScope else void = if (gc_scope.checks_enabled) null else {},
-    active_value_roots: ?*const ValueRootFrame = null,
-    job_queue: job_mod.Queue = undefined,
-    microtasks: job_mod.Checkpoint = .{},
-    /// WeakRef [[KeptAlive]]. Traced as a root
-    /// and cleared at job end.
-    weakref_kept_alive: std.ArrayListUnmanaged(JSValue) = .empty, // gc-slot: heap
-    /// Test-only root-scan override (`forcePreciseRootScanForTest`). Pacing
-    /// MACHINERY tests call the engine-trigger entry points from a quiescent
-    /// test frame with dropGcPtr-scrubbed locals; the mode-derived
-    /// `.engine_active` policy would conservatively retain their ghosts and
-    /// break deterministic reclamation assertions. Production layout is
-    /// untouched (void outside test builds).
-    test_root_scan_override: if (builtin.is_test) ?gc_mod.RootScan else void =
-        if (builtin.is_test) null else {},
+    // Realms and host services.
+
+    contexts: context_registry.Lists = .{},
+    dynamic_import_loader: DynamicImportLoader = .{},
+    native_bindings: native_bindings.Registry = .{},
+    /// The regexp executor's interrupt-poll countdown, shared by every match.
+    regexp_interrupt_counter: i32 = 10_000,
+    /// Native-loop iterations left until the next interrupt poll
+    /// (`pollNativeWork`), shared by every native loop.
+    native_poll_countdown: u32 = native_poll_interval,
+    interrupt: ?Interrupt = null,
+    termination_requested: std.atomic.Value(bool) = .init(false),
+    can_block: bool = false,
     /// Cross-thread, allocation-free wake signal for host completions that
     /// must be consumed on this Runtime's owner thread. Atomics.waitAsync is
     /// the first producer; the signal carries no JS state and is reset only
     /// while the producer registry mutex excludes a lost-wakeup race.
     host_completion_event: std.Io.Event = .unset,
-    deferred_native_cleanups: std.ArrayListUnmanaged(NativeCleanupJob) = .empty,
-    draining_deferred_native_cleanups: bool = false,
-    deferred_native_cleanup_run_count: usize = 0,
-    deferred_class_payload_finalizers: std.ArrayListUnmanaged(DeferredClassPayloadFinalizer) = .empty,
-    /// Live wrappers whose reentrant plugin finalizer has a reserved queue
-    /// slot. Root tracing visits only their declared payload edges: the
-    /// wrapper itself may be condemned, but the callback's payload graph must
-    /// survive until ownership transfers to the queued job.
-    deferred_class_payload_roots: std.ArrayListUnmanaged(*Object) = .empty,
-    reserved_deferred_class_payload_finalizer_slots: usize = 0,
-    draining_deferred_class_payload_finalizers: bool = false,
-    active_deferred_class_payload_finalizer: ?*DeferredClassPayloadFinalizer = null,
-    deferred_class_payload_finalizer_run_count: usize = 0,
-    borrowed_weak_cleanup_identities: std.ArrayListUnmanaged(usize) = .empty,
-    /// O(1) membership companion for `borrowed_weak_cleanup_identities`.
-    /// Only even (object) identities are inserted; symbol identities keep
-    /// the slice-scan semantics of the identity list.
-    borrowed_weak_cleanup_identity_set: std.AutoHashMapUnmanaged(usize, void) = .empty,
-    /// Weak identity registry: maps object header addresses to monotonically
-    /// increasing weak ids and back. Weak slots (WeakRef/WeakMap/WeakSet/
-    /// FinalizationRegistry/WeakRootSlot) store `weak_id << 1` instead of the
-    /// header address, so a recycled allocation can never alias a stale weak
-    /// identity and weak lookups are O(1) instead of a full heap scan.
-    /// Register, rollback, and unlink live in `gc_weak.zig`.
-    weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-    weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
-    /// TGC S4-c retired the `slots2_payloads` side table: a slots2 object that
-    /// attaches a class payload now spills its two inline property entries into
-    /// a `.property_storage` cell, which frees the arm word at body+24 to be
-    /// the payload slot every other layout already has. This counter stays as
-    /// the observable for that (rare) spill.
-    next_weak_id: usize = 1,
-    borrowed_weak_cleanup_active: bool = false,
-
-    gc_running: bool = false,
-    current_exception: JSValue = JSValue.uninitialized(),
-    /// QuickJS `current_exception_is_uncatchable`. Interrupt termination owns
-    /// a real pending InternalError but bytecode catch markers must not consume
-    /// it. Every ordinary throw resets this flag.
-    current_exception_uncatchable: bool = false,
-    /// Set when the pending exception is the engine's own out-of-memory
-    /// InternalError. Allocation failure is deliberately catchable (see
-    /// `exception_ops.runtimeErrorInfo`), which means the native seam turns it
-    /// into a JS exception and the original `error.OutOfMemory` would otherwise
-    /// be lost -- an uncaught OOM would reach the embedder as a plain
-    /// `error.JSException`. This flag lets `nativeHostError` restore the
-    /// specific error, keeping the other half of that contract: JS may catch
-    /// it, but a path with no handler still surfaces `error.OutOfMemory`.
-    /// Reset by every ordinary throw, take, and clear, exactly like the
-    /// uncatchable flag above.
-    current_exception_out_of_memory: bool = false,
-    formatting_error_stack: bool = false,
-    backtrace_frames: []context_mod.BacktraceFrame = &.{},
-    backtrace_capacity: usize = 0,
-    active_native_call: ?*const anyopaque = null,
-    vm_stack_frame_storage: VmStackStorage = VmStackStorage.frameWindowForLimit(default_stack_size),
-    /// Per-runtime VM value-stack arena for bytecode call frames. Its chunk
-    /// metadata and the stack-accounting state in `hot` have separate owners.
-    vm_stack: VmStackArena align(64) = .{},
-    termination_requested: std.atomic.Value(bool) = .init(false),
-    interrupt_handler: ?InterruptHandler = null,
-    interrupt_context: ?*anyopaque = null,
-    can_block: bool = false,
-    /// The single-code-unit string table: one shared latin1 body per code
-    /// unit `0..255`, created lazily on first request via `singleByteString`
-    /// and then never collected. The slot itself is the root
-    /// (`traceStringCacheRoots`), so a borrow of the body needs no retain
-    /// (ref-counting was deleted in TGC S1-S3) and the whole table is dropped
-    /// in `JSRuntime.destroy`.
-    ///
-    /// Every one-code-unit producer reads it: `charAt` / `at` /
-    /// `String.fromCharCode` with one argument / the string iterator /
-    /// `s[i]` indexing / a length-1 `slice`. Code units `>= 0x100` still
-    /// allocate. Sharing is unobservable because strings are compared by
-    /// value and are immutable; latin1 storage means the byte IS the code
-    /// unit, so `0x80..0xff` are as exact as the ASCII half.
-    ///
-    /// Hot paths like `getStringIndexValue` (`hex[i]`-style indexing in
-    /// URI decode sweeps) call this thousands of times per
-    /// inner iteration; reusing cached instances eliminates two heap
-    /// allocations per call.
-    single_byte_strings: [256]?*string.String = @splat(null),
-    /// Lazy cache for the immutable empty string. This shows up during
-    /// standard global setup and in common `String`/JSON paths.
-    empty_string: ?*string.String = null,
-    /// Single-entry cache for hot two-code-unit strings. URI stress loops
-    /// compare `decodeURI("%F0...")` against
-    /// `String.fromCharCode(H, L)` for each non-BMP code point; keeping
-    /// the most recent pair lets both calls share one immutable string
-    /// without retaining the whole sweep.
-    recent_two_unit_string: ?string_cache.RecentTwoUnit = null,
-    /// Tiny cache for atom-to-string materialization. This catches hot
-    /// bytecode constants without retaining every atom string in the program;
-    /// regexp literals in particular alternate between source and flags atoms.
-    recent_atom_strings: [4]?string_cache.RecentAtom = @splat(null),
-    /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
-    /// This is a general URI hot-path cache, not a fixture shortcut:
-    /// ECMAScript URI helpers and decimal-to-percent harnesses both
-    /// repeatedly construct these immutable three-byte strings.
-    percent_hex_strings: [256]?*string.String = @splat(null),
-    /// Lazy cache for small integer strings ("0".."255").
-    small_int_strings: [256]?*string.String = @splat(null),
-    /// Error object preallocated while memory is plentiful so the VM catch
-    /// machinery can still materialize a catch value when the heap is fully
-    /// exhausted (QuickJS's preallocated out-of-memory exception analogue).
-    /// Populated by the exec layer at context-global bootstrap.
-    performance_time_origin_ms: f64 = 0,
     opcode_profile: ?*profile.OpcodeProfile = null,
-    /// NB2 (design §3.1 / §5.5): host-registered `NativeEntry`s. Each is an
-    /// individually allocated, address-stable, never-freed-before-teardown
-    /// record; the list only exists to free them at `deinit`.
-    native_entries: std.ArrayListUnmanaged(*native_entry.NativeEntry) = .empty,
-    /// Ownership registrations for entry `state` pointers (run on the
-    /// runtime thread at teardown, like external record finalizers).
-    native_entry_finalizers: std.ArrayListUnmanaged(NativeEntryFinalizer) = .empty,
-    /// Shared dispatch record for external host functions (exec-owned
-    /// trampoline, installed with the internal builtin tables). Null until
-    /// exec registers it; a function published before that keeps the
-    /// record-less host path.
-    cached_iterator_next_entries: std.ArrayListUnmanaged(CachedIteratorNextEntry) = .empty,
+
+    // Execution and stack accounting.
+
+    stack: StackBudget = .{},
+    /// Per-runtime VM value-stack arena for bytecode call frames.
+    vm_stack: VmStackArena align(64) = .{},
+    /// Borrowed exec-owned authority for the currently running bytecode
+    /// invocation. Core deliberately keeps this opaque: synchronous native
+    /// callbacks recover the concrete Machine through exec without creating
+    /// a core -> exec import cycle.
+    active_invocation: ?*anyopaque = null,
+    /// Exec-owned native environment of the innermost native call.
+    active_native_call: ?*const anyopaque = null,
+    host_invocation: ?execution.HostInvocation = null,
+    small_inline: execution.SmallInline = .{},
+    /// Head of the stack-local observable backtrace chain. Native calls and
+    /// synchronous native fences replace it on entry and restore it on return.
+    current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
+    formatting_error_stack: bool = false,
+
+    // Pending exception.
+
+    exception: exception_state.Pending = .{},
+
+    // Roots, collection, and jobs.
+
+    /// Host handles and root providers.
+    roots: roots_mod.RootSet = .{},
+    active_no_gc_scope: if (gc_scope.checks_enabled) ?*NoGcScope else void = if (gc_scope.checks_enabled) null else {},
+    active_value_roots: ?*const ValueRootFrame = null,
+    /// Test-only root-scan override (`forcePreciseRootScanForTest`). Pacing
+    /// tests call the engine-trigger entry points from a quiescent test frame
+    /// with dropGcPtr-scrubbed locals; the mode-derived `.engine_active`
+    /// policy would conservatively retain their ghosts and break
+    /// deterministic reclamation assertions. Void outside test builds.
+    test_root_scan_override: if (builtin.is_test) ?gc_mod.RootScan else void =
+        if (builtin.is_test) null else {},
+    job_queue: job_mod.Queue = undefined,
+    microtasks: job_mod.Checkpoint = .{},
+    /// WeakRef [[KeptAlive]]. Traced as a root and cleared at job end.
+    weakref_kept_alive: std.ArrayListUnmanaged(JSValue) = .empty, // gc-slot: heap
+    /// Weak identities of `weakref_kept_alive`'s targets, so each is kept once.
+    weakref_kept_identities: std.AutoHashMapUnmanaged(usize, void) = .empty,
+
+    // Object side tables and caches.
+
+    weak: gc_weak.Registry = .{},
+    borrowed_reference_holders: std.ArrayListUnmanaged(*Object) = .empty,
+    borrowed_weak_cleanup: property_state.BorrowedWeakCleanup = .{},
+    auto_init_descriptors: std.ArrayListUnmanaged(*property.AutoInit) = .empty,
+    strings: string_cache.Cache = .{},
 
     /// Zero means timing is unavailable when no diagnostic hook was installed.
     pub fn diagnosticNanos(self: *const JSRuntime) u64 {
@@ -1095,7 +829,7 @@ pub const JSRuntime = struct {
 
     /// Returns an owned, address-stable runtime. Caller releases it with `destroy`.
     /// The host allocator's backing state must outlive the Runtime.
-    pub fn create(allocator: std.mem.Allocator, options: RuntimeOptions) !*JSRuntime {
+    pub fn create(allocator: std.mem.Allocator, options: Options) !*JSRuntime {
         const rt = try allocator.create(JSRuntime);
         errdefer allocator.destroy(rt);
         const native_stack_top = @frameAddress();
@@ -1107,6 +841,12 @@ pub const JSRuntime = struct {
         });
         errdefer gc.destroy();
 
+        // The tables below keep allocators bound to `rt` but must not allocate
+        // through them before `rt` is fully initialized. Give the allocation
+        // path defined state anyway, and check below that nothing allocated.
+        rt.allocator = allocator;
+        rt.gc = gc;
+        rt.allocation_diagnostics = .{};
         const storage_allocator = rt.probedNativeAllocator();
         const native_allocator = native_allocation.nativeAllocatorWithBacking(rt, allocator);
         const atoms = try AtomTable.create(allocator, .{
@@ -1119,6 +859,7 @@ pub const JSRuntime = struct {
         errdefer classes.destroy();
         const shapes = try ShapeRegistry.create(allocator, storage_allocator, atoms, gc);
         errdefer shapes.destroy();
+        std.debug.assert(std.meta.eql(rt.allocation_diagnostics, native_allocation.AllocationDiagnostics{}));
 
         // Establish defaults and option-derived state before any subsystem can
         // read the runtime. Every owned subsystem is already constructed;
@@ -1133,16 +874,18 @@ pub const JSRuntime = struct {
             .shapes = shapes,
             .job_queue = job_mod.Queue.init(rt),
             .microtasks = .{ .policy = options.microtask_policy },
-            .stack_size = options.stack_size,
-            .vm_stack_frame_storage = VmStackStorage.frameWindowForLimit(options.stack_size),
-            .native_stack_size = options.native_stack_size,
-            // Outermost execution entries re-arm this construction baseline.
-            .native_stack_top = native_stack_top,
-            .native_stack_limit = if (options.native_stack_size == 0) 0 else native_stack_top -| options.native_stack_size,
-            .interrupt_handler = options.interrupt_handler,
-            .interrupt_context = options.interrupt_context,
+            .stack = .{
+                .limit = options.stack_size,
+                .frame_storage = VmStackStorage.frameWindowForLimit(options.stack_size),
+                .native_size = options.native_stack_size,
+                // Outermost execution entries re-arm this construction baseline.
+                .native_top = native_stack_top,
+            },
+            .interrupt = if (options.interrupt_handler) |handler| .{ .handler = handler, .context = options.interrupt_context } else null,
             .can_block = options.can_block,
         };
+
+        rt.stack.armNativeLimit();
 
         // Every owned subsystem and root set is ready before collection can run.
         gc.activate(rt, .{
@@ -1150,10 +893,6 @@ pub const JSRuntime = struct {
             .notify = triggerGCOnAllocation,
         });
         return rt;
-    }
-
-    pub fn setOpcodeProfile(self: *JSRuntime, opcode_profile: ?*profile.OpcodeProfile) void {
-        self.opcode_profile = opcode_profile;
     }
 
     pub fn isOwnerThread(self: *const JSRuntime) bool {
@@ -1168,8 +907,19 @@ pub const JSRuntime = struct {
         if (!self.isOwnerThread()) @panic("JSRuntime mutation from non-owner thread");
     }
 
+    /// True while any JS or native call frame of this runtime is active.
+    pub fn isExecuting(self: *const JSRuntime) bool {
+        return self.stack.call_depth != 0 or self.stack.native_call_depth != 0 or self.active_invocation != null;
+    }
+
     pub fn assertExecutionAllowed(self: *const JSRuntime) void {
         if (self.roots.isTracing()) @panic("JavaScript execution during tracing");
+    }
+
+    /// True while a collection or a collector phase (major driver, minor,
+    /// destruction) is running; nested collection requests stay pending.
+    pub inline fn collectorBusy(self: *const JSRuntime) bool {
+        return self.gc.hot.collecting or self.gc.hot.phase != .none;
     }
 
     pub fn assertGCAllowed(self: *const JSRuntime) void {
@@ -1186,34 +936,24 @@ pub const JSRuntime = struct {
         // here; a runtime destroyed mid-call fails the assertion above first.
         execution.retireHostInvocation(self);
         self.vm_stack.deinit(self.nativeAllocator());
-        execution.releaseStoredBacktrace(self);
-        exception_state.clear(self);
+        self.exception.clear();
         self.clearWeakRefKeptAlive();
         self.job_queue.deinit();
-        self.clearPendingFinalizationJobs();
-        string_cache.clear(self);
-        self.clearExternalHostFunctions();
-        self.drainDeferredNativeCleanups();
-        self.assertNoOutstandingValueHandles();
-        self.drainDeferredNativeCleanups();
-        self.drainDeferredClassPayloadFinalizers();
+        self.strings = .{};
+        native_bindings.destroyOwned(self);
+        // Teardown does not own public handles: every scope/persistent/weak
+        // owner must close its edge first.
+        self.roots.assertNoOutstanding();
         self.gc.scheduler.host_quiescent = true;
         _ = self.collectForTeardown();
-        self.drainDeferredNativeCleanups();
-        self.drainDeferredClassPayloadFinalizers();
+        // The collection may enqueue FinalizationRegistry cleanups for dead
+        // targets; drop them so the second pass can reclaim their held values.
         self.clearPendingFinalizationJobs();
         _ = self.collectForTeardown();
         self.gc.scheduler.host_quiescent = false;
-        self.drainDeferredNativeCleanups();
-        self.drainDeferredClassPayloadFinalizers();
-        self.clearBorrowedWeakCleanupIdentities();
-        self.clearPendingFinalizationJobs();
-        // The teardown cycle removals above sweep dead weak payloads, and a
-        // FinalizationRegistry cell whose target died enqueues its cleanup
-        // callback (`Object.sweepDeadWeakPayloadReferences`). That re-grows the
-        // queue's backing block after the `job_queue.deinit()` performed at the
-        // top of teardown, and `clearPendingFinalizationJobs` only drains the
-        // entries. Release the storage once no enqueue site remains reachable.
+        self.borrowed_weak_cleanup.end();
+        // The second pass may enqueue cleanups again, re-growing the queue
+        // released at the top of teardown. No enqueue site remains reachable.
         self.job_queue.deinit();
         // Ordinary atom-string caches own an independent string ref and can be
         // released now. Dynamic symbol bodies cannot: their rc also represents
@@ -1226,34 +966,21 @@ pub const JSRuntime = struct {
         // the teardown cycle passes could not prove dead (conservative
         // residue, pinned holders) and `gc.deinit` tears them down with the
         // rest of the graph.
-        self.assertNoHostRealmRefsForTeardown();
+        context_registry.assertNoHostRealmRefs(self);
         self.gc.deinit(self);
-        std.debug.assert(self.weak_reference_holder_head == null);
-        std.debug.assert(self.weak_reference_holder_tail == null);
-        self.drainDeferredNativeCleanups();
-        self.drainDeferredClassPayloadFinalizers();
         // Shapes and every other GC-managed atom owner are now gone. Clear
         // residual dynamic symbol bodies (notably Symbol.for's registry ref)
         // before AtomTable.deinit asserts that no materialized bodies remain.
         self.atoms.releaseValueSymbolBodiesAfterGc();
         // These native containers share the Runtime allocator for their entire
         // lifetime; parser scratch is owned separately by each compilation.
-        property_state.deinitBorrowedCleanup(self);
-        gc_weak.deinitIds(self, self.nativeAllocator());
-        property_state.deinitAutoInit(self);
+        self.borrowed_weak_cleanup.deinit(self.nativeAllocator());
+        self.weak.deinit(self.nativeAllocator());
+        property_state.deinit(self);
         self.shapes.destroy();
         self.classes.destroy();
         self.atoms.destroy();
-        const root_providers = self.roots.takeHeapProviderStorage();
-        property_state.deinitBorrowedHolders(self);
-        self.roots.deinitSlotLists(self.nativeAllocator());
-        property_state.deinitIteratorNext(self);
-        self.deferred_native_cleanups.deinit(self.nativeAllocator());
-        self.deferred_class_payload_finalizers.deinit(self.nativeAllocator());
-        self.deferred_class_payload_roots.deinit(self.nativeAllocator());
-        self.reserved_deferred_class_payload_finalizer_slots = 0;
-        self.active_deferred_class_payload_finalizer = null;
-        if (root_providers.len != 0) self.freeNative(RootProvider, root_providers);
+        self.roots.deinit(self);
 
         // The Runtime body is owned by `allocator`, outside native allocation instrumentation.
         std.debug.assert(!self.hasOutstandingAllocations());
@@ -1282,7 +1009,6 @@ pub const JSRuntime = struct {
 
     // Native allocation belongs to Runtime; GC-prefixed types use Registry.
     pub const allocNative = native_allocation.alloc;
-    pub const allocNativeNoTrigger = native_allocation.allocNoTrigger;
     pub const freeNative = native_allocation.free;
     pub const createNative = native_allocation.create;
     pub const createNativeNoTrigger = native_allocation.createNoTrigger;
@@ -1290,127 +1016,38 @@ pub const JSRuntime = struct {
     pub const remapNative = native_allocation.remap;
     pub const allocNativeElements = native_allocation.allocElements;
     pub const reallocNativeElements = native_allocation.reallocElements;
+    pub const allocNativeAlignedBytes = native_allocation.allocAlignedBytes;
     pub const allocNativeAlignedBytesNoTrigger = native_allocation.allocAlignedBytesNoTrigger;
     pub const freeNativeAlignedBytes = native_allocation.freeAlignedBytes;
     pub const probedNativeAllocator = native_allocation.probedAllocator;
     pub const hasOutstandingAllocations = native_allocation.hasOutstandingAllocations;
-    pub const setAllocationDiagnosticLimit = native_allocation.setLimit;
-    pub const allocationDiagnosticLimit = native_allocation.getLimit;
     pub const sampleAllocationPeak = native_allocation.samplePeakAtCollection;
 
-    /// These Runtime wrappers use native helpers without probes and therefore
-    /// carry the threshold check themselves. QuickJS puts no such check in
-    /// `js_malloc_rt` / `js_realloc_rt`: its single
-    /// allocation-threshold site is `js_trigger_gc` from `JS_NewObjectFromShape`.
-    /// Gate them on the same comptime rule as the test/force notify so both
-    /// halves stay in one place — see `native_allocation.allocation_gc_trigger_enabled`.
-    const runtime_allocation_requests_gc = native_allocation.allocation_gc_trigger_enabled;
-
-    pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
-        if (comptime runtime_allocation_requests_gc) {
-            if (count != 0) {
-                const bytes = std.math.mul(usize, @sizeOf(T), count) catch std.math.maxInt(usize);
-                self.requestGCForAllocation(bytes);
-            }
-        }
-        return self.allocNativeNoTrigger(T, count);
+    /// Owner-thread check for the object register/unregister hot paths
+    /// (QuickJS `add_gc_object` / `remove_gc_object` have none). A bare
+    /// `std.debug.assert(self.isOwnerThread())` would still read the thread id
+    /// in ReleaseFast, so the whole check is compiled only with safety on.
+    inline fn assertOwnerThreadInSafeBuilds(self: *const JSRuntime) void {
+        if (comptime std.debug.runtime_safety) std.debug.assert(self.isOwnerThread());
     }
 
-    pub inline fn freeRuntime(self: *JSRuntime, comptime T: type, slice: []T) void {
-        self.freeNative(T, slice);
-    }
-
-    pub inline fn remapRuntime(self: *JSRuntime, comptime T: type, slice: []T, new_count: usize) !?[]T {
-        if (comptime runtime_allocation_requests_gc) {
-            if (new_count > slice.len) {
-                const old_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch std.math.maxInt(usize);
-                const new_bytes = std.math.mul(usize, @sizeOf(T), new_count) catch std.math.maxInt(usize);
-                self.requestGCForAllocation(new_bytes -| old_bytes);
-            }
-        }
-        return self.remapNative(T, slice, new_count);
-    }
-
-    pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
-        if (comptime runtime_allocation_requests_gc) self.requestGCForAllocation(@sizeOf(T));
-        return self.createNativeNoTrigger(T);
-    }
-
-    pub inline fn destroyRuntime(self: *JSRuntime, comptime T: type, ptr: *T) void {
-        self.destroyNative(T, ptr);
-    }
-
-    pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
-        if (comptime runtime_allocation_requests_gc) {
-            if (byte_count != 0) self.requestGCForAllocation(byte_count);
-        }
-        return self.allocNativeAlignedBytesNoTrigger(byte_count, alignment);
-    }
-
-    pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
-        self.freeNativeAlignedBytes(bytes, alignment);
-    }
-
-    pub fn registerObject(self: *JSRuntime, object: *Object) !void {
-        self.assertOwnerThread();
-        // qjs add_gc_object only links the header into
-        // `lists.objects`; it never re-evaluates the GC threshold. The single
-        // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
-        // at the top of JS_NewObjectFromShape — mirrored here
-        // by collectBeforeObjectAllocation immediately before the object body
-        // allocation. Property arrays and separate payloads retain their
-        // existing allocRuntime* requests; a crossing they produce stays
-        // pending until the next pre-allocation boundary or scheduler poll,
-        // exactly like a prop-array js_malloc crossing in qjs
-        // waits for the next js_trigger_gc.
-        try self.registerObjectWithBytes(object, object.allocationSize(self));
-    }
-
-    /// Same as `registerObject` but with the object's allocation size supplied by
-    /// the caller. `createInternal` already computes the inline-class-payload
-    /// layout to size/place the allocation; reusing its `object_size` here avoids a
-    /// second record-table lookup + inline-layout recompute on the object-creation
-    /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
-    /// stored value is identical to what `allocationSize` would recompute.
-    ///
-    /// Thread ownership is a safe-build assertion only: qjs `add_gc_object`
-    /// has no per-registration thread check, and the release
-    /// check was the single largest cost of this boundary (~18 insns: a cached
-    /// TLS `getCurrentId` read pair + compare, plus the panic arm's `bl`
-    /// forcing a callee-saved frame on an otherwise leaf function).
+    /// Publish an initialized object to the GC with its allocation size
+    /// supplied by the caller, which already computed the layout. The only
+    /// object-creation threshold check is `collectBeforeObjectAllocation`,
+    /// immediately before the body allocation (QuickJS `js_trigger_gc` in
+    /// `JS_NewObjectFromShape`); registration never re-evaluates it.
     pub inline fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
-        std.debug.assert(self.isOwnerThread());
+        self.assertOwnerThreadInSafeBuilds();
         try self.gc.addInitializedWithSize(object.gcHeader(), bytes);
     }
 
-    /// GC-list unlink + free-byte accounting boundary of an object teardown,
-    /// with the allocation size supplied by the caller. `destroyFromHeader`
-    /// (the sole caller) already computes the inline-class-payload layout (for
-    /// the tail `freeObjectAllocation`); its `object_size` is bit-for-bit the
-    /// value `allocationSize` would recompute here (both go through
-    /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
-    /// between the two calls). Reusing it drops a redundant record-table lookup +
-    /// 88-byte-stride multiply + inline-layout recompute off the hot free path —
-    /// qjs `free_object` never recomputes an object's size at
-    /// teardown either (the slab block carries it).
-    ///
-    /// The weak/borrowed side-table links were already detached at the TOP of
-    /// `destroyFromHeader` (before class-payload teardown, because those links
-    /// borrow payload-owned storage), and nothing during payload teardown can
-    /// re-register a finalizing object — so this boundary no longer repeats the
-    /// two unregister scans. qjs `free_object` keeps no such side tables at all;
-    /// `remove_gc_object` is a bare `list_del`.
-    ///
-    /// Thread ownership is a safe-build assertion only, mirroring the register
-    /// side (qjs `remove_gc_object` has no thread check either).
+    /// GC-list unlink and free-byte accounting for an object teardown, with
+    /// the allocation size supplied by `destroyFromHeader` (the sole caller),
+    /// which already computed the layout. The weak/borrowed side-table links
+    /// were detached earlier in `destroyFromHeader`, because they borrow
+    /// payload-owned storage.
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
-        // qjs remove_gc_object has no thread check. The
-        // comment above says this is a safe-build assertion only;
-        // `std.debug.assert(self.isOwnerThread())` still evaluates gettid
-        // in ReleaseFast because the syscall is not pure. Gate the call.
-        if (comptime std.debug.runtime_safety) {
-            std.debug.assert(self.isOwnerThread());
-        }
+        self.assertOwnerThreadInSafeBuilds();
         if (builtin.mode == .Debug) {
             // Catch any future payload finalizer that re-registers mid-teardown.
             if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
@@ -1419,8 +1056,7 @@ pub const JSRuntime = struct {
         // The tracing sweeps detach and stamp condemned objects before their
         // resource pass. In that state the generic unlink boundary would only
         // rediscover facts already established by condemnation; retain its
-        // mandatory byte debit without paying the outlined call. RC does not
-        // compile this arm.
+        // mandatory byte debit without paying the outlined call.
         if (gc_mod.headerCondemned(object.gcHeaderConst())) {
             self.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
             return;
@@ -1428,53 +1064,16 @@ pub const JSRuntime = struct {
         self.gc.unlinkObjectWithBytes(object.gcHeader(), bytes);
     }
 
-    /// Link a weak-capable payload for its full object lifetime. This is
-    /// allocation-free and mirrors QuickJS's runtime weakref_list: collection
-    /// emptiness changes do not mutate the list while a GC weak pass traverses
-    /// it.
-    pub fn registerWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
-        gc_weak.registerHolder(self, object);
-    }
-
-    pub fn unregisterWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
-        gc_weak.unregisterHolder(self, object);
-    }
-
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
         return property_state.registerBorrowedHolder(self, object);
-    }
-
-    pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {
-        _ = self;
-        return object.isBorrowedReferenceHolder();
     }
 
     pub fn unregisterBorrowedReferenceHolder(self: *JSRuntime, object: *Object) void {
         property_state.unregisterBorrowedHolder(self, object);
     }
 
-    pub fn linkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        context_registry.linkLive(self, ctx);
-    }
-
-    pub fn linkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        context_registry.linkConstructing(self, ctx);
-    }
-
-    pub fn unlinkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        context_registry.unlinkConstructing(self, ctx);
-    }
-
-    pub fn unlinkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        context_registry.unlinkLive(self, ctx);
-    }
-
     pub fn firstContext(self: *const JSRuntime) ?*context_mod.JSContext {
-        return context_registry.firstLive(self);
-    }
-
-    fn assertNoHostRealmRefsForTeardown(self: *JSRuntime) void {
-        context_registry.assertNoHostRealmRefs(self);
+        return self.contexts.live_head;
     }
 
     pub fn contextForGlobal(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {
@@ -1487,35 +1086,15 @@ pub const JSRuntime = struct {
         return context_registry.anyForGlobal(self, global);
     }
 
-    /// Clear the owning realm's %Array.prototype% marker after a mutation of
-    /// %Object.prototype%. Other realms in this runtime stay eligible.
-    pub fn invalidateStandardArrayPrototypeForObjectPrototype(self: *JSRuntime, object_prototype: *Object) void {
-        context_registry.invalidateStandardArrayPrototype(self, object_prototype);
-    }
-
-    pub fn initialArrayShapeForPrototype(self: *const JSRuntime, prototype: ?*const Object) ?*shape.Shape {
-        return context_registry.initialArrayShape(self, prototype);
-    }
-
     /// Reserve a prototype slot in every realm before a class id is published.
     /// The lists are indexes; `RealmRef` keeps each realm alive across growth.
     pub fn ensureContextClassPrototypeCapacity(self: *JSRuntime, class_id: class.ClassId) !void {
         return context_registry.ensureClassPrototypeCapacity(self, class_id);
     }
 
-    /// Drop a dynamically unregistered class prototype from every realm.
-    pub fn clearContextClassPrototype(self: *JSRuntime, class_id: class.ClassId) void {
-        context_registry.clearClassPrototype(self, class_id);
-    }
-
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
         self.assertOwnerThread();
         try self.roots.register(self, provider);
-    }
-
-    pub fn registerRootProviderChecked(self: *JSRuntime, provider: RootProvider) !void {
-        try self.requireOwnerThread();
-        return self.registerRootProvider(provider);
     }
 
     pub fn unregisterRootProvider(self: *JSRuntime, provider: RootProvider) void {
@@ -1533,151 +1112,42 @@ pub const JSRuntime = struct {
         self.roots.beginTrace();
         defer self.roots.endTrace();
         try self.traceValueRootFrames(roots, visitor);
-        try visitor.value(&self.current_exception);
+        try visitor.value(&self.exception.value);
         try self.roots.traceHandleSlots(visitor);
-        for (self.deferred_class_payload_roots.items) |object| {
-            try object.traceClassPayloadRootEdges(self, visitor);
-        }
-        for (self.deferred_class_payload_finalizers.items) |*job| {
-            try job.traceRoots(self, visitor);
-        }
-        if (self.active_deferred_class_payload_finalizer) |job| {
-            try job.traceRoots(self, visitor);
-        }
         try self.job_queue.traceRoots(visitor);
         for (self.weakref_kept_alive.items) |*kept| try visitor.value(kept);
         try self.roots.traceProviders(visitor);
-        try self.traceStringCacheRoots(visitor);
+        try string_cache.trace(self, visitor);
+        try self.atoms.traceRoots(visitor);
         try self.traceAtomRoots(visitor);
     }
 
-    /// TGC S3 §2.2 roots I and J: the two engine-global tables that own atom
-    /// ids outside any GC header. Both are exact -- `popBacktraceFrame` and
-    /// `Table.unregister` release the same ids.
+    /// Atom ids owned outside any GC header: class names. Exact --
+    /// `Table.unregister` releases the same ids.
     fn traceAtomRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        if (comptime !value_root_frames_enabled) return;
         if (visitor.visit_atom == null) return;
-        for (self.backtrace_frames) |frame| {
-            try visitor.atomRoot(frame.function_name);
-            try visitor.atomRoot(frame.filename);
-        }
         for (self.classes.records) |record| {
             try visitor.atomRoot(record.class_name);
         }
     }
 
-    /// TGC S2: the runtime's interned/cached flat strings are roots while the
-    /// string family is tracer-owned (they used to hold a +1 count each).
-    fn traceStringCacheRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        try string_cache.trace(self, visitor);
-        try self.atoms.traceRoots(visitor);
-    }
-
     pub fn traceActiveRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
         self.roots.beginTrace();
         defer self.roots.endTrace();
-        if (comptime value_root_frames_enabled) {
-            try self.traceRoots(self.active_value_roots, visitor);
-            var active_job = active_job_root_head;
-            while (active_job) |root| {
-                if (root.runtime == self) try root.job.traceRoots(visitor);
-                active_job = root.previous;
-            }
-            if (self.active_invocation) |invocation| {
-                const header: *const ActiveInvocationTrace = @ptrCast(@alignCast(invocation));
-                try header.traceRoots(invocation, visitor);
-            }
-            if (trace_atomics_wait_async) |trace| try trace(@ptrCast(self), visitor);
-        } else {
-            try self.traceRoots(null, visitor);
+        try self.traceRoots(self.active_value_roots, visitor);
+        var active_job = active_job_root_head;
+        while (active_job) |root| {
+            if (root.runtime == self) try root.job.traceRoots(visitor);
+            active_job = root.previous;
         }
+        if (self.active_invocation) |invocation| {
+            const header: *const ActiveInvocationTrace = @ptrCast(@alignCast(invocation));
+            try header.traceRoots(invocation, visitor);
+        }
+        if (trace_atomics_wait_async) |trace| try trace(@ptrCast(self), visitor);
     }
 
-    /// Audit the exact temporary-root populations used by deferred plugin
-    /// payload finalizers. A publisher may make freed cells allocatable while
-    /// the global doomed transaction is still open, so "the pointer still
-    /// falls inside a mapped block" is not enough: every declared payload
-    /// edge must still name a live, non-doomed allocation at publication.
-    ///
-    /// This is called only behind `gc.invariantChecksEnabled`; the shipped
-    /// non-audit ReleaseFast path does not walk payload roots.
-    pub fn verifyDeferredClassPayloadRootLiveness(self: *JSRuntime) gc_mod.InvariantError!void {
-        const Audit = struct {
-            rt: *JSRuntime,
-            failure: ?gc_mod.InvariantError = null,
-
-            fn checkHeader(audit: *@This(), header: *const gc_mod.Header) void {
-                if (audit.failure != null) return;
-                if (!audit.rt.gc.containsHeader(header)) {
-                    audit.failure = error.DeferredPayloadRootNotLive;
-                    return;
-                }
-                if (header.metaConst().flags.finalizing) {
-                    audit.failure = error.DeferredPayloadRootDoomed;
-                    return;
-                }
-                const cell_addr = @intFromPtr(header) - gc_mod.metadata_prefix_size;
-                if (audit.rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr))) |block| {
-                    const index = block.cellIndex(cell_addr) orelse {
-                        audit.failure = error.DeferredPayloadRootNotLive;
-                        return;
-                    };
-                    if (!block.cellAllocated(index)) {
-                        audit.failure = error.DeferredPayloadRootNotLive;
-                    } else if (block.isDoomed(index)) {
-                        audit.failure = error.DeferredPayloadRootDoomed;
-                    }
-                }
-            }
-
-            fn visitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
-                const audit: *@This() = @ptrCast(@alignCast(context));
-                if (slot.cycleMarkHeader()) |header| audit.checkHeader(header);
-            }
-
-            fn visitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
-                const audit: *@This() = @ptrCast(@alignCast(context));
-                if (slot.*) |object| audit.checkHeader(object.gcHeader());
-            }
-
-            fn visitHeader(context: *anyopaque, header: *const gc_mod.Header) RootTraceError!void {
-                const audit: *@This() = @ptrCast(@alignCast(context));
-                audit.checkHeader(header);
-            }
-        };
-
-        var audit = Audit{ .rt = self };
-        var visitor = RootVisitor{
-            .readonly = .observe,
-            .context = @ptrCast(&audit),
-            .visit_value = Audit.visitValue,
-            .visit_object = Audit.visitObject,
-            .visit_header = Audit.visitHeader,
-        };
-        for (self.deferred_class_payload_roots.items) |object| {
-            object.traceClassPayloadRootEdges(self, &visitor) catch
-                return error.DeferredPayloadRootNotLive;
-        }
-        for (self.deferred_class_payload_finalizers.items) |*job| {
-            job.traceRoots(self, &visitor) catch
-                return error.DeferredPayloadRootNotLive;
-        }
-        if (self.active_deferred_class_payload_finalizer) |job| {
-            job.traceRoots(self, &visitor) catch
-                return error.DeferredPayloadRootNotLive;
-        }
-        if (audit.failure) |failure| return failure;
-    }
-
-    pub fn traceValueRootFrameChain(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-        visitor: *RootVisitor,
-    ) RootTraceError!void {
-        try self.traceValueRootFrames(roots, visitor);
-    }
-
-    fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
+    pub fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
         self.roots.beginTrace();
         defer self.roots.endTrace();
         var frame = roots;
@@ -1685,24 +1155,20 @@ pub const JSRuntime = struct {
             for (current.objects) |root| {
                 try visitor.optionalObject(root);
             }
-            if (comptime value_root_frames_enabled) {
-                for (current.headers) |root| {
-                    try visitor.constHeader(root.header);
-                }
+            for (current.headers) |root| {
+                try visitor.constHeader(root.header);
             }
             for (current.values) |root| {
                 try visitor.value(root);
             }
-            if (comptime value_root_frames_enabled) {
-                if (visitor.visit_atom != null) {
-                    for (current.atoms) |root| switch (root) {
-                        .single => |slot| try visitor.atomRoot(slot.*),
-                        // Read the slice header now: the frame may have been
-                        // linked before the array had any element at all.
-                        .list => |list| for (list.*) |id| try visitor.atomRoot(id),
-                        .borrowed => |ids| for (ids) |id| try visitor.atomRoot(id),
-                    };
-                }
+            if (visitor.visit_atom != null) {
+                for (current.atoms) |root| switch (root) {
+                    .single => |slot| try visitor.atomRoot(slot.*),
+                    // Read the slice header now: the frame may have been
+                    // linked before the array had any element at all.
+                    .list => |list| for (list.*) |id| try visitor.atomRoot(id),
+                    .borrowed => |ids| for (ids) |id| try visitor.atomRoot(id),
+                };
             }
             for (current.slices) |root| {
                 switch (root) {
@@ -1721,13 +1187,6 @@ pub const JSRuntime = struct {
         }
     }
 
-    /// Runtime teardown is not an owner for public handles. Clearing these
-    /// arrays here would leave the caller's handle pointing into freed memory;
-    /// every scope/persistent/weak owner must close its edge first.
-    fn assertNoOutstandingValueHandles(self: *const JSRuntime) void {
-        self.roots.assertNoOutstanding();
-    }
-
     /// Stack-local execution/root records are borrowed by Runtime. They must be
     /// gone before teardown in every optimization mode; silently continuing
     /// would leave their deferred cleanup pointing into a destroyed Runtime.
@@ -1737,16 +1196,16 @@ pub const JSRuntime = struct {
         }
         if (self.roots.isTracing()) @panic("JSRuntime destroyed during tracing");
         self.roots.assertNoOutstandingBuffers();
-        const active_job_for_runtime = if (comptime active_job_roots_enabled) blk: {
+        const active_job_for_runtime = blk: {
             var current = active_job_root_head;
             while (current) |root| : (current = root.previous) {
                 if (root.runtime == self) break :blk true;
             }
             break :blk false;
-        } else false;
-        if (self.call_depth != 0 or
-            self.native_call_depth != 0 or
-            self.active_bytecode_stack_bytes != 0 or
+        };
+        if (self.stack.call_depth != 0 or
+            self.stack.native_call_depth != 0 or
+            self.stack.bytecode_bytes != 0 or
             self.current_backtrace_frame != null or
             self.active_native_call != null or
             self.active_invocation != null or
@@ -1759,34 +1218,29 @@ pub const JSRuntime = struct {
         }
     }
 
-    pub fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot, notify: bool) void {
+    pub fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
         if (slot.identity == null) return;
         self.clearWeakIdentitySlot(&slot.identity);
-        if (notify) {
+    }
+
+    /// Run the callbacks of weak handles a finished collection cleared. A
+    /// callback may release any weak handle, including its own, and may
+    /// allocate; a collection it triggers queues further callbacks for this
+    /// same loop instead of nesting one.
+    pub fn runPendingWeakCallbacks(self: *JSRuntime) void {
+        if (self.gc.hot.collecting or self.roots.isTracing() or self.roots.weak_notify_draining) return;
+        self.roots.weak_notify_draining = true;
+        defer self.roots.weak_notify_draining = false;
+        while (self.roots.weak_notify_queue.pop()) |slot| {
+            slot.notify_pending = false;
             if (slot.callback) |callback| callback(self, slot.callback_context);
-        }
-    }
-
-    pub fn sweepDeadWeakPersistentSlots(self: *JSRuntime, live_context: anytype) void {
-        for (self.roots.weak_root_slots.items) |slot| {
-            const identity = slot.identity orelse continue;
-            if (!live_context.isWeakIdentityAlive(identity)) {
-                self.clearWeakRootSlot(slot, true);
-            }
-        }
-    }
-
-    pub fn clearWeakPersistentIdentity(self: *JSRuntime, identity: usize, notify: bool) void {
-        for (self.roots.weak_root_slots.items) |slot| {
-            const slot_identity = slot.identity orelse continue;
-            if (slot_identity == identity) self.clearWeakRootSlot(slot, notify);
         }
     }
 
     /// A successful WeakRef.deref keeps its target alive through the current
     /// checkpoint, including all jobs enqueued while it drains.
-    pub fn keepAliveWeakRefTarget(self: *JSRuntime, value: JSValue) void {
-        job_mod.keepAliveWeakRef(self, value);
+    pub fn keepAliveWeakRefTarget(self: *JSRuntime, identity: usize, value: JSValue) error{OutOfMemory}!void {
+        return job_mod.keepAliveWeakRef(self, identity, value);
     }
 
     /// Clear [[KeptAlive]] at a completed or terminated checkpoint.
@@ -1794,25 +1248,27 @@ pub const JSRuntime = struct {
         job_mod.clearKeptAlive(self);
     }
 
-    /// TGC S4-e spec 2.5: object identities are not counted. A weak identity
-    /// token stays valid until its object dies, and death hands the token back
-    /// (`takeWeakObjectIdentity`); nothing about how many WeakRefs name it
-    /// changes when the object is collected. Only symbol identities, whose
-    /// atom entry is kept indexed by the count in `atom.zig`, still count.
+    /// Object identities are not counted: a token stays valid until its object
+    /// dies, and death hands it back (`gc_weak.takeObject`). Only symbol
+    /// identities, whose atom entry is kept indexed by this count, are counted.
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) return;
-        const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(u32)) return;
-        self.atoms.retainSymbolWeakRef(atom.Atom.fromRaw(@intCast(atom_id)));
+        self.atoms.retainSymbolWeakRef(weakSymbolAtom(identity) orelse return);
     }
 
     /// Mirror of `retainWeakIdentity`: releasing an object identity is a no-op
-    /// because nothing was retained (TGC S4-e spec 2.5).
+    /// because nothing was retained.
     pub fn releaseWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) return;
+        self.atoms.releaseSymbolWeakRef(self, weakSymbolAtom(identity) orelse return);
+    }
+
+    /// Odd weak identities name symbols (`atom << 1 | 1`); null when the id is
+    /// out of atom range.
+    fn weakSymbolAtom(identity: usize) ?atom.Atom {
         const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(u32)) return;
-        self.atoms.releaseSymbolWeakRef(self, atom.Atom.fromRaw(@intCast(atom_id)));
+        if (atom_id > std.math.maxInt(u32)) return null;
+        return atom.Atom.fromRaw(@intCast(atom_id));
     }
 
     pub fn clearWeakIdentitySlot(self: *JSRuntime, slot: *?usize) void {
@@ -1823,18 +1279,15 @@ pub const JSRuntime = struct {
 
     pub fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
-            const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(u32)) return false;
-            return self.atoms.kind(atom.Atom.fromRaw(@intCast(atom_id))) == .symbol;
+            const symbol_atom = weakSymbolAtom(identity) orelse return false;
+            return self.atoms.kind(symbol_atom) == .symbol;
         }
         return self.liveObjectFromWeakIdentity(identity) != null;
     }
 
     pub fn valueFromWeakIdentity(self: *JSRuntime, identity: usize) JSValue {
         if ((identity & 1) != 0) {
-            const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(u32)) return JSValue.undefinedValue();
-            const symbol_atom: atom.Atom = atom.Atom.fromRaw(@intCast(atom_id));
+            const symbol_atom = weakSymbolAtom(identity) orelse return JSValue.undefinedValue();
             if (self.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
             return self.atoms.symbolValueIfLive(self, symbol_atom);
         }
@@ -1844,13 +1297,8 @@ pub const JSRuntime = struct {
 
     /// Resolves an even weak identity (`weak_id << 1`) to its registered
     /// object in O(1). Returns null for symbol identities and for ids whose
-    /// object is gone.
-    ///
-    /// TGC S4-e spec 2.5: "gone" used to mean two things -- unregistered, or
-    /// still allocated as a resource-stripped weak husk. The husk is retired:
-    /// the sweep hands the id back (`takeWeakObjectIdentity`) inside the same
-    /// destruction that frees the struct, so an id that still resolves names a
-    /// live object and the map lookup is the whole liveness test.
+    /// object is gone; destruction hands the id back in the same step that
+    /// frees the object, so the map lookup is the whole liveness test.
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         return gc_weak.objectFromIdentity(self, identity);
     }
@@ -1861,34 +1309,8 @@ pub const JSRuntime = struct {
         return gc_weak.registerObject(self, object);
     }
 
-    /// Returns the encoded weak identity for `object` without registering one.
-    pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        return gc_weak.peekObject(self, object);
-    }
-
-    /// Removes `object` from the weak identity registry, returning its encoded
-    /// weak identity (if any) so destruction can propagate it to weak slots.
-    pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        return gc_weak.takeObject(self, object);
-    }
-
     pub fn enterHandleScope(self: *JSRuntime) HandleScope {
         return HandleScope.enter(self);
-    }
-
-    pub fn localRootCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.roots.local_root_slots.items.len;
-    }
-
-    pub fn weakRootCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.roots.weak_root_slots.items.len;
-    }
-
-    pub fn persistentRootCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.roots.persistent_root_slots.items.len;
     }
 
     pub fn symbolValue(self: *JSRuntime, atom_id: atom.Atom) !JSValue {
@@ -1913,18 +1335,9 @@ pub const JSRuntime = struct {
         return self.symbolValue(atom_id);
     }
 
-    /// One strong persistent handle. `createValueHandle` and `takeValueHandle`
-    /// are the same store: a `JSValue` is copied by bits.
+    /// One strong persistent handle; a `JSValue` is copied by bits.
     pub fn createPersistentValue(self: *JSRuntime, value: JSValue) !JSValueHandle {
         return JSValueHandle.init(self, value);
-    }
-
-    pub fn createValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
-        return self.createPersistentValue(value);
-    }
-
-    pub fn takeValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
-        return self.createPersistentValue(value);
     }
 
     pub fn createWeakPersistentValue(
@@ -1946,26 +1359,6 @@ pub const JSRuntime = struct {
         return native_bindings.registerFinalizer(self, ptr, finalize);
     }
 
-    /// Retire a host entry in place (tombstone): callers that still hold
-    /// the function object get a TypeError; nothing is freed.
-    pub fn retireNativeEntry(self: *JSRuntime, entry: *const native_entry.NativeEntry) void {
-        _ = self;
-        native_bindings.retire(entry);
-    }
-
-    /// Internal-builtin record lookup: `domain_index` is the
-    /// `NativeBuiltinDomain` enum value, `id` the domain-local method id.
-    /// Static records exist before Context bootstrap. Returns null for the
-    /// separate host domain and invalid/gap ids; preserves bounds checks.
-    pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const native_entry.NativeEntry {
-        _ = self;
-        return engine_services.internalBuiltinRecord(domain_index, id);
-    }
-
-    pub fn clearExternalHostFunctions(self: *JSRuntime) void {
-        native_bindings.destroyOwned(self);
-    }
-
     /// Precise quiescent collection for lifecycle fixtures only.
     pub fn collectForTest(self: *JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only collection helper");
@@ -1974,11 +1367,12 @@ pub const JSRuntime = struct {
 
     fn collectForTeardown(self: *JSRuntime) usize {
         self.assertOwnerThread();
-        const result = self.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch return 0;
+        const result = self.collectFull(null, .declared_only) catch return 0;
         return result.freed_objects;
     }
 
-    pub fn tryRunObjectCycleRemovalWithValueRoots(
+    /// Stop-the-world full collection.
+    pub fn collectFull(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
         scan: gc_mod.RootScan,
@@ -1986,41 +1380,20 @@ pub const JSRuntime = struct {
         self.assertOwnerThread();
         self.assertGCAllowed();
         if (self.roots.isTracing()) @panic("collection reentry during tracing");
-        // A deferred plugin callback runs only after its collector is idle,
-        // but it may allocate or explicitly request another collection. Keep
-        // that request pending until callback return: the active job is a root,
-        // and a destruction morgue must not be recursively completed under it.
-        if (self.active_deferred_class_payload_finalizer != null) return .{};
-        self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
-        // An explicit "collect everything" supersedes an open incremental
-        // cycle rather than joining it: the cycle's floating garbage --
-        // objects marked during increments that have since died -- would
-        // survive a finish, and this call's promise is full precision. The
-        // abort discards only work; the fresh trace below re-derives the rest.
-        if (!self.gc_running) {
-            // Destruction is irreversible: complete it, then discard any
-            // open marking cycle. Order matters only in that both must be
-            // resolved before the STW collector below touches the lists.
-            if (self.gc.morgue.pending) {
-                self.gc_running = true;
-                @import("core/gc_trace_stw.zig").finishPendingDestruction(self);
-                self.gc_running = false;
-                _ = self.finishDoomedCompletion(0);
-            }
-            self.gc.abortCycle();
-        }
-        // `gc_running` covers the major driver. The refcount/cycle phases also
-        // invoke allocation and callback boundaries, and a previously queued
-        // request must remain pending rather than nest a second collection.
-        if (self.gc_running or self.gc.hot.phase != .none) return .{};
+        // Registered first so it runs last, after `collecting` is cleared.
+        defer self.runPendingWeakCallbacks();
+        // A collection or collector phase already on the stack (a destructor
+        // that allocates, for one) leaves the request pending rather than
+        // nesting a second collection or touching its morgue and cycle.
+        if (self.collectorBusy()) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
         defer if (builtin.mode == .Debug) {
             self.gc.verifyIntrusiveList() catch unreachable;
             self.gc.verifyHeapAccounting(self) catch unreachable;
         };
-        self.gc_running = true;
-        defer self.gc_running = false;
+        self.gc.hot.collecting = true;
+        defer self.gc.hot.collecting = false;
 
         // The cycle's high-water is the account right now, at trigger time.
         self.sampleAllocationPeak();
@@ -2039,8 +1412,7 @@ pub const JSRuntime = struct {
         };
         self.gc.scheduler.setMajorPhase(.sweep);
 
-        const end_ns = self.diagnosticNanos();
-        const elapsed = if (end_ns > start_ns) end_ns - start_ns else 0;
+        const elapsed = self.diagnosticElapsedSince(start_ns);
         // Charge the census to whoever asked for it, not to the pause. The
         // walks run inside this region and are enabled by the same
         // `--gc-stats` that prints the distribution, so leaving them in makes
@@ -2052,9 +1424,8 @@ pub const JSRuntime = struct {
         };
         self.gc.recordSuccess(result);
         self.gc.scheduler.finishMajorCycle();
-        self.resetGCThreshold();
-        // Full STW majors free the same block cells as incremental majors.
-        // Service the same aged-decommit policy here; otherwise explicit GC,
+        gc_driver.resetThreshold(self);
+        // Service the aged-decommit policy here too; otherwise explicit GC,
         // urgent pressure collections, and small-heap floor collections can
         // age free blocks forever without ever scanning them.
         _ = self.gc.block_heap.releaseFreeBlockPages(gc_mod.schedulingNanos());
@@ -2069,49 +1440,7 @@ pub const JSRuntime = struct {
         self.assertOwnerThread();
         self.assertGCAllowed();
         if (self.roots.isTracing()) @panic("collection reentry during tracing");
-        if (self.active_deferred_class_payload_finalizer != null) return .{};
-        self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
         return gc_driver.continuePoll(self, roots, mode);
-    }
-
-    fn resetGCThresholdExcludingDoomed(self: *JSRuntime) void {
-        gc_driver.resetThresholdExcludingDoomed(self);
-    }
-
-    /// The morgue is empty: deliver the cycle's CollectionResult and reset the
-    /// growth threshold from the account the destruction actually shrank.
-    fn finishDoomedCompletion(self: *JSRuntime, last_slice_ns: u64) gc_mod.CollectionResult {
-        return gc_driver.finishDoomed(self, last_slice_ns);
-    }
-
-    /// Host-facing checked form of `pollGC`. Internal engine paths use the
-    /// asserting form so the mutation-contract error does not widen ordinary
-    /// JavaScript execution error sets.
-    pub fn pollGCChecked(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-        mode: gc_mod.PollMode,
-    ) RuntimeCollectionError!gc_mod.CollectionResult {
-        try self.requireOwnerThread();
-        return self.pollGC(roots, mode);
-    }
-
-    pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc_mod.CollectionError!gc_mod.CollectionResult {
-        return self.pollGC(roots, .safepoint);
-    }
-
-    pub fn afterCallbackBoundaryGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc_mod.CollectionError!gc_mod.CollectionResult {
-        const result = try self.pollGC(roots, .callback_boundary);
-        _ = self.runDeferredNativeCleanupBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
-        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
-        return result;
-    }
-
-    pub fn beforeEventLoopIdleGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc_mod.CollectionError!gc_mod.CollectionResult {
-        const result = try self.pollGC(roots, .idle);
-        _ = self.runDeferredNativeCleanupBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
-        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
-        return result;
     }
 
     pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc_mod.CollectionError!gc_mod.CollectionResult {
@@ -2120,25 +1449,17 @@ pub const JSRuntime = struct {
         return self.pollGC(roots, .urgent);
     }
 
-    pub fn requestGCForTest(self: *JSRuntime) void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        self.assertOwnerThread();
-        self.gc.requestGC(.manual, .soon);
-    }
-
     /// Does a collection started at this poll decide liveness with the
     /// conservative pass over the mutator's native frames?
     ///
-    /// A minor DESTROYS synchronously, unlike the threshold's major, which
-    /// only opens an incremental cycle and sweeps at a later poll. Running one
-    /// from an arbitrary allocation boundary is therefore only sound while the
-    /// scan covers the Zig locals the interrupted caller is holding -- the
+    /// A collection destroys synchronously, so running one from an arbitrary
+    /// allocation boundary is only sound while the scan covers the Zig locals the interrupted caller is holding -- the
     /// shape `Object.create` acquires before its own boundary, for one. That
     /// is exactly the promise `gc.PollMode.rootScan` makes for the engine
     /// triggers, and exactly what `test_root_scan_override` withdraws: pacing
     /// tests declare their frame quiescent so reclamation is deterministic,
     /// which an allocation boundary in the middle of a constructor is not.
-    /// Those polls keep the pre-S2-g order (major without a preceding minor).
+    /// Those polls run a major without a preceding minor.
     pub fn pollScansConservatively(self: *const JSRuntime, mode: gc_mod.PollMode) bool {
         const scan = if (comptime builtin.is_test)
             self.test_root_scan_override orelse mode.rootScan()
@@ -2165,19 +1486,8 @@ pub const JSRuntime = struct {
         self.test_root_scan_override = null;
     }
 
-    pub fn gcPendingForTest(self: *const JSRuntime) bool {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.gc.hasPendingMajorRequest();
-    }
-
-    pub fn gcLastRequestReasonForTest(self: *const JSRuntime) ?gc_mod.RequestReason {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.gc.stats.last_request_reason;
-    }
-
     pub fn setGCThreshold(self: *JSRuntime, threshold: usize) void {
         self.assertOwnerThread();
-        self.gc.invalidateCycleEnvelopeBaseline();
         self.gc.heap_budget.gc_threshold = threshold;
     }
 
@@ -2188,6 +1498,7 @@ pub const JSRuntime = struct {
 
     /// JS heap budget cap. Ordinary native allocations do not consult it.
     pub fn setMemoryLimit(self: *JSRuntime, limit: ?usize) void {
+        self.assertOwnerThread();
         self.gc.heap_budget.limit = limit;
     }
 
@@ -2196,7 +1507,7 @@ pub const JSRuntime = struct {
     /// fail those allocations.
     pub fn setNativeBytesLimitForTest(self: *JSRuntime, limit: ?usize) void {
         if (!builtin.is_test) @compileError("test-only helper");
-        self.setAllocationDiagnosticLimit(limit);
+        native_allocation.setLimit(self, limit);
     }
 
     /// Test-only: stop an over-limit allocation from collecting before it is
@@ -2235,7 +1546,7 @@ pub const JSRuntime = struct {
     /// Called by engine execution boundaries after their VM frames unwind.
     pub fn runAutomaticMicrotasks(self: *JSRuntime) errors.HostError!void {
         if (self.microtasks.policy != .auto or self.microtasks.running or self.microtasks.scope_depth != 0 or
-            self.call_depth != 0 or self.native_call_depth != 0 or self.active_invocation != null) return;
+            self.isExecuting()) return;
         try self.runMicrotasks();
     }
 
@@ -2259,22 +1570,27 @@ pub const JSRuntime = struct {
             if (record.isRegistered()) registered_classes += 1;
         }
 
-        const class_record_count = self.classes.records.len;
+        // The five owner allocations (Runtime, GC, atom/class/shape tables)
+        // come from the host allocator, outside the instrumented account.
+        const owner_count = 5;
+        const owner_bytes = @sizeOf(JSRuntime) + @sizeOf(GC) + @sizeOf(AtomTable) + @sizeOf(ClassTable) + @sizeOf(ShapeRegistry);
+        const tracked = native_allocation.diagnostic_accounting_enabled;
+        const diag = self.allocation_diagnostics;
         return .{
             .memory_limit = self.memoryLimit(),
             .heap_bytes = self.gc.heap_budget.bytes,
-            .allocated_bytes = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.allocated_bytes + @sizeOf(JSRuntime) + @sizeOf(GC) + @sizeOf(AtomTable) + @sizeOf(ClassTable) + @sizeOf(ShapeRegistry) else 0,
-            .allocation_count = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.allocation_count + 5 else 0,
-            .peak_allocated_bytes = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) + @sizeOf(GC) + @sizeOf(AtomTable) + @sizeOf(ClassTable) + @sizeOf(ShapeRegistry) else 0,
-            .peak_allocation_count = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.peak_allocation_count + 5 else 0,
-            .alloc_calls = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.alloc_calls else 0,
-            .free_calls = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.free_calls else 0,
-            .create_calls = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.create_calls + 5 else 0,
-            .destroy_calls = if (native_allocation.diagnostic_accounting_enabled) self.diagnostics.allocations.destroy_calls else 0,
+            .allocated_bytes = if (tracked) diag.allocated_bytes + owner_bytes else 0,
+            .allocation_count = if (tracked) diag.allocation_count + owner_count else 0,
+            .peak_allocated_bytes = if (tracked) diag.peak_allocated_bytes + owner_bytes else 0,
+            .peak_allocation_count = if (tracked) diag.peak_allocation_count + owner_count else 0,
+            .alloc_calls = if (tracked) diag.alloc_calls else 0,
+            .free_calls = if (tracked) diag.free_calls else 0,
+            .create_calls = if (tracked) diag.create_calls + owner_count else 0,
+            .destroy_calls = if (tracked) diag.destroy_calls else 0,
             .atom_count = atom.predefined_count + live_dynamic_atoms,
             .atom_bytes = dynamic_atom_bytes,
             .registered_class_count = registered_classes,
-            .class_record_count = class_record_count,
+            .class_record_count = self.classes.records.len,
         };
     }
 
@@ -2284,20 +1600,6 @@ pub const JSRuntime = struct {
             self.gc.requestGC(reason, self.gc.externalMemoryRequestUrgency());
         }
         return token;
-    }
-
-    /// Internal classification for inline buffer bytes that already live in
-    /// mem_ops. Off-account embedders must use `reportExternalAlloc` and
-    /// retain its token; this raw hook does not perform the pressure check.
-    pub fn externalMemoryBytes(self: *const JSRuntime) usize {
-        return self.gc.stats.external_bytes;
-    }
-
-    pub fn allocationDebtBytes(self: *const JSRuntime) usize {
-        // Historical API name: this is weighted byte-debt, not a live-memory
-        // byte count. `external_weight` may make it larger than the external
-        // bytes allocated since the last completed major.
-        return self.gc.stats.allocation_debt;
     }
 
     /// Pause percentiles over the collector's retained round window, or null
@@ -2310,13 +1612,7 @@ pub const JSRuntime = struct {
 
     fn fillGcCounters(self: *const JSRuntime, stats: *gc_mod.Stats) void {
         stats.weak_ref_count = self.weakRootSlotCount();
-        const finalization_jobs = self.job_queue.countKind(.finalization);
-        stats.finalizer_queue_length = finalization_jobs;
-        stats.pending_finalization_job_count = finalization_jobs;
-        stats.deferred_native_cleanup_count = self.deferred_native_cleanups.items.len;
-        stats.deferred_native_cleanup_run_count = self.deferred_native_cleanup_run_count;
-        stats.deferred_class_payload_finalizer_count = self.deferred_class_payload_finalizers.items.len;
-        stats.deferred_class_payload_finalizer_run_count = self.deferred_class_payload_finalizer_run_count;
+        stats.finalizer_queue_length = self.job_queue.countKind(.finalization);
     }
 
     /// Maintained counters only. Does not walk the heap.
@@ -2371,22 +1667,19 @@ pub const JSRuntime = struct {
     /// overflow-checked add on every object construction.
     inline fn requestGCForAllocationTotal(self: *JSRuntime, size: usize) usize {
         if (comptime builtin.is_test) {
-            if (self.gc.heap_budget.probe) |probe| {
-                const budget = &self.gc.heap_budget;
-                const saved = budget.suspend_alloc_notify;
-                budget.suspend_alloc_notify = true;
-                defer budget.suspend_alloc_notify = saved;
-                probe(budget.probe_ctx, size);
-                return self.prospectiveAllocationTotal(size);
-            }
+            if (self.gc.heap_budget.runProbe(size)) return self.prospectiveAllocationTotal(size);
         }
-        // Allocation is legal from class/native finalizers while the refcount
-        // queue is in its decref phase, but starting a nested major collection
-        // is not. `gc_running` covers the major driver; the explicit phase guard
-        // also covers outer zero-ref drains that run without that flag.
-        if (self.gc_running or self.gc.hot.phase != .none) return self.prospectiveAllocationTotal(size);
+        // Destructors may allocate, but starting a nested collection from
+        // inside a running one is not allowed.
+        if (self.collectorBusy()) return self.prospectiveAllocationTotal(size);
         if (comptime native_allocation.force_gc_on_allocation_enabled) {
             if (self.gc.heap_budget.suspend_alloc_notify) return self.prospectiveAllocationTotal(size);
+            // A no-GC scope's native allocations (atom interning, for one)
+            // never collect in a normal build; the synthetic collection
+            // must not start inside one either.
+            if (comptime gc_scope.checks_enabled) {
+                if (self.active_no_gc_scope != null) return self.prospectiveAllocationTotal(size);
+            }
             // The force-GC build option is diagnostic instrumentation, not a
             // scheduling-policy change. Preserve an explicitly configured
             // threshold across the synthetic pre-allocation collection.
@@ -2413,38 +1706,6 @@ pub const JSRuntime = struct {
     /// memory-limit check must be allowed to reuse space from reclaimable
     /// cycles before rejecting the replacement object.
     pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) align(64) void {
-        // Plugin callbacks are forbidden inside tracer_destroy. The first
-        // object-allocation boundary after the collector becomes idle drains
-        // them before publishing another object. Allocations made by a callback
-        // reenter this function with `draining_...` set: they may request the
-        // next GC, but cannot recursively drain the same queue.
-        if (self.deferred_class_payload_finalizers.items.len != 0 and
-            !self.gc_running and self.gc.hot.phase == .none and
-            !self.draining_deferred_class_payload_finalizers)
-        {
-            @branchHint(.unlikely);
-            return self.collectBeforeObjectAllocationAfterDeferredDrain(size);
-        }
-        self.collectBeforeObjectAllocationAfterFinalizerCheck(size);
-    }
-
-    /// Cold continuation for the callback-delivery boundary. Re-enter the
-    /// allocation decision after draining, but skip the queue-ready test: a
-    /// callback may have queued another job while `draining_...` was set, and
-    /// recursively trying to drain it at the same boundary is forbidden.
-    noinline fn collectBeforeObjectAllocationAfterDeferredDrain(self: *JSRuntime, size: usize) void {
-        self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
-        self.collectBeforeObjectAllocationAfterFinalizerCheck(size);
-    }
-
-    /// Cold tail that owns `pollGC`'s error-union return area. The common
-    /// below-threshold allocation path can then remain a leaf with no saved
-    /// registers or stack frame.
-    noinline fn pollGCBeforeObjectAllocation(self: *JSRuntime) void {
-        _ = self.pollGC(null, .normal) catch {};
-    }
-
-    inline fn collectBeforeObjectAllocationAfterFinalizerCheck(self: *JSRuntime, size: usize) void {
         const prospective = self.requestGCForAllocationTotal(size);
         // Scratch allocation can cross the threshold and queue a request, then
         // fall back below it before the next qjs-style object boundary. The
@@ -2459,15 +1720,16 @@ pub const JSRuntime = struct {
         // bounds how many allocation-boundary slices one burst can concatenate
         // into a mutator-visible operation. Scheduler/callback/idle polls call
         // pollGC directly and remain unpaced.
-        if (self.gc_running or self.gc.hot.phase != .none) return;
-        // While marking is open the account is over the (not yet reset)
-        // threshold, so each boundary re-records `.allocation_threshold` above
-        // and this gate stays open for the increments unaided. Destruction is
-        // different: the threshold resets at condemn time (net of corpses), so
-        // the account may be UNDER it while the morgue still holds memory --
-        // the explicit `doomed_pending` term is what keeps the slices moving.
-        if (!self.gc.morgue.pending and !self.gc.hasPendingMajorRequest()) return;
+        if (self.collectorBusy()) return;
+        if (!self.gc.hasPendingMajorRequest()) return;
         return self.pollGCBeforeObjectAllocation();
+    }
+
+    /// Cold tail that owns `pollGC`'s error-union return area. The common
+    /// below-threshold allocation path can then remain a leaf with no saved
+    /// registers or stack frame.
+    noinline fn pollGCBeforeObjectAllocation(self: *JSRuntime) void {
+        _ = self.pollGC(null, .normal) catch {};
     }
 
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
@@ -2482,8 +1744,8 @@ pub const JSRuntime = struct {
     /// collection is already running.
     fn retryHeapLimitOnce(ctx: *anyopaque) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));
-        if (self.gc_running or self.gc.hot.phase != .none) return;
-        _ = self.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch return;
+        if (self.collectorBusy()) return;
+        _ = self.collectFull(null, .engine_active) catch return;
     }
 
     /// Admit `bytes` against the JS heap limit, collecting at most once.
@@ -2502,14 +1764,10 @@ pub const JSRuntime = struct {
         self.gc.heap_budget.admit(bytes) catch {};
     }
 
-    fn resetGCThreshold(self: *JSRuntime) void {
-        gc_driver.resetThreshold(self);
-    }
-
     /// Return the shared single-code-unit (latin1) string for `byte`,
     /// creating it lazily on the first request. The cache slot is itself a
     /// root, so the body outlives every borrow of it; there is no per-caller
-    /// retain to take (ref-counting was deleted in TGC S1-S3).
+    /// retain to take.
     ///
     /// Inline load + branch; the one-shot creation is outlined so a hit costs
     /// nothing more than the table read.
@@ -2547,59 +1805,45 @@ pub const JSRuntime = struct {
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
         self.assertOwnerThread();
-        self.stack_size = size;
-        self.vm_stack_frame_storage = VmStackStorage.frameWindowForLimit(size);
+        self.stack.limit = size;
+        self.stack.frame_storage = VmStackStorage.frameWindowForLimit(size);
     }
 
     pub fn stackSize(self: *const JSRuntime) usize {
-        return self.stack_size;
+        return self.stack.limit;
     }
 
     pub fn nativeStackSize(self: *const JSRuntime) usize {
-        return self.native_stack_size;
+        return self.stack.native_size;
     }
 
     pub fn setNativeStackSize(self: *JSRuntime, budget_bytes: usize) void {
         self.assertOwnerThread();
-        self.native_stack_size = budget_bytes;
-        if (self.call_depth == 0 and self.native_call_depth == 0) {
+        self.stack.native_size = budget_bytes;
+        if (self.stack.call_depth == 0 and self.stack.native_call_depth == 0) {
             self.updateNativeStackTop();
         } else {
-            self.native_stack_limit = if (budget_bytes == 0) 0 else self.native_stack_top -| budget_bytes;
+            self.stack.armNativeLimit();
         }
     }
 
     /// Capture the current native frame pointer as the recursion base and derive
-    /// the lower limit. Mirrors QuickJS `JS_UpdateStackTop` + `update_stack_limit`
-    ///. Must be called at the outermost JS entry on the
-    /// thread that will run the code (worker threads have their own C stack), so
+    /// the lower limit (QuickJS `JS_UpdateStackTop`). Must be called at the
+    /// outermost JS entry on the thread that will run the code (worker threads have their own C stack), so
     /// deeper native frames (parser / JSON / interpreter) measure against a real,
     /// same-stack base. A `native_stack_size` of 0 disables the limit.
     pub fn updateNativeStackTop(self: *JSRuntime) void {
-        self.native_stack_top = @frameAddress();
-        self.native_stack_limit = if (self.native_stack_size == 0)
-            0
-        else
-            self.native_stack_top -| self.native_stack_size;
+        self.stack.native_top = @frameAddress();
+        self.stack.armNativeLimit();
     }
 
     /// Return true if consuming `alloca_size` more native stack would cross the
-    /// recursion limit. Direct port of QuickJS `js_check_stack_overflow`
-    ///: `sp = frame_address - alloca_size; sp < limit`.
-    /// Stack grows down, so "below the limit" is overflow.
-    ///
-    /// The unset limit needs no branch of its own: qjs encodes "no limit" as
-    /// `rt->stack_limit = 0` (`update_stack_limit`, quickjs.c) and
-    /// lets the same unsigned compare answer it, because no stack pointer is
-    /// ever below zero. `native_stack_limit` uses that identical encoding, and
-    /// the saturating subtraction keeps `sp` non-negative, so `sp < 0` is
-    /// already constant-false. An explicit `limit == 0` pre-test is a zjs-only
-    /// extra load-compare-branch on the parser's per-token guard path
-    /// (parser.zig `advance`, mirroring qjs guarding `next_token`,
-    /// quickjs.c) and LLVM does not fold it away.
+    /// recursion limit (QuickJS `js_check_stack_overflow`). The stack grows
+    /// down, so "below the limit" is overflow. A zero limit means "no limit"
+    /// and needs no branch of its own: the saturating `sp` is never below 0.
     pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
         const sp = @frameAddress() -| alloca_size;
-        return sp < self.native_stack_limit;
+        return sp < self.stack.native_limit;
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {
@@ -2610,13 +1854,10 @@ pub const JSRuntime = struct {
         return self.classes.registerDefinition(self, definition);
     }
 
-    pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
-        self.interrupt_handler = handler;
-        self.interrupt_context = context;
-    }
-
-    pub fn getDynamicImportLoader(self: *const JSRuntime) DynamicImportLoader {
-        return self.dynamic_import_loader;
+    /// Owner thread only; `terminateExecution` is the cross-thread request.
+    pub fn setInterruptHandler(self: *JSRuntime, handler: ?InterruptHandler, context: ?*anyopaque) void {
+        self.assertOwnerThread();
+        self.interrupt = if (handler) |h| .{ .handler = h, .context = context } else null;
     }
 
     pub fn installDynamicImportLoader(self: *JSRuntime, next: DynamicImportLoader) DynamicImportLoaderScope {
@@ -2626,12 +1867,8 @@ pub const JSRuntime = struct {
         return .{
             .runtime = self,
             .previous = previous,
+            .installed = next,
         };
-    }
-
-    pub fn standardGlobalOwnPropertyCapacity(self: *const JSRuntime) usize {
-        _ = self;
-        return engine_services.standardGlobalOwnPropertyCapacity();
     }
 
     /// Thread-safe request. The caller must keep this Runtime alive.
@@ -2644,29 +1881,52 @@ pub const JSRuntime = struct {
     }
 
     /// Owner-only idle recovery. Requests ordered after this exchange survive.
-    pub fn cancelTerminateExecution(self: *JSRuntime) !void {
+    pub fn cancelTerminateExecution(self: *JSRuntime) (RuntimeMutationError || error{RuntimeBusy})!void {
         try self.requireOwnerThread();
-        if (self.call_depth != 0 or self.native_call_depth != 0 or self.active_invocation != null or self.microtasks.running)
-            return error.RuntimeBusy;
+        if (self.isExecuting() or self.microtasks.running) return error.RuntimeBusy;
         _ = self.termination_requested.swap(false, .acq_rel);
     }
 
-    pub fn hasInterruptHandler(self: *const JSRuntime) bool {
-        return self.interrupt_handler != null or self.isExecutionTerminating();
+    /// Whether an interrupt poll can stop execution: a handler is installed
+    /// or termination was requested.
+    pub fn mayInterrupt(self: *const JSRuntime) bool {
+        return self.interrupt != null or self.isExecutionTerminating();
+    }
+
+    /// The interrupt poll of a long native loop or of code that sees only
+    /// the runtime (a parser, a numeric library). Every `native_poll_interval`
+    /// calls it runs the interrupt handler; a stop request returns a bare
+    /// `error.Interrupted`, which the builtin seam (`materializeRuntimeError`)
+    /// or `exception_ops.raiseBareInterrupt` turns into the uncatchable
+    /// InternalError.
+    pub inline fn pollNativeWork(self: *JSRuntime) error{Interrupted}!void {
+        self.native_poll_countdown -= 1;
+        if (self.native_poll_countdown != 0) return;
+        self.native_poll_countdown = native_poll_interval;
+        if (self.runInterruptHandler()) return error.Interrupted;
+    }
+
+    /// Bytes a bulk step (copy, fill, scan, compare) does per unit of
+    /// `pollNativeWork`'s countdown: one interval is about 256 KiB.
+    pub const native_bulk_bytes_per_unit = 64;
+
+    /// `pollNativeWork` for a bulk step over `bytes` bytes: it uses up its
+    /// share of the countdown, so a loop of large copies or scans polls as
+    /// often as a loop of small iterations.
+    pub fn pollNativeBulkWork(self: *JSRuntime, bytes: usize) error{Interrupted}!void {
+        const units = bytes / native_bulk_bytes_per_unit;
+        if (units < self.native_poll_countdown) {
+            self.native_poll_countdown -= @intCast(units);
+            return;
+        }
+        self.native_poll_countdown = native_poll_interval;
+        if (self.runInterruptHandler()) return error.Interrupted;
     }
 
     pub fn runInterruptHandler(self: *JSRuntime) bool {
         if (self.isExecutionTerminating()) return true;
-        const handler = self.interrupt_handler orelse return false;
-        return handler(self, self.interrupt_context);
-    }
-
-    pub fn setCanBlock(self: *JSRuntime, can_block: bool) void {
-        self.can_block = can_block;
-    }
-
-    pub fn canBlock(self: *const JSRuntime) bool {
-        return self.can_block;
+        const interrupt = self.interrupt orelse return false;
+        return interrupt.handler(self, interrupt.context);
     }
 
     pub fn signalHostCompletion(self: *JSRuntime, io: std.Io) void {
@@ -2688,167 +1948,24 @@ pub const JSRuntime = struct {
         return true;
     }
 
-    pub fn enqueueFinalizationJobForRealm(self: *JSRuntime, realm: *context_mod.JSContext, callback: JSValue, held_value: JSValue) !void {
-        std.debug.assert(realm.runtime == self);
-        try self.job_queue.enqueueFinalization(realm, callback, held_value);
-    }
-
-    /// Commit a FinalizationRegistry cleanup against a slot reserved at cell
-    /// registration. No allocation.
-    pub fn enqueueFinalizationJobReserved(
-        self: *JSRuntime,
-        realm: *context_mod.JSContext,
-        callback: JSValue,
-        held_value: JSValue,
-    ) void {
-        std.debug.assert(realm.runtime == self);
-        self.job_queue.enqueueReserved(job_mod.Job.initFinalization(realm, callback, held_value));
-    }
-
     pub fn clearPendingFinalizationJobs(self: *JSRuntime) void {
         while (self.job_queue.firstIndexOfKind(.finalization)) |index| {
             var entry = self.job_queue.takeAt(index);
             entry.deinit();
         }
     }
-
-    pub fn pendingFinalizationJobCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.job_queue.countKind(.finalization);
-    }
-
-    pub fn enqueueDeferredNativeCleanup(self: *JSRuntime, finalizer: host_function.ExternalFinalizer, ptr: *anyopaque) !void {
-        return deferred_cleanup.enqueueNative(self, finalizer, ptr);
-    }
-
-    pub fn enqueueDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) !bool {
-        return deferred_cleanup.enqueueClassPayload(self, class_id, payload, payload_kind, object_identity);
-    }
-
-    pub fn reserveDeferredClassPayloadFinalizerSlot(self: *JSRuntime) !void {
-        return deferred_cleanup.reserveClassPayloadSlot(self);
-    }
-
-    pub fn releaseDeferredClassPayloadFinalizerSlot(self: *JSRuntime) void {
-        deferred_cleanup.releaseClassPayloadSlot(self);
-    }
-
-    /// Publish a wrapper's declared payload edges as roots after its payload
-    /// is fully initialized. The reservation remains outstanding until the
-    /// wrapper finalizer atomically transfers the payload to a queued job.
-    pub fn registerReservedDeferredClassPayloadRoot(self: *JSRuntime, object: *Object) void {
-        deferred_cleanup.registerReservedRoot(self, object);
-    }
-
-    /// End the pre-enqueue root lifetime after the queued node has copied the
-    /// payload and mark callback. Queue roots take over before this removal.
-    pub fn unregisterDeferredClassPayloadRoot(self: *JSRuntime, object: *Object) void {
-        deferred_cleanup.unregisterRoot(self, object);
-    }
-
-    pub fn enqueueReservedDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, generation: u64, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) bool {
-        return deferred_cleanup.enqueueReservedClassPayload(self, class_id, generation, payload, payload_kind, object_identity);
-    }
-
-    pub fn hasDeferredNativeCleanups(self: *const JSRuntime) bool {
-        return deferred_cleanup.hasNative(self);
-    }
-
-    pub fn hasPendingDeferredClassPayloadFinalizers(self: *const JSRuntime) bool {
-        return deferred_cleanup.hasPendingClassPayload(self);
-    }
-
-    pub fn isActiveDeferredClassPayloadFinalizerCallback(self: *const JSRuntime, object_identity: *anyopaque) bool {
-        return deferred_cleanup.isActiveClassPayloadCallback(self, object_identity);
-    }
-
-    pub fn runDeferredNativeCleanupBudgeted(self: *JSRuntime, max_jobs: usize) usize {
-        return deferred_cleanup.runNativeBudgeted(self, max_jobs);
-    }
-
-    pub fn runDeferredClassPayloadFinalizerBudgeted(self: *JSRuntime, max_jobs: usize) usize {
-        return deferred_cleanup.runClassPayloadBudgeted(self, max_jobs);
-    }
-
-    pub fn drainDeferredNativeCleanups(self: *JSRuntime) void {
-        deferred_cleanup.drainNative(self);
-    }
-
-    pub fn drainDeferredClassPayloadFinalizers(self: *JSRuntime) void {
-        deferred_cleanup.drainClassPayload(self);
-    }
-
-    /// Deliver user callbacks only after the collector phase has returned to
-    /// idle. Reentry from the callback is rejected while its GC request remains
-    /// pending.
-    inline fn drainDeferredClassPayloadFinalizersAtSafeBoundary(self: *JSRuntime) void {
-        deferred_cleanup.drainClassPayloadAtSafeBoundary(self);
-    }
-
-    pub fn pendingDeferredNativeCleanupCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return deferred_cleanup.pendingNativeCount(self);
-    }
-
-    pub fn pendingDeferredClassPayloadFinalizerCountForTest(self: *const JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return deferred_cleanup.pendingClassPayloadCount(self);
-    }
-
-    pub fn beginBorrowedWeakCleanup(self: *JSRuntime) void {
-        property_state.beginBorrowedCleanup(self);
-    }
-
-    pub fn endBorrowedWeakCleanup(self: *JSRuntime) void {
-        property_state.endBorrowedCleanup(self);
-    }
-
-    pub fn borrowedWeakCleanupActive(self: *const JSRuntime) bool {
-        return self.borrowed_weak_cleanup_active;
-    }
-
-    pub fn borrowedWeakCleanupIdentityCount(self: *const JSRuntime) usize {
-        return self.borrowed_weak_cleanup_identities.items.len;
-    }
-
-    pub fn enqueueBorrowedWeakCleanupIdentity(self: *JSRuntime, identity: usize) !void {
-        return property_state.enqueueBorrowedCleanupIdentity(self, identity);
-    }
-
-    pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
-        return property_state.borrowedCleanupIdentityMatches(self, identity);
-    }
-
-    pub inline fn borrowedWeakCleanupIdentityMatchesSlice(self: *const JSRuntime, start_index: usize, identity: usize) bool {
-        return property_state.borrowedCleanupIdentityMatchesSlice(self, start_index, identity);
-    }
-
-    pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
-        property_state.clearBorrowedCleanup(self);
-    }
 };
 
-/// Gate-only settlement boundary used after the CLI has finished draining
-/// jobs. It is a module function rather than a JSRuntime method so this
-/// internal diagnostic does not enlarge the public embedder API. It does not
-/// start a fresh collection or hide an open marking cycle; it only completes
-/// an irreversible destruction transaction so the gate can assert the
-/// morgue's real exit invariant separately from the naturally timed endpoint.
-pub fn settlePendingDestructionForGateStats(rt: *JSRuntime) void {
+/// Gate-only check used after the CLI has finished draining jobs: every
+/// collection destroys what it condemned, so the morgue must be empty. A
+/// module function rather than a JSRuntime method so this internal
+/// diagnostic does not enlarge the public embedder API.
+pub fn auditDoomedStateForGateStats(rt: *JSRuntime) void {
     rt.assertOwnerThread();
     rt.assertIdleForTeardown();
-    std.debug.assert(!rt.gc_running);
+    std.debug.assert(!rt.gc.hot.collecting);
     std.debug.assert(rt.gc.hot.phase == .none);
-    std.debug.assert(rt.active_deferred_class_payload_finalizer == null);
-    if (!rt.gc.morgue.pending) {
-        @import("core/gc_trace_stw.zig").auditDoomedExitInvariant(rt);
-        return;
-    }
-
-    rt.gc_running = true;
-    defer rt.gc_running = false;
-    @import("core/gc_trace_stw.zig").finishPendingDestruction(rt);
-    _ = rt.finishDoomedCompletion(0);
+    @import("core/gc_trace_stw.zig").auditDoomedExitInvariant(rt);
 }
 
 test "value root frame activation restores nested scopes" {
@@ -2879,16 +1996,16 @@ test "value handle uses runtime persistent root slot" {
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
-    var handle = try rt.takeValueHandle(object.value());
-    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+    var handle = try rt.createPersistentValue(object.value());
+    try std.testing.expectEqual(@as(usize, 1), rt.roots.persistent_root_slots.items.len);
     try std.testing.expect(handle.get().is(.object));
 
     const released = handle.take();
-    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
     try std.testing.expect(released.is(.object));
 
     handle.deinit();
-    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
 }
 
 test "external memory accounting records debt and requests GC" {
@@ -2900,31 +2017,31 @@ test "external memory accounting records debt and requests GC" {
     });
     defer rt.destroy();
 
-    try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
-    try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
-    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().allocation_debt);
+    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
 
     var token = try rt.reportExternalAlloc(8);
     var duplicate_token = token;
-    try std.testing.expectEqual(@as(usize, 8), rt.externalMemoryBytes());
-    try std.testing.expectEqual(@as(usize, 16), rt.allocationDebtBytes());
+    try std.testing.expectEqual(@as(usize, 8), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 16), rt.gcStats().allocation_debt);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
     try std.testing.expectEqual(@as(usize, 8), rt.gcStats().external_token_bytes);
-    try std.testing.expect(rt.gcPendingForTest());
-    try std.testing.expectEqual(@as(?gc_mod.RequestReason, gc_mod.RequestReason.allocation_debt), rt.gcLastRequestReasonForTest());
+    try std.testing.expect(rt.gc.hasPendingMajorRequest());
+    try std.testing.expectEqual(@as(?gc_mod.RequestReason, gc_mod.RequestReason.allocation_debt), rt.gc.stats.last_request_reason);
 
     const result = try rt.pollGC(null, .normal);
     try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
-    try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
-    try std.testing.expectEqual(@as(usize, 8), rt.externalMemoryBytes());
-    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().allocation_debt);
+    try std.testing.expectEqual(@as(usize, 8), rt.gcStats().external_bytes);
+    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
 
     token.release();
-    try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
     duplicate_token.release();
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_invalid_release_count);
-    try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
     token.release();
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_invalid_release_count);
 }
@@ -2952,7 +2069,46 @@ test "external hard memory pressure requests urgent major gc" {
     } else {
         try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
     }
-    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
+}
+
+test "atom table growth requests a major that the interpreter safepoint serves" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const before = rt.memoryUsage().atom_count;
+    var buf: [32]u8 = undefined;
+    for (0..AtomTable.sweep_growth_floor) |i| {
+        _ = try rt.internAtom(try std.fmt.bufPrint(&buf, "growth-{d}", .{i}));
+    }
+    const pending = rt.gcStats();
+    try std.testing.expect(pending.pending_major);
+    try std.testing.expectEqual(@as(?gc_mod.RequestReason, gc_mod.RequestReason.atom_growth), pending.pending_request_reason);
+
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
+    try std.testing.expect(rt.memoryUsage().atom_count < before + AtomTable.sweep_growth_floor / 2);
+    try std.testing.expectEqual(@as(u32, 0), rt.atoms.interned_since_sweep);
+}
+
+test "an atom interned across an atom-hash resize is live when intern returns" {
+    // The resize allocates, and an allocation may collect: a new entry
+    // nothing holds yet must not exist while it does. Only a
+    // `-Dzjs_force_gc=true` build collects inside that allocation.
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    var ids: [3000]atom.Atom = undefined;
+    var buf: [32]u8 = undefined;
+    for (&ids, 0..) |*id, i| {
+        id.* = try rt.internAtom(try std.fmt.bufPrint(&buf, "resize-{d}", .{i}));
+        try std.testing.expect(rt.atoms.name(id.*) != null);
+        rt.atoms.pinForHost(id.*);
+    }
+    for (ids) |id| rt.atoms.unpinForHost(id);
 }
 
 test "VM stack arena default fill matches VmStackArena{}" {
@@ -2988,15 +2144,15 @@ test "VM stack arena allocates and reuses a compact first chunk" {
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
     try std.testing.expectEqual(@as(usize, 0), arena.active);
     try std.testing.expectEqual(VmStackArena.first_chunk_slots, arena.chunks[0].len);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.allocation_count);
 
     arena.restore(initial_mark);
-    const allocations_before_reuse = account.diagnostics.allocations.allocation_count;
+    const allocations_before_reuse = account.allocation_diagnostics.allocation_count;
     const reused = arena.carve(account, 3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@intFromPtr(first.ptr), @intFromPtr(reused.ptr));
-    try std.testing.expectEqual(allocations_before_reuse, account.diagnostics.allocations.allocation_count);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_reuse, account.allocation_diagnostics.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocation_diagnostics.allocated_bytes);
 }
 
 test "VM stack arena active miss is pure before authoritative second chunk carve" {
@@ -3008,13 +2164,13 @@ test "VM stack arena active miss is pure before authoritative second chunk carve
     _ = arena.carve(account, VmStackArena.first_chunk_slots) orelse
         return error.TestUnexpectedResult;
     const full_mark = arena.mark();
-    const bytes_before_miss = account.diagnostics.allocations.allocated_bytes;
-    const allocations_before_miss = account.diagnostics.allocations.allocation_count;
+    const bytes_before_miss = account.allocation_diagnostics.allocated_bytes;
+    const allocations_before_miss = account.allocation_diagnostics.allocation_count;
 
     try std.testing.expect(arena.carveActiveMarked(1) == null);
     try std.testing.expectEqual(full_mark, arena.mark());
-    try std.testing.expectEqual(bytes_before_miss, account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(allocations_before_miss, account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(bytes_before_miss, account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_miss, account.allocation_diagnostics.allocation_count);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
 
     const second = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
@@ -3026,9 +2182,9 @@ test "VM stack arena active miss is pure before authoritative second chunk carve
     try std.testing.expectEqual(
         VmStackArena.first_chunk_bytes +
             VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.diagnostics.allocations.allocated_bytes,
+        account.allocation_diagnostics.allocated_bytes,
     );
-    try std.testing.expectEqual(allocations_before_miss + 1, account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(allocations_before_miss + 1, account.allocation_diagnostics.allocation_count);
 }
 
 test "VM stack arena large first carve retains the maximum chunk size" {
@@ -3044,9 +2200,9 @@ test "VM stack arena large first carve retains the maximum chunk size" {
     try std.testing.expectEqual(VmStackArena.chunk_slots, arena.chunks[0].len);
     try std.testing.expectEqual(
         VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.diagnostics.allocations.allocated_bytes,
+        account.allocation_diagnostics.allocated_bytes,
     );
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.allocation_count);
 }
 
 test "VM stack arena oversized carve is rejected without state or accounting changes" {
@@ -3059,8 +2215,8 @@ test "VM stack arena oversized carve is rejected without state or accounting cha
     try std.testing.expect(arena.carve(account, VmStackArena.chunk_slots + 1) == null);
     try std.testing.expectEqual(before, arena.mark());
     try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
 }
 
 test "VM stack arena allocation failure is retryable and keeps accounting balanced" {
@@ -3075,15 +2231,15 @@ test "VM stack arena allocation failure is retryable and keeps accounting balanc
     try std.testing.expect(arena.carve(account, 1) == null);
     try std.testing.expectEqual(before, arena.mark());
     try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     const retry = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), retry.len);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.allocation_count);
 
     _ = arena.carve(account, VmStackArena.first_chunk_slots - 1) orelse
         return error.TestUnexpectedResult;
@@ -3095,8 +2251,8 @@ test "VM stack arena allocation failure is retryable and keeps accounting balanc
     try std.testing.expectEqual(@as(usize, 0), arena.active);
     try std.testing.expectEqual(@as(usize, 0), arena.chunks[1].len);
     try std.testing.expectEqual(@as(usize, 0), arena.used[1]);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.allocation_count);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     const second_retry = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
@@ -3108,36 +2264,36 @@ test "VM stack arena allocation failure is retryable and keeps accounting balanc
     try std.testing.expectEqual(
         VmStackArena.first_chunk_bytes +
             VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.diagnostics.allocations.allocated_bytes,
+        account.allocation_diagnostics.allocated_bytes,
     );
-    try std.testing.expectEqual(@as(usize, 2), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 2), account.allocation_diagnostics.allocation_count);
 
     arena.deinit(account.nativeAllocator());
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
 }
 
 test "runtime allocator facades share memory accounting" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const baseline = rt.diagnostics.allocations.allocated_bytes;
+    const baseline = rt.allocation_diagnostics.allocated_bytes;
     const current = try rt.nativeAllocator().alloc(u8, 2048);
     var current_live = true;
     defer if (current_live) rt.nativeAllocator().free(current);
-    try std.testing.expectEqual(baseline + current.len, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline + current.len, rt.allocation_diagnostics.allocated_bytes);
 
     const persistent = try rt.nativeAllocator().alloc(u8, 4096);
     var persistent_live = true;
     defer if (persistent_live) rt.nativeAllocator().free(persistent);
-    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.allocation_diagnostics.allocated_bytes);
 
     rt.nativeAllocator().free(persistent);
     persistent_live = false;
-    try std.testing.expectEqual(baseline + current.len, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline + current.len, rt.allocation_diagnostics.allocated_bytes);
     rt.nativeAllocator().free(current);
     current_live = false;
-    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "runtime and context init-deinit are leak free" {
@@ -3149,4 +2305,20 @@ test "runtime and context init-deinit are leak free" {
         ctx1.destroy();
         rt.destroy();
     }
+}
+
+test "nested dynamic import loader scopes restore in LIFO order" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var outer_data: u8 = 1;
+    var inner_data: u8 = 2;
+
+    var outer = rt.installDynamicImportLoader(.{ .userdata = &outer_data });
+    var inner = rt.installDynamicImportLoader(.{ .userdata = &inner_data });
+    try std.testing.expectEqual(@as(?*anyopaque, &inner_data), rt.dynamic_import_loader.userdata);
+    inner.deinit();
+    inner.deinit(); // idempotent
+    try std.testing.expectEqual(@as(?*anyopaque, &outer_data), rt.dynamic_import_loader.userdata);
+    outer.deinit();
+    try std.testing.expectEqual(@as(?*anyopaque, null), rt.dynamic_import_loader.userdata);
 }

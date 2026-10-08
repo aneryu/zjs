@@ -49,18 +49,19 @@ GC safety net。每合并批仍只跑一轮批门禁。
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
 2. 批门禁一轮:`mise run batch-gate` =
-   Debug `checkpoint-gate`，再单独
-   `zig build test262-check -Doptimize=ReleaseFast`
+   Debug `checkpoint-gate` 与
+   `zig build test262-check -Doptimize=ReleaseFast` 并发执行（两者无共享产物，任一失败即失败）
    (与 CI linux-arm64 同一组步骤,不含已退役的 `gate-smoke` /
    `merge-gate`)。发布门仍是 `mise run production-gate`
    (`engine-production-gate -Doptimize=ReleaseFast`)。**门禁一律走 mise 任务**:裸 `zig build`
    只有 `核数−1` 个 runner 线程,超出的初始步骤会在主线程内联执行;
 3. 批内触碰 GC、根、写屏障或对象存储布局时,另跑一次
-   `mise run test262-gc-audit`(ReleaseSafe 全量 test262,`ZJS_GC_STRESS=64`
-   + `ZJS_GC_AUDIT=fatal`,默认与 `ZJS_GC_NURSERY=1` 两种模式分别报告,
-   默认模式另跑一轮 `ZJS_GC_STRESS=16`;20 核本机约 21 分钟)。普通套件全绿时漏屏障与缺根仍会潜伏,这一门在
-   2026-09-25 抓到过默认配置下的多处此类缺陷。Nightly 的
-   `gc-audit-test262` job 每晚跑同一组步骤;
+   `mise run test262-gc-audit`(ReleaseSafe 全量 test262 + `ZJS_GC_AUDIT=fatal`:
+   默认收集器 `ZJS_GC_STRESS=16`、`ZJS_GC_NURSERY=1` 下 `ZJS_GC_STRESS=64`
+   两轮分别报告;20 核本机约 18 分钟)。普通套件全绿时漏屏障与缺根仍会潜伏,这一门在
+   2026-09-25 抓到过默认配置下的多处此类缺陷。16-tick 的安全点覆盖 64-tick 的,
+   所以本地不再单跑默认 `STRESS=64`;Nightly 的 `gc-audit-test262` job 每晚仍跑
+   三轮(另含默认 `STRESS=64`);
 4. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证。
 
 ## 明确废止的(勿再执行)

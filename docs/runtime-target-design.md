@@ -65,8 +65,7 @@ RootSet 默认值即可使用，按需取得内联数组视图，不保存内联
 | `materializeContextGlobal(ctx)` | `RealmContext.globalObject` | Context 保留已有 global 快路径；exec 完成惰性创建 |
 | `materializeBuiltinNamespace(rt, global, kind)` | `Object.materializeBuiltinNamespaceAutoInit` | exec 构造 namespace；Object 保留缺失 global/结果的校验 |
 | `runMicrotask(rt)` | `jobs.runCheckpointStep` | exec 只执行一步；FIFO、checkpoint 策略、终止、重入和异常报告仍归 jobs |
-| `internalBuiltinRecord(domain, id)` | Runtime 同名查询方法 | 查询 exec 的静态表；保留 domain/id 边界检查、host 域和缺项返回 null |
-| `standardGlobalOwnPropertyCapacity()` | Runtime 同名查询方法 | 与标准 globals 共用容量数据源，不保存 Runtime 副本 |
+| `internalBuiltinRecord(domain, id)` | `Object` 的 native 记录解析（exec 直接用 `internal_builtins.lookup`） | 查询 exec 的静态表；保留 domain/id 边界检查、host 域和缺项返回 null |
 
 过去的 `EngineHooks`、Runtime 的 `hooks` 指针、两个可空 materializer 副本
 和 `internal_builtins` slice 均已移除。固定执行代码没有 Runtime 所有权，
@@ -149,7 +148,7 @@ native 和 GC 分配/释放事件，保持现有统计口径；它不是存储�
 
 `*NoTrigger` 跳过每次分配的 probe/notify 和 heap-limit GC 重试，GC 类型
 仍执行只检查额度的 `checkOnly`。普通 native 分配不受 heap limit 管理。
-Runtime 的 `setAllocationDiagnosticLimit/allocationDiagnosticLimit` 是
+Runtime 的 `setNativeBytesLimitForTest` 是
 Debug/test 分配诊断的失败注入限额，不是 Runtime 的 JS heap limit。
 允许收集的准备由调用方在安全边界完成。
 

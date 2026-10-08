@@ -91,8 +91,8 @@ Zig ORs multiple filters.
 | Target | How it selects |
 |---|---|
 | `test-fast -- '<substring>'` | `--test-filter <substring>` plus `zjs.pull_test_modules` on the engine root. Integration prefixes are `tests.public_api.`, `tests.core.`, `tests.exec.` |
-| `test` | engine suite plus CLI tests |
-| `test-gc-stress` | engine suite under GC diagnostic env |
+| `test` | engine suite plus CLI tests; the unfiltered engine suite runs as `-Dtest-shards` (default 8) processes of `tools/sharded_test_runner.zig` (`ZJS_TEST_SHARD=k/n`) |
+| `test-gc-stress` | engine suite under GC diagnostic env, sharded the same way |
 | `test-leak-census` | `--test-filter tests.exec.`; runner repeats twice with `ZJS_LEAK_CENSUS=1` |
 | `test-embedding` / `check-embedding` | public-root compile of `tests/embedding_examples.zig`; no name filter |
 

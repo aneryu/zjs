@@ -1,10 +1,10 @@
 //! VM frame storage, call-binding layout, and explicit value/cell ownership.
 //!
 //! A frame may borrow caller storage or own a slab/heap allocation; teardown
-//! releases argument, local, stack, VarRef, and `new.target` cells only as their
-//! recorded dispositions require. Open VarRefs retain their frame backing until
-//! closure or generator transfer completes. The layout follows QuickJS frame
-//! allocation at quickjs.c and VarRef closure at
+//! frees only the storage its recorded dispositions say it owns (values are
+//! traced, not reference-counted). Open VarRefs retain their frame backing
+//! until closure or generator transfer completes. The layout follows QuickJS
+//! frame allocation and VarRef closing in quickjs.c.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -86,7 +86,6 @@ pub const FrameSlab = struct {
         const total_value_slots = try layout.totalSlots();
         if (total_value_slots == 0) return .{};
         const storage = try account.alloc(JSValue, total_value_slots);
-        errdefer account.free(storage);
         return partition(storage, layout);
     }
 };
@@ -135,8 +134,8 @@ pub const Ownership = enum(u1) {
 };
 
 /// How a frame reaches its `new.target`. qjs never stores one: it is a
-/// JS_CallInternal parameter that only `OP_special_object NEW_TARGET` reads
-///, and JSStackFrame has no field for it.
+/// JS_CallInternal parameter that only `OP_special_object NEW_TARGET` reads,
+/// and JSStackFrame has no field for it.
 /// Direct construction therefore needs no per-frame storage at all — the
 /// operand IS `current_function` — which `aliases_function` records without
 /// allocating the cold box. Only a differing target (constructor spread,
@@ -343,7 +342,7 @@ pub const Frame = struct {
         const account = rt.nativeAllocator();
         self.actual_arg_count = @intCast(args.len);
 
-        const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
+        const frame_arg_count = frameArgCount(self.function, args.len);
         if (frame_arg_count > 0) {
             const owned_args = try self.allocArgsSlice(rt, arena, frame_arg_count, windows.args);
             if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
@@ -369,7 +368,7 @@ pub const Frame = struct {
     ) !void {
         const account = rt.nativeAllocator();
         self.actual_arg_count = @intCast(args.len);
-        const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
+        const frame_arg_count = frameArgCount(self.function, args.len);
         if (frame_arg_count > 0) {
             const owned_args = try self.allocArgsSlice(rt, arena, frame_arg_count, windows.args);
             @memset(owned_args[args.len..], JSValue.undefinedValue());
@@ -673,7 +672,7 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // registered with the tracing GC and become plain unreachable garbage (the
     // frame keeps its old `var_refs` until the whole growth succeeds). Freeing
     // them by hand here would double-free them at the next sweep. Same
-    // discipline as `vm_call.initFrameVarRefs`'s creation loop.
+    // discipline as `vm_opcodes.initFrameVarRefs`'s creation loop.
     // Cells already created live only in `next`, native memory until it is
     // installed; creating the next one may collect where cell allocation is a
     // GC point. Root the filled prefix.
@@ -712,7 +711,6 @@ fn growLocalsCapacity(account: std.mem.Allocator, frame: *Frame, idx: usize) !vo
 
     const old_locals = frame.locals;
     const next = try account.alloc(JSValue, next_len);
-    errdefer account.free(next);
     if (old_locals.len != 0) @memcpy(next[0..old_locals.len], old_locals);
     @memset(next[old_locals.len..], JSValue.undefinedValue());
 
@@ -757,7 +755,7 @@ fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JS
     return value_start < storage_end and storage_start < value_end;
 }
 
-// ----- merged from open_bindings.zig -----
+// ----- Open-binding identity table -----
 // Cold binding-identity table for frame locals and arguments.
 //
 // The table names the unique live open cell of each captured binding. Closing
@@ -765,7 +763,7 @@ fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JS
 //
 // The acquire half (qjs get_var_ref, qjs:16997-17044) is NOT here: it is
 // inlined once each into `Frame.captureLocal` and `Frame.captureArg`
-// (exec/frame.zig) so the nested js_closure2 loop keeps a single helper
+// (above) so the nested js_closure2 loop keeps a single helper
 // boundary. Keep those two bodies in step with each other.
 pub const Table = struct {
     cells: []?*core.VarRef = &.{},

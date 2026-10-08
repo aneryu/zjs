@@ -14,7 +14,6 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const runtime = @import("../runtime.zig");
-const compiler = @import("root.zig");
 const FunctionBytecode = bytecode.FunctionBytecode;
 const FunctionDef = bytecode.FunctionDef;
 const opcode = bytecode.opcode;
@@ -31,6 +30,9 @@ const EVAL_SCOPE_HEAD_BIAS: i32 = -function_bytecode.arg_scope_end;
 const atom_var_object: atom.Atom = atom.ids.var_object; // "<var>"
 const ScopeOperand = struct {
     level: i16,
+    /// `opcode.scope_no_dynamic_env_flag`: a store into the variable
+    /// environment itself (Annex B's eval copy): no `with` objects, no
+    /// same-named eval catch parameter.
     no_dynamic_env: bool,
 };
 
@@ -52,6 +54,8 @@ pub const Error = error{
     NoFunctionDef,
     NoParentScope,
     ClosureVarNotFound,
+    /// The interrupt handler asked to stop (`resolve_variables` polls).
+    Interrupted,
 };
 
 fn markEvalCapturedVariables(fd: *function_def_mod.FunctionDef, scope_level: u16) Error!void {
@@ -198,13 +202,12 @@ fn lowerScopeVarOpLocal(op_id: u8) u8 {
     };
 }
 
-/// Shortest-form local-slot opcode triple. Mirrors `put_short_code`
-///:
+/// Shortest-form local-slot opcode triple. Mirrors `put_short_code`:
 /// - `idx ∈ [0, 4)` → 1-byte short forms `get_loc0..3` / `put_loc0..3`
 ///   / `set_loc0..3` (idx encoded in opcode id).
 /// - `idx ∈ [4, 256)` → 2-byte `get_loc8` / `put_loc8` / `set_loc8`
 ///   (1-byte op + u8 idx).
-/// - `idx ∈ [256)` → 3-byte `get_loc` / `put_loc` / `set_loc`
+/// - `idx ∈ [256, 65536)` → 3-byte `get_loc` / `put_loc` / `set_loc`
 ///   (1-byte op + u16 idx).
 const ShortLocForm = struct {
     /// Selected opcode id.
@@ -292,21 +295,19 @@ fn lookupClosureVar(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
     // resolveBindingTopology/get_closure_var must have installed an entry
     // in the *current* function before lowering begins.  A parent closure,
     // local, or argument index is in a different index space and can never
-    // be emitted as this function's var-ref operand (quickjs.c,
-    //  The former ancestor fallback merely hid a missing
+    // be emitted as this function's var-ref operand (quickjs.c).
+    // The former ancestor fallback merely hid a missing
     // topology event and could address an unrelated current row.
     return null;
 }
 
-fn lookupGlobalClosureVar(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
+fn lookupGlobalClosureVar(ctx: *const JSContext, atom_id: atom.Atom) Error!?u16 {
     const fd = ctx.function_def orelse return null;
-    for (fd.closure_var, 0..) |cv, idx| {
-        if (cv.var_name != atom_id) continue;
-        switch (cv.closureType()) {
-            .global, .global_ref, .global_decl, .module_decl, .module_import => return @intCast(idx),
-            else => {},
-        }
-    }
+    var rows = try fd.closureRowsNamed(atom_id);
+    while (rows.next()) |idx| switch (fd.closure_var[idx].closureType()) {
+        .global, .global_ref, .global_decl, .module_decl, .module_import => return idx,
+        else => {},
+    };
     return null;
 }
 
@@ -316,12 +317,9 @@ fn addOrFindClosureSource(
     source_idx: u16,
     source: function_def_mod.ClosureVar,
 ) Error!u16 {
-    for (fd.closure_var, 0..) |cv, idx| {
-        // QuickJS get_closure_var identity is exactly
-        // (closure_type,var_idx); the atom is lookup metadata only.
-        if (cv.closureType() != closure_type or cv.var_idx != source_idx) continue;
-        return @intCast(idx);
-    }
+    // QuickJS get_closure_var identity is exactly (closure_type,var_idx);
+    // the atom is lookup metadata only.
+    if (try fd.findClosureSource(closure_type, source_idx)) |idx| return idx;
     const idx = try fd.addClosureVar(.{
         .closure_type = closure_type,
         .is_lexical = source.isLexical(),
@@ -330,7 +328,9 @@ fn addOrFindClosureSource(
         .var_idx = source_idx,
         .var_name = source.var_name,
     });
-    if (idx < 0 or idx > std.math.maxInt(u16)) return error.InvalidBytecode;
+    // Closure-variable indices are u16 operands: a limit, not corruption.
+    if (idx < 0) return error.InvalidBytecode;
+    if (idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
     return @intCast(idx);
 }
 
@@ -364,7 +364,7 @@ pub fn threadClosureSource(
 }
 
 fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: atom.Atom) Error!u16 {
-    if (lookupGlobalClosureVar(ctx, atom_id)) |idx| return idx;
+    if (try lookupGlobalClosureVar(ctx, atom_id)) |idx| return idx;
     const fd = ctx.function_def orelse return error.NoFunctionDef;
 
     // resolve_scope_var creates an unresolved ordinary-global carrier in
@@ -376,16 +376,14 @@ fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: atom.Atom) Error!u16 {
     while (!root.is_eval) root = root.parent orelse break;
 
     var root_idx: ?u16 = null;
-    for (root.closure_var, 0..) |cv, idx| {
-        if (cv.var_name != atom_id) continue;
-        switch (cv.closureType()) {
-            .global, .global_ref, .global_decl => {
-                root_idx = @intCast(idx);
-                break;
-            },
-            else => {},
-        }
-    }
+    var rows = try root.closureRowsNamed(atom_id);
+    while (rows.next()) |idx| switch (root.closure_var[idx].closureType()) {
+        .global, .global_ref, .global_decl => {
+            root_idx = idx;
+            break;
+        },
+        else => {},
+    };
     if (root_idx == null) {
         const idx = try root.addClosureVar(.{
             .closure_type = .global,
@@ -395,7 +393,7 @@ fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: atom.Atom) Error!u16 {
             .var_idx = 0,
             .var_name = atom_id,
         });
-        if (idx < 0 or idx > std.math.maxInt(u16)) return error.InvalidBytecode;
+        if (idx < 0 or idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
         root_idx = @intCast(idx);
     }
 
@@ -406,28 +404,32 @@ fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: atom.Atom) Error!u16 {
 
 fn emitGlobalVarOp(ctx: *JSContext, output: []u8, out_idx: *usize, op_id: u8, atom_id: atom.Atom) Error!void {
     if (out_idx.* + 3 > output.len) return error.InvalidBytecode;
-    const ref_idx = lookupGlobalClosureVar(ctx, atom_id) orelse return error.ClosureVarNotFound;
+    const ref_idx = (try lookupGlobalClosureVar(ctx, atom_id)) orelse return error.ClosureVarNotFound;
     output[out_idx.*] = op_id;
     std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], ref_idx, .little);
     out_idx.* += 3;
 }
 
-fn lookupTopLevelModuleLexicalClosureVar(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?u16 {
+fn lookupTopLevelModuleLexicalClosureVar(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) Error!?u16 {
     if (scope_level != 0) return null;
     const fd = ctx.function_def orelse return null;
-    for (fd.closure_var, 0..) |cv, idx| {
-        if (cv.var_name == atom_id and (cv.closureType() == .module_decl or cv.closureType() == .global_decl) and cv.isLexical()) return @intCast(idx);
+    var rows = try fd.closureRowsNamed(atom_id);
+    while (rows.next()) |idx| {
+        const cv = fd.closure_var[idx];
+        if ((cv.closureType() == .module_decl or cv.closureType() == .global_decl) and cv.isLexical()) return idx;
     }
     return null;
 }
 
-fn preferTopLevelModuleClassBinding(ctx: *const JSContext, atom_id: atom.Atom, loc_idx: u16) ?u16 {
+fn preferTopLevelModuleClassBinding(ctx: *const JSContext, atom_id: atom.Atom, loc_idx: u16) Error!?u16 {
     const fd = ctx.function_def orelse return null;
     if (loc_idx >= fd.vars.len) return null;
     const vd = fd.vars[loc_idx];
     if (vd.var_name != atom_id or vd.scope_level != 0 or !vd.is_lexical or !vd.is_const) return null;
-    for (fd.closure_var, 0..) |cv, idx| {
-        if (cv.var_name == atom_id and cv.closureType() == .module_decl and cv.isLexical() and !cv.isConst()) return @intCast(idx);
+    var rows = try fd.closureRowsNamed(atom_id);
+    while (rows.next()) |idx| {
+        const cv = fd.closure_var[idx];
+        if (cv.closureType() == .module_decl and cv.isLexical() and !cv.isConst()) return idx;
     }
     return null;
 }
@@ -452,16 +454,40 @@ fn closureVarKind(ctx: *const JSContext, idx: u16) function_def_mod.VarKind {
 /// and their frame slot is a direct alias of the exporting module's cell
 /// (js_inner_module_linking quickjs.c) — the shared cell
 /// itself carries no const flag, so the write must never reach it.
-fn closureVarWriteThrowsReadOnly(ctx: *const JSContext, ref_idx: u16) bool {
-    const fd = ctx.function_def orelse return false;
-    if (ref_idx >= fd.closure_var.len) return false;
-    return closureVarConstWriteThrows(fd, ref_idx);
+/// A write to an immutable binding: SetMutableBinding (§9.1.1.1.5) throws a
+/// ReferenceError while the binding is uninitialized and a TypeError after,
+/// so a binding with a TDZ is read with the checked form first.
+const ReadOnlyWrite = struct {
+    /// `get_loc_check` / `get_var_ref_check` of `tdz_idx`, or null when the
+    /// binding has no TDZ.
+    tdz_op: ?u8 = null,
+    tdz_idx: u16 = 0,
+
+    fn size(self: ReadOnlyWrite) usize {
+        return throw_error_instr_size + @as(usize, if (self.tdz_op != null) 4 else 0);
+    }
+};
+
+fn closureVarReadOnlyWrite(ctx: *const JSContext, ref_idx: u16) ?ReadOnlyWrite {
+    const fd = ctx.function_def orelse return null;
+    if (ref_idx >= fd.closure_var.len) return null;
+    const base = closureVarConstWriteBase(fd, ref_idx) orelse return null;
+    // An import is immutable but never observed in its exporter's TDZ here.
+    if (base == .module_import) return .{};
+    return .{ .tdz_op = opcode.op.get_var_ref_check, .tdz_idx = ref_idx };
 }
 
-fn closureVarConstWriteThrows(start_fd: *const function_def_mod.FunctionDef, start_idx: u16) bool {
+fn localReadOnlyWrite(ctx: *const JSContext, loc_idx: u16) ?ReadOnlyWrite {
+    if (!localWriteThrowsReadOnly(ctx, loc_idx)) return null;
+    return .{ .tdz_op = opcode.op.get_loc_check, .tdz_idx = loc_idx };
+}
+
+/// The closure type at the base of a const row's capture chain, or null when
+/// a write through the row does not throw.
+fn closureVarConstWriteBase(start_fd: *const function_def_mod.FunctionDef, start_idx: u16) ?function_def_mod.ClosureType {
     var fd = start_fd;
     var cv = fd.closure_var[start_idx];
-    if (!cv.isConst()) return false;
+    if (!cv.isConst()) return null;
     // Follow the capture chain to its base closure var. The finalized
     // resolver threads local/module sources through descendants as plain
     // `.ref` rows, while eval-root GLOBAL families are re-derived as
@@ -476,8 +502,8 @@ fn closureVarConstWriteThrows(start_fd: *const function_def_mod.FunctionDef, sta
         cv = parent.closure_var[cv.var_idx];
     }
     return switch (cv.closureType()) {
-        .global, .global_decl, .global_ref => false,
-        .local, .arg, .ref, .module_decl, .module_import => true,
+        .global, .global_decl, .global_ref => null,
+        .local, .arg, .ref, .module_decl, .module_import => |base| base,
     };
 }
 
@@ -487,6 +513,16 @@ const JS_THROW_VAR_RO: u8 = 0;
 const JS_THROW_VAR_REDECL: u8 = 1;
 fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
     writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
+}
+
+fn writeReadOnlyWrite(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom, write: ReadOnlyWrite) void {
+    if (write.tdz_op) |op_id| {
+        output[out_idx.*] = op_id;
+        std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], write.tdz_idx, .little);
+        output[out_idx.* + 3] = opcode.op.drop;
+        out_idx.* += 4;
+    }
+    writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
 }
 
 fn writeThrowVarError(
@@ -596,8 +632,25 @@ const PrivateFieldResolution = struct {
     var_kind: function_def_mod.VarKind,
 };
 
-fn resolvePrivateField(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?PrivateFieldResolution {
+const PrivateLookup = enum {
+    /// The private name itself: a field, method, or accessor pair.
+    name,
+    /// The `<set>` companion binding of a private accessor.
+    setter,
+};
+
+/// Find a private binding visible at `scope_level`: the enclosing class
+/// scopes of this function first, then its captured closure variables.
+fn resolvePrivate(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32, comptime lookup: PrivateLookup) ?PrivateFieldResolution {
     const fd = ctx.function_def orelse return null;
+    const Match = struct {
+        fn test_(c: *const JSContext, private_atom: atom.Atom, name: atom.Atom, kind: function_def_mod.VarKind) bool {
+            return switch (lookup) {
+                .name => name == private_atom and isPrivateVarKind(kind),
+                .setter => kind == .private_setter and isPrivateSetterCompanionName(c, private_atom, name),
+            };
+        }
+    };
 
     if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < fd.scopes.len) {
         var idx = fd.scopes[@intCast(scope_level)].first;
@@ -606,7 +659,7 @@ fn resolvePrivateField(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i
             if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return null;
             visited += 1;
             const vd = fd.vars[@intCast(idx)];
-            if (vd.var_name == atom_id and isPrivateVarKind(vd.var_kind)) {
+            if (Match.test_(ctx, atom_id, vd.var_name, vd.var_kind)) {
                 return .{ .idx = @intCast(idx), .is_ref = false, .var_kind = vd.var_kind };
             }
             idx = vd.scope_next;
@@ -614,11 +667,10 @@ fn resolvePrivateField(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i
     }
 
     for (fd.closure_var, 0..) |cv, idx| {
-        if (cv.var_name == atom_id and isPrivateVarKind(cv.varKind())) {
+        if (Match.test_(ctx, atom_id, cv.var_name, cv.varKind())) {
             return .{ .idx = @intCast(idx), .is_ref = true, .var_kind = cv.varKind() };
         }
     }
-
     return null;
 }
 
@@ -641,31 +693,6 @@ fn isPrivateSetterCompanionName(ctx: *const JSContext, private_atom: atom.Atom, 
     return candidate_name.len == private_name.len + suffix.len and
         std.mem.eql(u8, candidate_name[0..private_name.len], private_name) and
         std.mem.eql(u8, candidate_name[private_name.len..], suffix);
-}
-
-fn resolvePrivateSetter(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?PrivateFieldResolution {
-    const fd = ctx.function_def orelse return null;
-
-    if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < fd.scopes.len) {
-        var idx = fd.scopes[@intCast(scope_level)].first;
-        var visited: usize = 0;
-        while (idx >= 0) {
-            if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return null;
-            visited += 1;
-            const vd = fd.vars[@intCast(idx)];
-            if (vd.var_kind == .private_setter and isPrivateSetterCompanionName(ctx, atom_id, vd.var_name)) {
-                return .{ .idx = @intCast(idx), .is_ref = false, .var_kind = vd.var_kind };
-            }
-            idx = vd.scope_next;
-        }
-    }
-
-    for (fd.closure_var, 0..) |cv, idx| {
-        if (cv.varKind() == .private_setter and isPrivateSetterCompanionName(ctx, atom_id, cv.var_name)) {
-            return .{ .idx = @intCast(idx), .is_ref = true, .var_kind = cv.varKind() };
-        }
-    }
-    return null;
 }
 
 fn privateAccessorSize(ctx: *const JSContext, res: PrivateFieldResolution) usize {
@@ -710,7 +737,7 @@ fn loweredPrivateFieldSize(ctx: *const JSContext, op_id: u8, atom_id: atom.Atom,
             .private_field => accessor_size + 1,
             .private_method, .private_getter => throw_error_instr_size,
             .private_setter, .private_getter_setter => blk: {
-                const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
+                const setter = resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound;
                 break :blk privateAccessorSize(ctx, setter) + 9;
             },
             else => return error.ClosureVarNotFound,
@@ -780,7 +807,7 @@ fn writeLoweredPrivateField(
                 out_idx.* += 1;
                 writePrivateCallMethodZero(output, out_idx);
             },
-            .private_setter => writeThrowVarReadOnly(ctx.function, output, out_idx, output_atoms, out_atom_idx, atom_id),
+            .private_setter => writeThrowVarError(ctx.function, output, out_idx, output_atoms, out_atom_idx, atom_id, opcode.throw_error_private_without_getter),
             else => return error.ClosureVarNotFound,
         },
         opcode.op.scope_put_private_field => switch (res.var_kind) {
@@ -791,7 +818,7 @@ fn writeLoweredPrivateField(
             },
             .private_method, .private_getter => writeThrowVarReadOnly(ctx.function, output, out_idx, output_atoms, out_atom_idx, atom_id),
             .private_setter, .private_getter_setter => {
-                const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
+                const setter = resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound;
                 writePrivateAccessor(ctx, output, out_idx, setter);
                 output[out_idx.*] = opcode.op.swap;
                 out_idx.* += 1;
@@ -809,7 +836,13 @@ fn writeLoweredPrivateField(
             else => return error.ClosureVarNotFound,
         },
         opcode.op.scope_in_private_field => {
-            writePrivateAccessor(ctx, output, out_idx, res);
+            // A setter-only accessor's function lives in its `<set>` companion;
+            // the plain binding is never initialized.
+            const element = if (res.var_kind == .private_setter)
+                resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound
+            else
+                res;
+            writePrivateAccessor(ctx, output, out_idx, element);
             output[out_idx.*] = opcode.op.private_in;
             out_idx.* += 1;
         },
@@ -829,87 +862,97 @@ fn varNeedsScopeFunctionInit(vd: function_def_mod.VarDef) bool {
         (vd.var_kind == .function_decl or vd.var_kind == .new_function_decl);
 }
 
-/// Byte size of the `enter_scope <scope>` lowering. Mirrors the QuickJS
-/// `OP_enter_scope` case: initialize only the bindings
-/// declared by this exact scope. Captured cells are detached exclusively
-/// by the corresponding leave marker.
-fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) Error!usize {
-    const fd = ctx.function_def orelse return 0;
-    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return 0;
-    var total: usize = 0;
-    var idx = fd.scopes[@intCast(scope)].first;
+/// Lower `enter_scope <scope>`. Mirrors the QuickJS `OP_enter_scope` case:
+/// initialize only the bindings declared by this exact scope. Captured cells
+/// are detached exclusively by the corresponding leave marker. With a null
+/// `output` only `out_idx` advances, so sizing and writing share one walk.
+fn lowerEnterScope(ctx: *const JSContext, output: ?[]u8, out_idx: *usize, scope: i32) Error!void {
+    const fd = ctx.function_def orelse return;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
+    // A fresh binding per scope entry (§14.2.2): a closure that captured the
+    // previous entry's binding keeps it even when that entry was left by an
+    // exception, which skips the leave-scope close. Detach every captured
+    // slot first: the block-function closures created below capture the
+    // new bindings. The function body scope is entered once per call.
+    var idx = if (scope > fd.body_scope) fd.scopes[@intCast(scope)].first else -1;
     while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
         const vd = fd.vars[@intCast(idx)];
         if (vd.scope_level != scope) break;
-        if (fd.arguments_arg_idx == null or idx != fd.arguments_arg_idx.?) {
-            if (varNeedsScopeFunctionInit(vd)) {
-                total += fclosureEncodingSize(vd.func_pool_idx.?) +
-                    selectLocForm(ctx, opcode.op.put_loc, @intCast(idx)).size;
-            } else if (varNeedsTdzRearm(vd)) {
-                total += 3;
-            }
+        if (enterScopeRefreshesVar(fd, idx) and vd.is_captured) {
+            writeLocOp3(output, out_idx, opcode.op.close_loc, @intCast(idx));
         }
         idx = vd.scope_next;
     }
-    return total;
-}
-
-/// Emit the `enter_scope` lowering described in `enterScopeRefreshSize`.
-fn writeEnterScopeRefresh(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) Error!void {
-    const fd = ctx.function_def orelse return;
-    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
-
-    var idx = fd.scopes[@intCast(scope)].first;
+    idx = fd.scopes[@intCast(scope)].first;
     while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
         const vd = fd.vars[@intCast(idx)];
         if (vd.scope_level != scope) break;
         const loc_idx: u16 = @intCast(idx);
         if (fd.arguments_arg_idx == null or idx != fd.arguments_arg_idx.?) {
             if (varNeedsScopeFunctionInit(vd)) {
-                try emitFClosure(output, out_idx, vd.func_pool_idx.?);
-                writeSelectedLocForm(output, out_idx, selectLocForm(ctx, opcode.op.put_loc, loc_idx), loc_idx);
+                const form = selectLocForm(ctx, opcode.op.put_loc, loc_idx);
+                if (output) |out| {
+                    try emitFClosure(out, out_idx, vd.func_pool_idx.?);
+                    writeSelectedLocForm(out, out_idx, form, loc_idx);
+                } else {
+                    out_idx.* += fclosureEncodingSize(vd.func_pool_idx.?) + form.size;
+                }
             } else if (varNeedsTdzRearm(vd)) {
-                output[out_idx.*] = opcode.op.set_loc_uninitialized;
-                std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
-                out_idx.* += 3;
+                writeLocOp3(output, out_idx, opcode.op.set_loc_uninitialized, loc_idx);
             }
         }
         idx = vd.scope_next;
     }
 }
 
-/// Byte size of QuickJS `OP_leave_scope` lowering: detach each captured
-/// local declared by exactly this scope. The inherited tail belongs to
-/// enclosing scopes and must not be closed here.
-fn leaveScopeCloseSize(ctx: *const JSContext, scope: i32) usize {
-    const fd = ctx.function_def orelse return 0;
-    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return 0;
-    var total: usize = 0;
+fn enterScopeRefreshesVar(fd: *const function_def_mod.FunctionDef, idx: i32) bool {
+    if (fd.arguments_arg_idx != null and idx == fd.arguments_arg_idx.?) return false;
+    const vd = fd.vars[@intCast(idx)];
+    return varNeedsScopeFunctionInit(vd) or varNeedsTdzRearm(vd);
+}
+
+fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) Error!usize {
+    var size: usize = 0;
+    try lowerEnterScope(ctx, null, &size, scope);
+    return size;
+}
+
+fn writeEnterScopeRefresh(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) Error!void {
+    try lowerEnterScope(ctx, output, out_idx, scope);
+}
+
+/// Lower QuickJS `OP_leave_scope`: detach each captured local declared by
+/// exactly this scope. The inherited tail belongs to enclosing scopes and
+/// must not be closed here. A null `output` only advances `out_idx`.
+fn lowerLeaveScope(ctx: *const JSContext, output: ?[]u8, out_idx: *usize, scope: i32) void {
+    const fd = ctx.function_def orelse return;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
     var idx = fd.scopes[@intCast(scope)].first;
     while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
         const vd = fd.vars[@intCast(idx)];
         if (vd.scope_level != scope) break;
-        if (vd.is_captured) total += 3;
+        if (vd.is_captured) writeLocOp3(output, out_idx, opcode.op.close_loc, @intCast(idx));
         idx = vd.scope_next;
     }
-    return total;
+}
+
+fn leaveScopeCloseSize(ctx: *const JSContext, scope: i32) usize {
+    var size: usize = 0;
+    lowerLeaveScope(ctx, null, &size, scope);
+    return size;
 }
 
 fn writeLeaveScopeClose(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) void {
-    const fd = ctx.function_def orelse return;
-    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
-    var idx = fd.scopes[@intCast(scope)].first;
-    while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
-        const vd = fd.vars[@intCast(idx)];
-        if (vd.scope_level != scope) break;
-        const loc_idx: u16 = @intCast(idx);
-        if (vd.is_captured) {
-            output[out_idx.*] = opcode.op.close_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
-            out_idx.* += 3;
-        }
-        idx = vd.scope_next;
+    lowerLeaveScope(ctx, output, out_idx, scope);
+}
+
+/// A 3-byte `op u16` local-slot instruction; a null `output` only sizes it.
+fn writeLocOp3(output: ?[]u8, out_idx: *usize, op: u8, loc_idx: u16) void {
+    if (output) |out| {
+        out[out_idx.*] = op;
+        std.mem.writeInt(u16, out[out_idx.* + 1 ..][0..2], loc_idx, .little);
     }
+    out_idx.* += 3;
 }
 
 fn lowerScopeVarOpClosure(op_id: u8) u8 {
@@ -1036,14 +1079,45 @@ inline fn resolveScopeVarLookupImpl(
 ) ScopeVarLookup {
     const fd = ctx.function_def orelse return .{};
     if (scope_level < 0 or @as(usize, @intCast(scope_level)) >= fd.scopes.len) return .{};
-    if (comptime trust_final_scope_links) std.debug.assert(ctx.scope_link_proof != .none);
+    if (comptime trust_final_scope_links) {
+        std.debug.assert(ctx.scope_link_proof != .none);
+        if (fd.vars.len >= scope_chain_index_threshold) {
+            if (indexedScopeVarLookup(fd, atom_id, scope_level)) |found| {
+                if (std.debug.runtime_safety) {
+                    std.debug.assert(std.meta.eql(found, linkedScopeVarLookup(fd, atom_id, scope_level)));
+                }
+                return found;
+            }
+        }
+    }
+    return linkedScopeVarLookup(fd, atom_id, scope_level);
+}
+
+/// Below this many vars the linked walk is cheaper than the name index.
+const scope_chain_index_threshold: usize = 64;
+
+/// The linked walk's answer from the (scope, name) index, for final scope
+/// links: the chain visits `scope_level`, then its parents while above
+/// scope 1, each scope's vars newest first. So the answer is the newest
+/// same-name var of the nearest scope on that path: one probe per scope.
+/// Null on allocation failure (the caller walks).
+fn indexedScopeVarLookup(fd: *function_def_mod.FunctionDef, atom_id: atom.Atom, scope_level: i32) ?ScopeVarLookup {
+    var last = scope_level;
+    while (true) {
+        if (fd.newestVarInScope(last, atom_id) catch return null) |idx| return .{ .local = idx };
+        if (last <= 1) break;
+        last = fd.scopes[@intCast(last)].parent;
+    }
+    if (last == 1 and fd.has_parameter_expressions) return .{ .argument_environment_only = true };
+    return .{ .local = fd.findFunctionVar(atom_id) };
+}
+
+fn linkedScopeVarLookup(fd: *function_def_mod.FunctionDef, atom_id: atom.Atom, scope_level: i32) ScopeVarLookup {
     var idx = fd.scopes[@intCast(scope_level)].first;
     var visited: usize = 0;
     while (idx >= 0) {
-        if (comptime !trust_final_scope_links) {
-            if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return .{};
-            visited += 1;
-        }
+        if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return .{};
+        visited += 1;
         const vd = fd.vars[@intCast(idx)];
         if (vd.var_name == atom_id) return .{ .local = @intCast(idx) };
         idx = vd.scope_next;
@@ -1176,6 +1250,9 @@ const ClosureDynamicEnvProbeIterator = struct {
     fd: ?*const function_def_mod.FunctionDef,
     stop_idx: usize,
     next_idx: usize = 0,
+    /// Where the resolved binding lives, when known: only environments
+    /// between the reference and it are probed.
+    binding_position: ?EnvPosition = null,
 
     fn init(ctx: *const JSContext, atom_id: atom.Atom) ClosureDynamicEnvProbeIterator {
         const fd = ctx.function_def orelse return .{
@@ -1183,6 +1260,11 @@ const ClosureDynamicEnvProbeIterator = struct {
             .stop_idx = 0,
         };
         var stop_idx = fd.closure_var.len;
+        // A direct eval runs inside the catch block that its catch-parameter
+        // row names, so that row is an ordinary active binding: environments
+        // captured before it (a `with` in the block) are probed, those after
+        // it (the caller's var object) are not.
+        const catch_rows_stop = bytecodeFunctionIsEval(ctx);
         for (fd.closure_var, 0..) |cv, idx| {
             // A catch binding is only visible while its catch block is
             // active, and global-family rows are the fallback after the
@@ -1191,17 +1273,42 @@ const ClosureDynamicEnvProbeIterator = struct {
             // binding. Lexical/local/argument rows still stop it.
             const stops_probe = !isDynamicEnvObjectAtom(cv.var_name) and
                 cv.var_name == atom_id and
-                cv.varKind() != .catch_ and
+                (cv.varKind() != .catch_ or catch_rows_stop) and
                 !closureVarIsGlobalFamily(cv);
             if (stops_probe) {
+                if (cv.varKind() == .function_name) return functionNameProbes(fd, idx);
                 stop_idx = idx;
                 break;
+            }
+            if (cv.var_name == atom_id and cv.varKind() == .catch_) {
+                if (catchParameterProbes(fd, idx)) |probes| return probes;
             }
         }
         return .{
             .fd = fd,
             .stop_idx = stop_idx,
         };
+    }
+
+    /// A catch parameter reached through closure row `idx` from a function
+    /// created inside its catch block: probe only the environments inner to
+    /// it. Null when the row has no ordered position.
+    fn catchParameterProbes(fd: *const function_def_mod.FunctionDef, idx: usize) ?ClosureDynamicEnvProbeIterator {
+        const position = closureRowEnvPosition(fd, idx) orelse return null;
+        return .{ .fd = fd, .stop_idx = fd.closure_var.len, .binding_position = position };
+    }
+
+    /// A function expression's own name (closure row `idx`) sits outside its
+    /// function's variable environment and inside every enclosing one: probe
+    /// the environments inner to it by position, since rows are numbered by
+    /// first use. Rows captured from a direct eval's caller have no ordered
+    /// position; they were captured in chain order, own variable object
+    /// first, so stop at the row as for any binding.
+    fn functionNameProbes(fd: *const function_def_mod.FunctionDef, idx: usize) ClosureDynamicEnvProbeIterator {
+        var position = closureRowEnvPosition(fd, idx) orelse return .{ .fd = fd, .stop_idx = idx };
+        if (position.outside) return .{ .fd = fd, .stop_idx = idx };
+        position.scope = std.math.minInt(i32);
+        return .{ .fd = fd, .stop_idx = fd.closure_var.len, .binding_position = position };
     }
 
     fn next(self: *ClosureDynamicEnvProbeIterator) ?usize {
@@ -1211,11 +1318,77 @@ const ClosureDynamicEnvProbeIterator = struct {
             self.next_idx += 1;
             const cv = fd.closure_var[idx];
             if (!closureVarIsRuntimeVarRef(cv) or !isDynamicEnvObjectAtom(cv.var_name)) continue;
+            if (self.binding_position) |binding| {
+                // Rows are numbered by first use, not by chain order: an
+                // environment threaded for another name may lie beyond it.
+                if (closureRowEnvPosition(fd, idx)) |row| {
+                    if (row.isInnerThan(binding) == false) continue;
+                }
+            }
             return idx;
         }
         return null;
     }
 };
+
+/// Where a closure row's source sits on the function's environment chain:
+/// `depth` functions out, in block scope `scope` of that function. A var
+/// object or an argument is `scope = -1`, after every block scope of its
+/// function, as QuickJS's resolve_scope_var probes it. `outside` marks a
+/// source beyond the outermost compile-time function (a direct eval's
+/// caller), whose scope is unknown.
+const EnvPosition = struct {
+    depth: u32,
+    scope: i32,
+    outside: bool = false,
+    /// For an `outside` source: its row in the outermost compile-time
+    /// function (the direct eval), whose rows were captured from the caller
+    /// innermost environment first.
+    outside_row: usize = 0,
+
+    /// Null when both are outside the same row and cannot be ordered.
+    fn isInnerThan(self: EnvPosition, other: EnvPosition) ?bool {
+        if (self.outside or other.outside) {
+            if (self.outside and other.outside) {
+                if (self.outside_row == other.outside_row) return null;
+                return self.outside_row < other.outside_row;
+            }
+            return other.outside;
+        }
+        // Both lie on one scope chain, and a child scope's index is always
+        // greater than its parent's.
+        return self.depth < other.depth or (self.depth == other.depth and self.scope > other.scope);
+    }
+};
+
+/// Null for rows that are not environment sources (global family).
+fn closureRowEnvPosition(fd: *const function_def_mod.FunctionDef, idx: usize) ?EnvPosition {
+    var owner = fd;
+    var row_idx = idx;
+    var depth: u32 = 1;
+    while (true) {
+        if (row_idx >= owner.closure_var.len) return null;
+        const cv = owner.closure_var[row_idx];
+        const parent = owner.parent orelse return switch (cv.closureType()) {
+            .local, .arg, .ref => .{ .depth = depth, .scope = -1, .outside = true, .outside_row = row_idx },
+            else => null,
+        };
+        switch (cv.closureType()) {
+            .local => {
+                if (cv.var_idx >= parent.vars.len) return null;
+                if (isEvalVarObjectAtom(cv.var_name)) return .{ .depth = depth, .scope = -1 };
+                return .{ .depth = depth, .scope = parent.vars[cv.var_idx].scope_level };
+            },
+            .arg => return .{ .depth = depth, .scope = -1 },
+            .ref => {
+                owner = parent;
+                row_idx = cv.var_idx;
+                depth += 1;
+            },
+            else => return null,
+        }
+    }
+}
 
 const LocalWithProbeIterator = struct {
     fd: ?*const function_def_mod.FunctionDef,
@@ -1253,18 +1426,8 @@ const LocalWithProbeIterator = struct {
     }
 };
 
-fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) bool {
-    if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return true;
-    // Direct eval receives a visible catch parameter as a closure row.
-    // That row is the active lexical environment for the eval itself and
-    // must win over the eval var object. Ordinary local/argument closure
-    // rows remain dynamically probeable: a direct eval can insert a
-    // same-named var binding that subsequent caller code observes.
-    if (bytecodeFunctionIsEval(ctx)) {
-        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-            if (closureVarKind(ctx, ref_idx) == .catch_) return true;
-        }
-    }
+fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) Error!bool {
+    if (try lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return true;
     const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return false;
     return switch (binding) {
         .arg => true,
@@ -1275,14 +1438,37 @@ fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom,
             if (vd.var_kind == .catch_ and !scopeContainsBinding(fd, scope_level, vd.scope_level)) {
                 break :blk false;
             }
+            // A function expression's own name lives in an environment
+            // outside its variables: a direct eval's `var nf` shadows it.
+            if (vd.var_kind == .function_name) break :blk false;
             break :blk !isEvalNonLexicalLocal(ctx, loc_idx);
         },
     };
 }
 
+/// A function expression's own name bound as a local: its environment sits
+/// between the function's variable environment and every enclosing one, so
+/// the function's own eval var object may shadow it but an outer `with` or
+/// eval var object may not.
+fn isLocalFunctionName(ctx: *const JSContext, loc_idx: u16) bool {
+    const fd = ctx.function_def orelse return false;
+    return loc_idx < fd.vars.len and fd.vars[loc_idx].var_kind == .function_name;
+}
+
+fn resolvedBindingIsLocalFunctionName(ctx: *const JSContext, binding: ScopeVarBinding) bool {
+    return switch (binding) {
+        .local => |loc_idx| isLocalFunctionName(ctx, loc_idx),
+        else => false,
+    };
+}
+
+/// `this`, `new.target` and the `super` home object are never looked up by
+/// name (ResolveThisBinding, GetNewTarget, [[HomeObject]]), so a `with`
+/// object cannot shadow them.
 fn scopeVarDynamicProbeEligible(atom_id: atom.Atom, scope_level: i32) bool {
     return scope_level >= 0 and
         atom_id != atom.ids.ret and
+        !isPseudoBindingAtom(atom_id) and
         !isDynamicEnvObjectAtom(atom_id);
 }
 
@@ -1306,6 +1492,8 @@ fn resolvedBindingStopsDynamicEnvProbes(
             {
                 break :blk false;
             }
+            // A direct eval's `var` shadows the function expression's name.
+            if (vd.var_kind == .function_name) break :blk false;
             break :blk !isEvalNonLexicalLocal(ctx, loc_idx);
         },
         .closure => |ref_idx| blk: {
@@ -1318,7 +1506,7 @@ fn resolvedBindingStopsDynamicEnvProbes(
             {
                 break :blk true;
             }
-            break :blk bytecodeFunctionIsEval(ctx) and cv.varKind() == .catch_;
+            break :blk false;
         },
         .global => false,
     };
@@ -1330,19 +1518,27 @@ fn closureDynamicEnvProbeIteratorInitResolved(
 ) ClosureDynamicEnvProbeIterator {
     const fd = ctx.function_def orelse return .{ .fd = null, .stop_idx = 0 };
     var stop_idx = fd.closure_var.len;
+    var binding_position: ?EnvPosition = null;
     switch (binding) {
         .closure => |ref_idx| if (ref_idx < fd.closure_var.len) {
             const cv = fd.closure_var[ref_idx];
+            if (cv.varKind() == .function_name) return ClosureDynamicEnvProbeIterator.functionNameProbes(fd, ref_idx);
+            if (cv.varKind() == .catch_ and !bytecodeFunctionIsEval(ctx)) {
+                if (ClosureDynamicEnvProbeIterator.catchParameterProbes(fd, ref_idx)) |probes| return probes;
+            }
             if (!isDynamicEnvObjectAtom(cv.var_name) and
-                cv.varKind() != .catch_ and
+                (cv.varKind() != .catch_ or bytecodeFunctionIsEval(ctx)) and
                 !closureVarIsGlobalFamily(cv))
             {
+                // The binding's own resolution threaded every environment
+                // before it, so they all have lower indices.
                 stop_idx = ref_idx;
+                binding_position = closureRowEnvPosition(fd, ref_idx);
             }
         },
         else => {},
     }
-    return .{ .fd = fd, .stop_idx = stop_idx };
+    return .{ .fd = fd, .stop_idx = stop_idx, .binding_position = binding_position };
 }
 
 fn scopeContainsBinding(
@@ -1399,7 +1595,7 @@ fn evalVarObjectProbePlan(
     scope_level: i32,
     op_id: u8,
     kind: EvalVarObjectProbeKind,
-) ?EvalVarObjectProbePlan {
+) Error!?EvalVarObjectProbePlan {
     if (!kind.matches(op_id) or scope_level < 0 or isDynamicEnvObjectAtom(atom_id)) return null;
     // Eval completion is an implementation-local frame slot. It must never
     // consult with/Proxy or a variable object, even when those environments
@@ -1416,7 +1612,7 @@ fn evalVarObjectProbePlan(
         plan.count += 1;
         plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .with_local = idx }) + probe_size;
     }
-    if (staticBindingStopsDynamicEnvProbes(ctx, atom_id, scope_level)) {
+    if (try staticBindingStopsDynamicEnvProbes(ctx, atom_id, scope_level)) {
         return if (plan.count == 0) null else plan;
     }
     // A variable object may acquire any free name from a later direct eval;
@@ -1432,6 +1628,10 @@ fn evalVarObjectProbePlan(
         plan.count += 1;
         plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = idx }) + probe_size;
     }
+    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+        .local => |loc_idx| if (isLocalFunctionName(ctx, loc_idx)) return if (plan.count == 0) null else plan,
+        .arg => {},
+    };
     var closure_iter = ClosureDynamicEnvProbeIterator.init(ctx, atom_id);
     while (closure_iter.next()) |idx| {
         plan.count += 1;
@@ -1443,6 +1643,8 @@ fn evalVarObjectProbePlan(
 const ScopeVarAction = struct {
     selected: ShortLocForm,
     index: u16 = 0,
+    /// Set for `throw_error`: the write to an immutable binding.
+    read_only: ReadOnlyWrite = .{},
 
     fn size(self: ScopeVarAction) usize {
         return self.selected.size;
@@ -1456,12 +1658,12 @@ const ScopeVarAction = struct {
         return .{ .selected = selected, .index = index };
     }
 
-    fn throwReadonly() ScopeVarAction {
+    fn throwReadonly(write: ReadOnlyWrite) ScopeVarAction {
         return .{ .selected = .{
             .op_id = opcode.op.throw_error,
-            .size = @intCast(throw_error_instr_size),
+            .size = @intCast(write.size()),
             .operand_size = 0,
-        } };
+        }, .read_only = write };
     }
 
     fn dropAction() ScopeVarAction {
@@ -1473,26 +1675,12 @@ const ScopeVarAction = struct {
     }
 };
 
-fn scopeVarProbeKind(op_id: u8, no_dynamic_env: bool) ?EvalVarObjectProbeKind {
-    if (op_id == opcode.op.scope_put_var) {
-        return if (no_dynamic_env) null else .put;
-    }
+fn scopeVarProbeKind(op_id: u8) ?EvalVarObjectProbeKind {
+    if (op_id == opcode.op.scope_put_var) return .put;
     if (op_id == opcode.op.scope_get_var or op_id == opcode.op.scope_get_var_undef) {
         return .read;
     }
     return null;
-}
-
-fn globalScopeVarAction(ctx: *const JSContext, atom_id: atom.Atom, op_id: u8) Error!ScopeVarAction {
-    const ref_idx = lookupGlobalClosureVar(ctx, atom_id) orelse return error.ClosureVarNotFound;
-    return ScopeVarAction.form(
-        .{
-            .op_id = lowerScopeVarOpGlobal(op_id),
-            .size = 3,
-            .operand_size = 2,
-        },
-        ref_idx,
-    );
 }
 
 fn closureScopeVarAction(
@@ -1501,11 +1689,15 @@ fn closureScopeVarAction(
     ref_idx: u16,
     op_id: u8,
 ) ScopeVarAction {
-    if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-        return ScopeVarAction.throwReadonly();
+    if (op_id == opcode.op.scope_put_var) {
+        if (closureVarReadOnlyWrite(ctx, ref_idx)) |write| return ScopeVarAction.throwReadonly(write);
     }
     if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
-        return ScopeVarAction.dropAction();
+        // A function expression's own name is immutable; SetMutableBinding
+        // throws when the ASSIGNING code is strict (§9.1.1.1.5), whatever
+        // the named function's own strictness.
+        const assigning_strict = if (ctx.function_def) |fd| fd.is_strict_mode else false;
+        return if (assigning_strict) ScopeVarAction.throwReadonly(.{}) else ScopeVarAction.dropAction();
     }
     const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
     return ScopeVarAction.form(selectVarRefForm(ctx, ref_op, ref_idx), ref_idx);
@@ -1527,8 +1719,8 @@ fn planResolvedScopeVarAction(
             break :blk ScopeVarAction.form(selectArgForm(ctx, arg_op, arg_idx), arg_idx);
         },
         .local => |loc_idx| blk: {
-            if (op_id == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
-                break :blk ScopeVarAction.throwReadonly();
+            if (op_id == opcode.op.scope_put_var) {
+                if (localReadOnlyWrite(ctx, loc_idx)) |write| break :blk ScopeVarAction.throwReadonly(write);
             }
             if (op_id == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
                 break :blk ScopeVarAction.dropAction();
@@ -1570,7 +1762,7 @@ fn writeScopeVarAction(
     if (out_idx.* + action.size() > output.len) return error.InvalidBytecode;
     if (action.selected.op_id == opcode.op.throw_error) {
         if (out_atom_idx.* >= output_atoms.len) return error.InvalidBytecode;
-        writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+        writeReadOnlyWrite(func, output, out_idx, output_atoms, out_atom_idx, atom_id, action.read_only);
     } else if (action.selected.op_id == opcode.op.drop) {
         output[out_idx.*] = opcode.op.drop;
         out_idx.* += 1;
@@ -1600,72 +1792,99 @@ fn evalVarObjectClosureProbe(cv: function_def_mod.ClosureVar, idx: usize) EvalVa
         .{ .ref = @intCast(idx) };
 }
 
-fn loweredScopeDeleteVarSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
-    if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
-        return if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 1;
-    }
-    if (lookupArg(ctx, atom_id) != null or
-        lookupCurrentFunctionName(ctx, atom_id) != null or
-        lookupClosureVar(ctx, atom_id) != null) return 1;
-    return 5;
+/// True when a lowered `scope_delete_var` needs a runtime `delete_var`;
+/// declared bindings compile to `push_false`.
+fn loweredScopeDeleteVarIsDynamic(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) bool {
+    if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| return isEvalNonLexicalLocal(ctx, loc_idx);
+    return lookupArg(ctx, atom_id) == null and
+        lookupCurrentFunctionName(ctx, atom_id) == null and
+        lookupClosureVar(ctx, atom_id) == null;
 }
 
-fn loweredScopeGetRefSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
+/// Encoding chosen for a lowered `scope_get_ref`: `undefined` followed by
+/// the value read. Size and bytes both derive from this one decision.
+const GetRefPlan = union(enum) {
+    /// `get_arg` / `get_loc` / `get_var_ref` in the selected short form.
+    slot: struct { form: ShortLocForm, idx: u16 },
+    /// `get_loc_check` for a lexical local (TDZ).
+    loc_check: u16,
+    /// `get_var` through the global closure slot.
+    global,
+
+    pub fn size(plan: GetRefPlan) usize {
+        return 1 + switch (plan) {
+            .slot => |slot| slot.form.size,
+            .loc_check, .global => 3,
+        };
+    }
+};
+
+fn loweredScopeGetRefPlan(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) GetRefPlan {
     if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
-        .arg => |arg_idx| 1 + selectArgForm(ctx, opcode.op.get_arg, arg_idx).size,
+        .arg => |arg_idx| .{ .slot = .{ .form = selectArgForm(ctx, opcode.op.get_arg, arg_idx), .idx = arg_idx } },
         .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
-            1 + 3
+            .global
         else if (isLexicalLocal(ctx, loc_idx))
-            1 + 3
+            .{ .loc_check = loc_idx }
         else
-            1 + selectLocForm(ctx, opcode.op.get_loc, loc_idx).size,
+            .{ .slot = .{ .form = selectLocForm(ctx, opcode.op.get_loc, loc_idx), .idx = loc_idx } },
     };
     if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-        return 1 + selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size;
+        return .{ .slot = .{ .form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), .idx = ref_idx } };
     }
-    return 1 + 3;
+    return .global;
 }
 
-fn loweredScopeMakeRefSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
+/// Encoding chosen for a lowered `scope_make_ref`. Size, atom count, and
+/// bytes all derive from this one decision.
+const MakeRefPlan = union(enum) {
+    /// `make_arg_ref` / `make_loc_ref` / `make_var_ref_ref`: atom + u16 index.
+    slot_ref: struct { op_id: u8, idx: u16 },
+    /// `make_var_ref`: atom resolved at runtime (global or eval var object).
+    dynamic,
+    /// Write to an immutable binding: `throw_error` read-only.
+    throw_read_only: ReadOnlyWrite,
+    /// Sloppy function-expression name: a disposable `{ name: value }`
+    /// reference read with the selected get form.
+    function_name: struct { form: ShortLocForm, idx: u16 },
+
+    pub fn size(plan: MakeRefPlan) usize {
+        return switch (plan) {
+            .slot_ref => 7,
+            .dynamic => 5,
+            .throw_read_only => |write| write.size(),
+            .function_name => |name| 1 + name.form.size + 5 + 5,
+        };
+    }
+
+    pub fn atomCount(plan: MakeRefPlan) usize {
+        return switch (plan) {
+            .function_name => 2,
+            .slot_ref, .dynamic, .throw_read_only => 1,
+        };
+    }
+};
+
+fn loweredScopeMakeRefPlan(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) MakeRefPlan {
     if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
-        .arg => 7,
+        .arg => |arg_idx| .{ .slot_ref = .{ .op_id = opcode.op.make_arg_ref, .idx = arg_idx } },
         .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
-            5
-        else if (localWriteThrowsReadOnly(ctx, loc_idx))
-            throw_error_instr_size
+            .dynamic
+        else if (localReadOnlyWrite(ctx, loc_idx)) |write|
+            .{ .throw_read_only = write }
         else if (localIsFunctionName(ctx, loc_idx))
-            1 + selectLocForm(ctx, opcode.op.get_loc, loc_idx).size + 5 + 5
+            .{ .function_name = .{ .form = selectLocForm(ctx, opcode.op.get_loc, loc_idx), .idx = loc_idx } }
         else
-            7,
+            .{ .slot_ref = .{ .op_id = opcode.op.make_loc_ref, .idx = loc_idx } },
     };
     if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-        if (closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
+        if (closureVarReadOnlyWrite(ctx, ref_idx)) |write| return .{ .throw_read_only = write };
         if (closureVarKind(ctx, ref_idx) == .function_name) {
-            return 1 + selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size + 5 + 5;
+            return .{ .function_name = .{ .form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), .idx = ref_idx } };
         }
-        return 7;
+        return .{ .slot_ref = .{ .op_id = opcode.op.make_var_ref_ref, .idx = ref_idx } };
     }
-    return 5;
-}
-
-fn loweredScopeMakeRefAtomCount(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
-    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
-        .local => |loc_idx| if (!isEvalNonLexicalLocal(ctx, loc_idx) and
-            !localWriteThrowsReadOnly(ctx, loc_idx) and
-            localIsFunctionName(ctx, loc_idx))
-            2
-        else
-            1,
-        .arg => 1,
-    };
-    if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-        return if (!closureVarWriteThrowsReadOnly(ctx, ref_idx) and
-            closureVarKind(ctx, ref_idx) == .function_name)
-            2
-        else
-            1;
-    }
-    return 1;
+    return .dynamic;
 }
 
 fn writeEvalVarObjectProbeAccessor(ctx: *const JSContext, output: []u8, out_idx: *usize, probe: EvalVarObjectProbe) Error!void {
@@ -1696,39 +1915,27 @@ fn writeEvalVarObjectProbeAccessor(ctx: *const JSContext, output: []u8, out_idx:
     }
 }
 
+fn writeAtomOp(output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, op_id: u8, atom_id: atom.Atom) void {
+    output[out_idx.*] = op_id;
+    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
+    output_atoms[out_atom_idx.*] = atom_id;
+    out_idx.* += 5;
+    out_atom_idx.* += 1;
+}
+
 fn writeLoweredScopeDeleteVar(
-    ctx: *const JSContext,
-    _: *bytecode_function.Bytecode,
     output: []u8,
     out_idx: *usize,
     output_atoms: []atom.Atom,
     out_atom_idx: *usize,
     atom_id: atom.Atom,
-    scope_level: i32,
-) Error!void {
-    if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
-        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-            output[out_idx.*] = opcode.op.delete_var;
-            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-            output_atoms[out_atom_idx.*] = atom_id;
-            out_idx.* += 5;
-            out_atom_idx.* += 1;
-        } else {
-            output[out_idx.*] = opcode.op.push_false;
-            out_idx.* += 1;
-        }
-    } else if (lookupArg(ctx, atom_id) != null or
-        lookupCurrentFunctionName(ctx, atom_id) != null or
-        lookupClosureVar(ctx, atom_id) != null)
-    {
+    is_dynamic: bool,
+) void {
+    if (is_dynamic) {
+        writeAtomOp(output, out_idx, output_atoms, out_atom_idx, opcode.op.delete_var, atom_id);
+    } else {
         output[out_idx.*] = opcode.op.push_false;
         out_idx.* += 1;
-    } else {
-        output[out_idx.*] = opcode.op.delete_var;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-        output_atoms[out_atom_idx.*] = atom_id;
-        out_idx.* += 5;
-        out_atom_idx.* += 1;
     }
 }
 
@@ -1737,51 +1944,18 @@ fn writeLoweredScopeGetRef(
     output: []u8,
     out_idx: *usize,
     atom_id: atom.Atom,
-    scope_level: i32,
+    plan: GetRefPlan,
 ) Error!void {
     output[out_idx.*] = opcode.op.undefined;
     out_idx.* += 1;
-    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-        .arg => |arg_idx| {
-            const form = selectArgForm(ctx, opcode.op.get_arg, arg_idx);
-            output[out_idx.*] = form.op_id;
-            switch (form.operand_size) {
-                0 => {},
-                2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], arg_idx, .little),
-                else => unreachable,
-            }
-            out_idx.* += form.size;
+    switch (plan) {
+        .slot => |slot| writeSelectedLocForm(output, out_idx, slot.form, slot.idx),
+        .loc_check => |loc_idx| {
+            output[out_idx.*] = opcode.op.get_loc_check;
+            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+            out_idx.* += 3;
         },
-        .local => |loc_idx| {
-            if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                try emitGlobalVarOp(ctx, output, out_idx, opcode.op.get_var, atom_id);
-            } else if (isLexicalLocal(ctx, loc_idx)) {
-                output[out_idx.*] = opcode.op.get_loc_check;
-                std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
-                out_idx.* += 3;
-            } else {
-                const form = selectLocForm(ctx, opcode.op.get_loc, loc_idx);
-                output[out_idx.*] = form.op_id;
-                switch (form.operand_size) {
-                    0 => {},
-                    1 => output[out_idx.* + 1] = @intCast(loc_idx),
-                    2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little),
-                    else => unreachable,
-                }
-                out_idx.* += form.size;
-            }
-        },
-    } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-        const form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx);
-        output[out_idx.*] = form.op_id;
-        switch (form.operand_size) {
-            0 => {},
-            2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], ref_idx, .little),
-            else => unreachable,
-        }
-        out_idx.* += form.size;
-    } else {
-        try emitGlobalVarOp(ctx, output, out_idx, opcode.op.get_var, atom_id);
+        .global => try emitGlobalVarOp(ctx, output, out_idx, opcode.op.get_var, atom_id),
     }
 }
 
@@ -1817,81 +1991,23 @@ fn writeFunctionNameDummyRef(
 }
 
 fn writeLoweredScopeMakeRef(
-    ctx: *const JSContext,
     func: *bytecode_function.Bytecode,
     output: []u8,
     out_idx: *usize,
     output_atoms: []atom.Atom,
     out_atom_idx: *usize,
     atom_id: atom.Atom,
-    scope_level: i32,
-) Error!void {
-    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-        .arg => |arg_idx| {
-            output[out_idx.*] = opcode.op.make_arg_ref;
-            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-            std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], arg_idx, .little);
-            output_atoms[out_atom_idx.*] = atom_id;
-            out_idx.* += 7;
-            out_atom_idx.* += 1;
+    plan: MakeRefPlan,
+) void {
+    switch (plan) {
+        .slot_ref => |slot| {
+            writeAtomOp(output, out_idx, output_atoms, out_atom_idx, slot.op_id, atom_id);
+            std.mem.writeInt(u16, output[out_idx.*..][0..2], slot.idx, .little);
+            out_idx.* += 2;
         },
-        .local => |loc_idx| {
-            if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                output[out_idx.*] = opcode.op.make_var_ref;
-                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-                output_atoms[out_atom_idx.*] = atom_id;
-                out_idx.* += 5;
-                out_atom_idx.* += 1;
-            } else if (localWriteThrowsReadOnly(ctx, loc_idx)) {
-                writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
-            } else if (localIsFunctionName(ctx, loc_idx)) {
-                writeFunctionNameDummyRef(
-                    func,
-                    output,
-                    out_idx,
-                    output_atoms,
-                    out_atom_idx,
-                    atom_id,
-                    selectLocForm(ctx, opcode.op.get_loc, loc_idx),
-                    loc_idx,
-                );
-            } else {
-                output[out_idx.*] = opcode.op.make_loc_ref;
-                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-                std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], loc_idx, .little);
-                output_atoms[out_atom_idx.*] = atom_id;
-                out_idx.* += 7;
-                out_atom_idx.* += 1;
-            }
-        },
-    } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-        if (closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-            writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
-        } else if (closureVarKind(ctx, ref_idx) == .function_name) {
-            writeFunctionNameDummyRef(
-                func,
-                output,
-                out_idx,
-                output_atoms,
-                out_atom_idx,
-                atom_id,
-                selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx),
-                ref_idx,
-            );
-        } else {
-            output[out_idx.*] = opcode.op.make_var_ref_ref;
-            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-            std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], ref_idx, .little);
-            output_atoms[out_atom_idx.*] = atom_id;
-            out_idx.* += 7;
-            out_atom_idx.* += 1;
-        }
-    } else {
-        output[out_idx.*] = opcode.op.make_var_ref;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-        output_atoms[out_atom_idx.*] = atom_id;
-        out_idx.* += 5;
-        out_atom_idx.* += 1;
+        .dynamic => writeAtomOp(output, out_idx, output_atoms, out_atom_idx, opcode.op.make_var_ref, atom_id),
+        .throw_read_only => |write| writeReadOnlyWrite(func, output, out_idx, output_atoms, out_atom_idx, atom_id, write),
+        .function_name => |name| writeFunctionNameDummyRef(func, output, out_idx, output_atoms, out_atom_idx, atom_id, name.form, name.idx),
     }
 }
 
@@ -2003,11 +2119,11 @@ fn markReferenceTakenBinding(ctx: *const JSContext, atom_id: atom.Atom, scope_le
             // QuickJS's function-name dummy-reference arm never calls
             // capture_var: the temporary object owns the write target.
             if (fd.vars[idx].var_kind != .function_name) {
-                fd.captureLocal(idx) catch return error.InvalidBytecode;
+                try fd.captureLocal(idx);
             }
         },
         .arg => |idx| if (idx < fd.args.len) {
-            fd.captureArg(idx) catch return error.InvalidBytecode;
+            try fd.captureArg(idx);
         },
     }
 }
@@ -2040,33 +2156,41 @@ fn closureVarIsGlobalFamily(cv: function_def_mod.ClosureVar) bool {
 /// environment objects and real bindings deliberately share one ordered
 /// walk: the first applicable entry is the declaration environment.
 fn resolveEvalGlobalVarTargets(fd: *function_def_mod.FunctionDef) Error!void {
-    for (fd.global_vars) |*gv| {
-        if (!fd.is_eval) {
-            gv.eval_target = .global;
+    if (!fd.is_eval) {
+        for (fd.global_vars) |*gv| gv.eval_target = .global;
+        return;
+    }
+    // One pass over the rows instead of one per hoist: a top-level script's
+    // closure rows include one per declaration.
+    const none = std.math.maxInt(u32);
+    // First same-name row that can be the variable environment: a catch
+    // parameter never is (B.3.4 only relaxes the conflict check), nor is a
+    // function expression's own name.
+    var first_rows: std.AutoHashMapUnmanaged(atom.Atom, u32) = .empty;
+    defer first_rows.deinit(fd.allocator);
+    var first_var_object: u32 = none;
+    for (fd.closure_var, 0..) |cv, idx| {
+        if (idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const row: u32 = @intCast(idx);
+        if (isEvalVarObjectAtom(cv.var_name) and closureVarIsRuntimeVarRef(cv)) {
+            if (first_var_object == none) first_var_object = row;
             continue;
         }
-
-        gv.eval_target = .global;
-        for (fd.closure_var, 0..) |cv, idx| {
-            if (cv.var_name == gv.var_name) {
-                // Annex B.3.4's same-name simple catch binding is not the
-                // VariableDeclarationEnvironment used for a direct-eval
-                // `var`. Skip it so the dynamic var object can receive
-                // the hoisted binding; the eval initializer still uses
-                // the catch reference for the assignment itself.
-                if (gv.cpool_idx < 0 and cv.varKind() == .catch_) continue;
-                // For every other closure, instantiate_hoisted_definitions
-                // stops at the first same-name binding.
-                if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
-                gv.eval_target = .{ .closure = @intCast(idx) };
-                break;
-            }
-            if (isEvalVarObjectAtom(cv.var_name) and closureVarIsRuntimeVarRef(cv)) {
-                if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
-                gv.eval_target = .{ .var_object = @intCast(idx) };
-                break;
-            }
-        }
+        if (cv.varKind() == .function_name or cv.varKind() == .catch_) continue;
+        const entry = try first_rows.getOrPut(fd.allocator, cv.var_name);
+        if (!entry.found_existing) entry.value_ptr.* = row;
+    }
+    for (fd.global_vars) |*gv| {
+        // EvalDeclarationInstantiation creates and initializes vars and
+        // functions in the variable environment; the initializer of a
+        // hoisted `var` still assigns through a same-name catch reference.
+        const binding_row = first_rows.get(gv.var_name) orelse none;
+        gv.eval_target = if (binding_row < first_var_object)
+            .{ .closure = @intCast(binding_row) }
+        else if (first_var_object != none)
+            .{ .var_object = @intCast(first_var_object) }
+        else
+            .global;
     }
 }
 
@@ -2104,7 +2228,7 @@ fn threadParentLocalSource(
     local_idx: u16,
 ) Error!u16 {
     if (local_idx >= parent.vars.len) return error.InvalidBytecode;
-    parent.captureLocal(local_idx) catch return error.InvalidBytecode;
+    try parent.captureLocal(local_idx);
     const vd = parent.vars[local_idx];
     return threadClosureSource(target, parent, local_idx, function_def_mod.ClosureVar.init(.{
         .closure_type = .local,
@@ -2116,13 +2240,31 @@ fn threadParentLocalSource(
     }), .local);
 }
 
+/// `threadParentLocalSource`, except that a function expression's own name
+/// first threads the parent's var objects: a direct eval `var` in the parent
+/// shadows the name, so references must probe them before it.
+fn threadParentBindingSource(
+    target: *function_def_mod.FunctionDef,
+    parent: *function_def_mod.FunctionDef,
+    local_idx: u16,
+    argument_environment_only: bool,
+) Error!u16 {
+    if (local_idx < parent.vars.len and parent.vars[local_idx].var_kind == .function_name) {
+        if (!argument_environment_only) {
+            if (parent.var_object_idx) |idx| _ = try threadParentLocalSource(target, parent, idx);
+        }
+        if (parent.arg_var_object_idx) |idx| _ = try threadParentLocalSource(target, parent, idx);
+    }
+    return threadParentLocalSource(target, parent, local_idx);
+}
+
 fn threadParentArgSource(
     target: *function_def_mod.FunctionDef,
     parent: *function_def_mod.FunctionDef,
     arg_idx: u16,
 ) Error!u16 {
     if (arg_idx >= parent.args.len) return error.InvalidBytecode;
-    parent.captureArg(arg_idx) catch return error.InvalidBytecode;
+    try parent.captureArg(arg_idx);
     const arg = parent.args[arg_idx];
     return threadClosureSource(target, parent, arg_idx, function_def_mod.ClosureVar.init(.{
         .closure_type = .arg,
@@ -2152,6 +2294,16 @@ fn discoverParentScopedSource(
     if (start_scope < 0 or @as(usize, @intCast(start_scope)) >= parent.scopes.len) {
         return error.InvalidBytecode;
     }
+    if (comptime trust_final_scope_links) {
+        switch (try parent.scopeChainFirstVar(start_scope, atom_id)) {
+            .walk => {},
+            .found => |row| return .{ .local = row },
+            .missing => |end| {
+                if (end != -1 and end != function_bytecode.arg_scope_end) return error.InvalidBytecode;
+                return .{ .argument_environment_only = end == function_bytecode.arg_scope_end };
+            },
+        }
+    }
     var var_idx = parent.scopes[@intCast(start_scope)].first;
     var visited_vars: usize = 0;
     while (var_idx >= 0) {
@@ -2172,7 +2324,7 @@ fn discoverParentScopedSource(
 }
 
 fn ensureParentArgumentsBinding(parent: *function_def_mod.FunctionDef) Error!u16 {
-    return parent.ensureArgumentsBinding() catch return error.OutOfMemory;
+    return try parent.ensureArgumentsBinding();
 }
 
 fn ensureCurrentPseudoBinding(
@@ -2181,31 +2333,30 @@ fn ensureCurrentPseudoBinding(
 ) Error!?u16 {
     if (!fd.has_this_binding) return null;
     return if (atom_id == atom.ids.home_object)
-        fd.ensureHomeObjectBinding() catch return error.OutOfMemory
+        try fd.ensureHomeObjectBinding()
     else if (atom_id == atom.ids.this_active_func)
-        fd.ensureThisActiveFunctionBinding() catch return error.OutOfMemory
+        try fd.ensureThisActiveFunctionBinding()
     else if (atom_id == atom.ids.new_target)
-        fd.ensureNewTargetBinding() catch return error.OutOfMemory
+        try fd.ensureNewTargetBinding()
     else if (atom_id == atom.ids.this_)
-        fd.ensureThisBinding() catch return error.OutOfMemory
+        try fd.ensureThisBinding()
     else
         null;
 }
 
 /// Select the same current-function closure identity as the lowering half:
 /// a real runtime ref wins, while dynamic-global carriers are the fallback.
-/// Unlike the former `findClosureName` guard this returns the chosen index,
-/// so the caller never needs a second name scan.
+/// Returns the chosen index, so the caller needs no second name scan.
 fn findResolvedClosureBinding(
-    fd: *const function_def_mod.FunctionDef,
+    fd: *function_def_mod.FunctionDef,
     atom_id: atom.Atom,
-) ?ScopeVarBinding {
+) Error!?ScopeVarBinding {
     var global_idx: ?u16 = null;
-    for (fd.closure_var, 0..) |cv, idx_usize| {
-        if (cv.var_name != atom_id) continue;
-        const idx: u16 = @intCast(idx_usize);
+    var rows = try fd.closureRowsNamed(atom_id);
+    while (rows.next()) |idx| {
+        const cv = fd.closure_var[idx];
         if (closureVarIsRuntimeVarRef(cv) and
-            !closureVarSourceIsDynamicGlobal(fd, idx_usize))
+            !closureVarSourceIsDynamicGlobal(fd, idx))
         {
             return .{ .closure = idx };
         }
@@ -2237,18 +2388,18 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
     // is the single point that can append a demand-created special local.
     if (try ensureCurrentPseudoBinding(fd, atom_id)) |idx| return .{ .local = idx };
     if (atom_id == atom.ids.arguments and fd.has_arguments_binding) {
-        const idx_i32 = fd.ensureArgumentsBinding() catch return error.OutOfMemory;
-        if (idx_i32 < 0 or idx_i32 > std.math.maxInt(u16)) return error.InvalidBytecode;
+        const idx_i32 = try fd.ensureArgumentsBinding();
+        if (idx_i32 < 0 or idx_i32 > std.math.maxInt(u16)) return error.BytecodeOverflow;
         return .{ .local = @intCast(idx_i32) };
     }
     if (fd.is_named_func_expr and atom_id == fd.func_name) {
-        return .{ .local = fd.ensureFuncExprSelfBinding() catch return error.OutOfMemory };
+        return .{ .local = try fd.ensureFuncExprSelfBinding() };
     }
 
     // Fixed prefixes/imports and already-threaded child demands are final
     // binding identities. The selected row is returned directly instead
     // of using a name-only guard and rediscovering it in the planner.
-    if (findResolvedClosureBinding(fd, atom_id)) |binding| return binding;
+    if (try findResolvedClosureBinding(fd, atom_id)) |binding| return binding;
 
     if (fd.parent != null) {
         if (trust_final_scope_links) {
@@ -2269,7 +2420,7 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
             try discoverParentScopedSource(false, fd, parent, atom_id, visible_scope_level);
         const argument_environment_only = scoped_source.argument_environment_only;
         if (scoped_source.local) |local_idx| {
-            return .{ .closure = try threadParentLocalSource(fd, parent, local_idx) };
+            return .{ .closure = try threadParentBindingSource(fd, parent, local_idx, argument_environment_only) };
         }
 
         // An arrow created while a parameter initializer is evaluated is
@@ -2285,9 +2436,10 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
             parent.func_type != .arrow and
             parent.func_type != .class_static_init)
         {
-            _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
+            _ = try parent.ensureArgumentsBinding();
             parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
+                error.BytecodeOverflow => error.BytecodeOverflow,
                 error.InvalidScope => error.InvalidBytecode,
             };
             const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
@@ -2303,7 +2455,13 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
             }
         }
 
-        if (!argument_environment_only) {
+        // A sloppy eval's own `var` lives in its caller's variable
+        // environment, outside a catch block the eval runs in: the
+        // same-named catch parameter row (threaded by the eval arm below)
+        // is found first (B.3.4).
+        const eval_catch_shadows_var = parent.is_eval and !parent.is_strict_mode and
+            if (try parent.findClosureRow(atom_id)) |row| parent.closure_var[row].varKind() == .catch_ else false;
+        if (!argument_environment_only and !eval_catch_shadows_var) {
             // QuickJS's finalized scope chain deliberately stops before
             // scope 0, then resolve_scope_var calls find_var: function
             // vars are scope-0 rows even when their parser-era
@@ -2311,7 +2469,7 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
             // not be linked into scope.first merely to make descendants
             // discover them.
             if (parent.findFunctionVar(atom_id)) |function_var_idx| {
-                return .{ .closure = try threadParentLocalSource(fd, parent, function_var_idx) };
+                return .{ .closure = try threadParentBindingSource(fd, parent, function_var_idx, argument_environment_only) };
             }
             const arg_idx_i32 = parent.findArg(atom_id);
             if (arg_idx_i32 >= 0) {
@@ -2330,12 +2488,8 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
         }
 
         if (parent.is_named_func_expr and atom_id == parent.func_name) {
-            const local_idx = parent.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
-            return .{ .closure = try threadParentLocalSource(
-                fd,
-                parent,
-                local_idx,
-            ) };
+            const local_idx = try parent.ensureFuncExprSelfBinding();
+            return .{ .closure = try threadParentBindingSource(fd, parent, local_idx, argument_environment_only) };
         }
 
         if (!isPseudoBindingAtom(atom_id)) {
@@ -2346,25 +2500,26 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
         }
 
         if (parent.is_eval) {
-            for (parent.closure_var, 0..) |source, source_idx_usize| {
-                if (source_idx_usize > std.math.maxInt(u16)) return error.InvalidBytecode;
-                const source_idx: u16 = @intCast(source_idx_usize);
-                if (source.var_name == atom_id) {
-                    const source_type: function_def_mod.ClosureType = switch (source.closureType()) {
-                        .global, .global_ref, .global_decl => .global_ref,
-                        .local, .arg, .ref, .module_decl, .module_import => .ref,
-                    };
-                    const idx = try threadClosureSource(fd, parent, source_idx, source, source_type);
-                    return if (source_type == .global_ref)
-                        .{ .global = idx }
-                    else
-                        .{ .closure = idx };
-                }
-                if (!isPseudoBindingAtom(atom_id) and isDynamicEnvObjectAtom(source.var_name)) {
-                    _ = try threadClosureSource(fd, parent, source_idx, source, .ref);
+            // The eval root's rows in order up to the first named `atom_id`:
+            // thread each dynamic environment passed, then the match.
+            const match = try parent.findClosureRow(atom_id);
+            if (!isPseudoBindingAtom(atom_id)) {
+                for (try parent.closureDynamicEnvRows()) |source_idx| {
+                    if (match) |match_idx| if (source_idx >= match_idx) break;
+                    _ = try threadClosureSource(fd, parent, source_idx, parent.closure_var[source_idx], .ref);
                 }
             }
-            break;
+            const source_idx = match orelse break;
+            const source = parent.closure_var[source_idx];
+            const source_type: function_def_mod.ClosureType = switch (source.closureType()) {
+                .global, .global_ref, .global_decl => .global_ref,
+                .local, .arg, .ref, .module_decl, .module_import => .ref,
+            };
+            const idx = try threadClosureSource(fd, parent, source_idx, source, source_type);
+            return if (source_type == .global_ref)
+                .{ .global = idx }
+            else
+                .{ .closure = idx };
         }
 
         visible_scope_level = parent.parent_scope_level;
@@ -2413,14 +2568,13 @@ fn resolveBindingTopologyResult(
 /// Complete the binding classification needed by ordinary scope-var
 /// lowering. Module lexical precedence and sloppy-eval locals are action
 /// semantics, so normalize them once here rather than in a later lookup.
-fn resolveScopeVarBindingTopologyImpl(
-    comptime trust_final_scope_links: bool,
+fn resolveScopeVarBindingTopology(
     ctx: *JSContext,
     atom_id: atom.Atom,
     scope_level: i32,
 ) Error!ScopeVarBinding {
     const discovered = try resolveBindingTopologyResultImpl(
-        trust_final_scope_links,
+        true,
         ctx,
         atom_id,
         scope_level,
@@ -2428,21 +2582,29 @@ fn resolveScopeVarBindingTopologyImpl(
     if (scope_level < 0) {
         return .{ .global = try ensureGlobalClosureVar(ctx, atom_id) };
     }
-    if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
+    if (try lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
         return .{ .closure = ref_idx };
     }
     return switch (discovered) {
         .local => |loc_idx| blk: {
-            if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                break :blk .{ .global = try ensureGlobalClosureVar(ctx, atom_id) };
-            }
-            if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
+            if (isEvalNonLexicalLocal(ctx, loc_idx)) break :blk try evalVarBinding(ctx, atom_id);
+            if (try preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
                 break :blk .{ .closure = ref_idx };
             }
             break :blk discovered;
         },
         else => discovered,
     };
+}
+
+/// A sloppy eval's own `var`: it lives in the caller's variable environment,
+/// reached dynamically. A same-named catch parameter of a catch block the
+/// eval runs in is nearer and found first (B.3.4).
+fn evalVarBinding(ctx: *JSContext, atom_id: atom.Atom) Error!ScopeVarBinding {
+    if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+        if (closureVarKind(ctx, ref_idx) == .catch_) return .{ .closure = ref_idx };
+    }
+    return .{ .global = try ensureGlobalClosureVar(ctx, atom_id) };
 }
 
 const ScopeVarBindingKind = enum(u8) {
@@ -2517,7 +2679,7 @@ const ResolvedScopeVarPlan = packed struct(u64) {
     }
 
     inline fn action(self: ResolvedScopeVarPlan) ScopeVarAction {
-        return .{
+        var result: ScopeVarAction = .{
             .selected = .{
                 .op_id = self.action_op_id,
                 .size = self.action_size,
@@ -2525,36 +2687,40 @@ const ResolvedScopeVarPlan = packed struct(u64) {
             },
             .index = self.action_index,
         };
+        // A TDZ-checked read-only write reads the binding it resolved to; the
+        // size alone records that the check is present.
+        if (self.action_op_id == opcode.op.throw_error and self.action_size != throw_error_instr_size) {
+            result.read_only = .{
+                .tdz_op = if (self.binding_kind == .local) opcode.op.get_loc_check else opcode.op.get_var_ref_check,
+                .tdz_idx = self.binding_index,
+            };
+        }
+        return result;
     }
 };
 
-inline fn resolveScopeVarPlanImpl(
-    comptime trust_final_scope_links: bool,
+/// `var_env_only` (the scope operand's no-dynamic-env bit) marks a store
+/// that targets the variable environment itself rather than resolving
+/// through the scope chain -- Annex B's copy of a block function in a
+/// direct eval (B.3.2.3 `genv.SetMutableBinding`). Such a store skips a
+/// nearer catch parameter of the same name, which an eval `var` would see.
+inline fn resolveScopeVarPlan(
     ctx: *JSContext,
     atom_id: atom.Atom,
     scope_level: i32,
     op_id: u8,
+    var_env_only: bool,
 ) Error!ResolvedScopeVarPlan {
-    const discovered = try @call(
+    var binding = try @call(
         .always_inline,
-        resolveBindingTopologyResultImpl,
-        .{ trust_final_scope_links, ctx, atom_id, scope_level },
+        resolveScopeVarBindingTopology,
+        .{ ctx, atom_id, scope_level },
     );
-    const binding: ScopeVarBinding = if (scope_level < 0)
-        .{ .global = try ensureGlobalClosureVar(ctx, atom_id) }
-    else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx|
-        .{ .closure = ref_idx }
-    else switch (discovered) {
-        .local => |loc_idx| blk: {
-            if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                break :blk .{ .global = try ensureGlobalClosureVar(ctx, atom_id) };
-            }
-            if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
-                break :blk .{ .closure = ref_idx };
-            }
-            break :blk discovered;
+    if (var_env_only) switch (binding) {
+        .closure => |ref_idx| if (closureVarKind(ctx, ref_idx) == .catch_ and (if (ctx.function_def) |fd| fd.is_eval else false)) {
+            binding = .{ .global = try ensureGlobalClosureVar(ctx, atom_id) };
         },
-        else => discovered,
+        else => {},
     };
     const action = try @call(
         .always_inline,
@@ -2564,25 +2730,8 @@ inline fn resolveScopeVarPlanImpl(
     return ResolvedScopeVarPlan.init(binding, action);
 }
 
-inline fn resolveScopeVarPlanV2(
-    ctx: *JSContext,
-    atom_id: atom.Atom,
-    scope_level: i32,
-    op_id: u8,
-) Error!ResolvedScopeVarPlan {
-    return resolveScopeVarPlanImpl(true, ctx, atom_id, scope_level, op_id);
-}
-
 fn resolveBindingTopology(ctx: *JSContext, atom_id: atom.Atom, scope_level: i32) Error!void {
     _ = try resolveBindingTopologyResult(ctx, atom_id, scope_level);
-}
-
-inline fn resolveScopeVarBindingTopologyV2(
-    ctx: *JSContext,
-    atom_id: atom.Atom,
-    scope_level: i32,
-) Error!ScopeVarBinding {
-    return resolveScopeVarBindingTopologyImpl(true, ctx, atom_id, scope_level);
 }
 
 const PrivateBindingOwner = struct {
@@ -2643,17 +2792,23 @@ fn resolvePrivateBindingTopology(
     // after threading so the compatibility side-name tables cannot turn
     // an absent declaration into a binding.
     try resolveBindingTopology(ctx, atom_id, scope_level);
-    const private = resolvePrivateField(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
+    const private = resolvePrivate(ctx, atom_id, scope_level, .name) orelse return error.ClosureVarNotFound;
 
-    if (op_id != opcode.op.scope_put_private_field or
-        (private.var_kind != .private_setter and private.var_kind != .private_getter_setter)) return;
-    if (resolvePrivateSetter(ctx, atom_id, scope_level) != null) return;
+    // Writes reach the setter through its `<set>` companion; so does a
+    // brand check (`#x in o`) on a setter-only accessor.
+    const needs_setter = switch (op_id) {
+        opcode.op.scope_put_private_field => private.var_kind == .private_setter or private.var_kind == .private_getter_setter,
+        opcode.op.scope_in_private_field => private.var_kind == .private_setter,
+        else => false,
+    };
+    if (!needs_setter) return;
+    if (resolvePrivate(ctx, atom_id, scope_level, .setter) != null) return;
 
     const owner = privateBindingOwner(ctx, private) orelse return error.ClosureVarNotFound;
     const setter_idx = findPrivateSetterOwnerBinding(ctx, atom_id, owner) orelse return error.ClosureVarNotFound;
     const current = ctx.function_def orelse return error.NoFunctionDef;
     if (owner.fd != current) _ = try threadParentLocalSource(current, owner.fd, setter_idx);
-    if (resolvePrivateSetter(ctx, atom_id, scope_level) == null) return error.ClosureVarNotFound;
+    if (resolvePrivate(ctx, atom_id, scope_level, .setter) == null) return error.ClosureVarNotFound;
 }
 
 /// The decision/writer surface `compiler/resolve_variables.zig`
@@ -2671,8 +2826,8 @@ pub const surface = struct {
     pub const decodeScopeOperand = binding_rules.decodeScopeOperand;
     pub const markEvalCapturedVariables = binding_rules.markEvalCapturedVariables;
     pub const encodeEvalScopeHead = binding_rules.encodeEvalScopeHead;
-    pub const resolveScopeVarBindingTopology = binding_rules.resolveScopeVarBindingTopologyV2;
-    pub const resolveScopeVarPlan = binding_rules.resolveScopeVarPlanV2;
+    pub const resolveScopeVarBindingTopology = binding_rules.resolveScopeVarBindingTopology;
+    pub const resolveScopeVarPlan = binding_rules.resolveScopeVarPlan;
     pub const resolvedScopeVarPlanBinding = ResolvedScopeVarPlan.binding;
     pub const resolvedScopeVarPlanAction = ResolvedScopeVarPlan.action;
     pub const planResolvedScopeVarAction = binding_rules.planResolvedScopeVarAction;
@@ -2693,22 +2848,22 @@ pub const surface = struct {
     pub const closureDynamicEnvProbeIteratorInitResolved = binding_rules.closureDynamicEnvProbeIteratorInitResolved;
     pub const closureDynamicEnvProbeIteratorNext = ClosureDynamicEnvProbeIterator.next;
     pub const resolvedBindingStopsDynamicEnvProbes = binding_rules.resolvedBindingStopsDynamicEnvProbes;
+    pub const resolvedBindingIsLocalFunctionName = binding_rules.resolvedBindingIsLocalFunctionName;
     pub const scopeUsesArgumentEnvironmentOnly = binding_rules.scopeUsesArgumentEnvironmentOnly;
     pub const evalVarObjectClosureProbe = binding_rules.evalVarObjectClosureProbe;
     pub const evalVarObjectProbeIsWith = binding_rules.evalVarObjectProbeIsWith;
 
-    pub const loweredScopeDeleteVarSize = binding_rules.loweredScopeDeleteVarSize;
+    pub const loweredScopeDeleteVarIsDynamic = binding_rules.loweredScopeDeleteVarIsDynamic;
     pub const writeLoweredScopeDeleteVar = binding_rules.writeLoweredScopeDeleteVar;
-    pub const loweredScopeGetRefSize = binding_rules.loweredScopeGetRefSize;
+    pub const loweredScopeGetRefPlan = binding_rules.loweredScopeGetRefPlan;
     pub const writeLoweredScopeGetRef = binding_rules.writeLoweredScopeGetRef;
-    pub const loweredScopeMakeRefSize = binding_rules.loweredScopeMakeRefSize;
-    pub const loweredScopeMakeRefAtomCount = binding_rules.loweredScopeMakeRefAtomCount;
+    pub const loweredScopeMakeRefPlan = binding_rules.loweredScopeMakeRefPlan;
     pub const writeLoweredScopeMakeRef = binding_rules.writeLoweredScopeMakeRef;
     pub const markReferenceTakenBinding = binding_rules.markReferenceTakenBinding;
     pub const canOptimizeGlobalRefPutTail = binding_rules.canOptimizeGlobalRefPutTail;
 
     pub const resolvePrivateBindingTopology = binding_rules.resolvePrivateBindingTopology;
-    pub const resolvePrivateField = binding_rules.resolvePrivateField;
+    pub const resolvePrivate = binding_rules.resolvePrivate;
     pub const loweredPrivateFieldSize = binding_rules.loweredPrivateFieldSize;
     pub const loweredPrivateFieldAtomCount = binding_rules.loweredPrivateFieldAtomCount;
     pub const writeLoweredPrivateField = binding_rules.writeLoweredPrivateField;

@@ -3,17 +3,17 @@
 //! Native-call receivers and arguments are borrowed; returned JSValues are
 //! owned. Core owns ArrayBuffer, SharedArrayBuffer, DataView, and TypedArray
 //! storage mechanics; option-reading constructors and record dispatch remain in
-//! exec because they can invoke user code. The tables map to QuickJS's buffer and
-//! DataView builtin families, including codecs at quickjs.c and
-//! constructors at quickjs.c.
+//! exec because they can invoke user code. The Uint8Array base64/hex codecs
+//! live in `uint8array_codec.zig`.
 
 const core = @import("../core/root.zig");
 const std = @import("std");
-const array_ops = @import("array_ops.zig");
+const uint8array_codec = @import("uint8array_codec.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 
-const HostError = @import("exception_ops.zig").HostError;
+const exception_ops = @import("exception_ops.zig");
+const HostError = exception_ops.HostError;
 
 pub const StaticMethod = core.host_function.builtin_method_ids.buffer.StaticMethod;
 pub const ConstructorMethod = core.host_function.builtin_method_ids.buffer.ConstructorMethod;
@@ -59,16 +59,9 @@ pub fn uint8ArrayPrototypeMethodId(name: []const u8) ?u32 {
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 pub const dataViewGetMethodId = buffer_id_lookup.dataViewGetMethodId;
 pub const dataViewSetMethodId = buffer_id_lookup.dataViewSetMethodId;
-pub const arrayBufferAccessorMethodId = buffer_id_lookup.arrayBufferAccessorMethodId;
-pub const sharedArrayBufferAccessorMethodId = buffer_id_lookup.sharedArrayBufferAccessorMethodId;
-pub const dataViewAccessorMethodId = buffer_id_lookup.dataViewAccessorMethodId;
 pub const typedArrayAccessorMethodId = buffer_id_lookup.typedArrayAccessorMethodId;
 pub const dataViewGetKindFromRecordId = buffer_id_lookup.dataViewGetKindFromRecordId;
-pub const dataViewSetKindFromRecordId = buffer_id_lookup.dataViewSetKindFromRecordId;
 pub const arrayBufferAccessorNameFromRecordId = buffer_id_lookup.arrayBufferAccessorNameFromRecordId;
-pub const sharedArrayBufferAccessorNameFromRecordId = buffer_id_lookup.sharedArrayBufferAccessorNameFromRecordId;
-pub const dataViewAccessorNameFromRecordId = buffer_id_lookup.dataViewAccessorNameFromRecordId;
-pub const typedArrayAccessorNameFromRecordId = buffer_id_lookup.typedArrayAccessorNameFromRecordId;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "isView")) return @intFromEnum(StaticMethod.is_view);
@@ -80,8 +73,6 @@ pub fn arrayBufferPrototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "resize")) return @intFromEnum(ArrayBufferPrototypeMethod.resize);
     if (std.mem.eql(u8, name, "transfer")) return @intFromEnum(ArrayBufferPrototypeMethod.transfer);
     if (std.mem.eql(u8, name, "transferToFixedLength")) return @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_fixed_length);
-    if (std.mem.eql(u8, name, "sliceToImmutable")) return @intFromEnum(ArrayBufferPrototypeMethod.slice_to_immutable);
-    if (std.mem.eql(u8, name, "transferToImmutable")) return @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_immutable);
     return null;
 }
 
@@ -105,10 +96,8 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 /// glue that resolves the ArrayBuffer/SharedArrayBuffer prototype methods,
 /// `ArrayBuffer.isView`, the DataView get/set methods, and the ArrayBuffer /
 /// SharedArrayBuffer / DataView / TypedArray byte-length accessors against the
-/// realm-aware exec ops. Those exec ops stay in exec: the DataView get/set glue
-/// is also reached by the VM's own by-name dispatch (`call_runtime`) and the
-/// accessor / prototype helpers do species-aware construction through VM
-/// machinery (BOTH). The TypedArray `[[Get]]/[[Set]]/[[Delete]]` canonical
+/// realm-aware exec ops. Those exec ops stay in exec: the accessor / prototype
+/// helpers do species-aware construction through VM machinery. The TypedArray `[[Get]]/[[Set]]/[[Delete]]` canonical
 /// property semantics and the ArrayBuffer/SharedArrayBuffer constructors plus
 /// the construction-fusion peephole are NOT here — they are driven by opcode
 /// handlers / the construct path, never by function-object record dispatch.
@@ -124,8 +113,6 @@ pub const internal_entries = bufferEntries: {
         bufferEntry("resize", 1, @intFromEnum(ArrayBufferPrototypeMethod.resize)),
         bufferEntry("transfer", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer)),
         bufferEntry("transferToFixedLength", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_fixed_length)),
-        bufferEntry("sliceToImmutable", 2, @intFromEnum(ArrayBufferPrototypeMethod.slice_to_immutable)),
-        bufferEntry("transferToImmutable", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_immutable)),
         // SharedArrayBuffer.prototype methods.
         bufferEntry("slice", 2, @intFromEnum(SharedArrayBufferPrototypeMethod.slice)),
         bufferEntry("grow", 1, @intFromEnum(SharedArrayBufferPrototypeMethod.grow)),
@@ -158,7 +145,6 @@ pub const internal_entries = bufferEntries: {
         bufferEntry("get detached", 0, @intFromEnum(ArrayBufferAccessorMethod.detached)),
         bufferEntry("get maxByteLength", 0, @intFromEnum(ArrayBufferAccessorMethod.max_byte_length)),
         bufferEntry("get resizable", 0, @intFromEnum(ArrayBufferAccessorMethod.resizable)),
-        bufferEntry("get immutable", 0, @intFromEnum(ArrayBufferAccessorMethod.immutable)),
         // SharedArrayBuffer.prototype accessors.
         bufferEntry("get byteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.byte_length)),
         bufferEntry("get maxByteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.max_byte_length)),
@@ -181,9 +167,7 @@ pub const internal_entries = bufferEntries: {
         codecEntry("toHex", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_hex)),
         codecEntry("setFromBase64", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64)),
         codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex)),
-        // The two buffer constructor ids (qjs `JS_NewCConstructor(...,
-        // js_array_buffer_constructor, 1, JS_CFUNC_constructor, 0)`,
-        // quickjs.c /:61046). `installStandardConstructor` stamps these
+        // The two buffer constructor ids. `installStandardConstructor` stamps these
         // ids onto the live `ArrayBuffer` / `SharedArrayBuffer` objects
         // (standard_globals.zig), so they must resolve to a record; without
         // these rows the id decoded but pointed past the end of the domain's
@@ -191,7 +175,7 @@ pub const internal_entries = bufferEntries: {
         //
         // `new ArrayBuffer(n)` never reaches this record: construction is
         // intercepted upstream by `array_ops.constructArrayBufferNativeRecord`
-        // (call_runtime.zig:2476), which reads the raw id. What lands here is
+        // (called from call_runtime.zig), which reads the raw id. What lands here is
         // the *plain call* `ArrayBuffer(8)`, which must throw -- and does,
         // because `bufferNativeRecord` has no arm for these ids and
         // `bufferCall` turns that miss into a TypeError. Hence `generic_magic`
@@ -214,11 +198,10 @@ fn bufferEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
     };
 }
 
-/// Shared record handler for the `.buffer` domain. Mirrors the retired
-/// `call.zig` `callBufferNativeFunctionRecord`: forward the record id to the
-/// exec dispatch glue, and surface the corrupt-id case (e.g. an ArrayBuffer
-/// constructor record invoked as a plain function) as a TypeError, exactly as
-/// before.
+/// Shared record handler for the `.buffer` domain: forward the record id to
+/// the exec dispatch glue, and surface the corrupt-id case (e.g. an
+/// ArrayBuffer constructor record invoked as a plain function) as a
+/// TypeError.
 fn bufferCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -226,7 +209,15 @@ fn bufferCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (try builtin_glue.bufferNativeRecord(host_call.ctx, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
+    if (try builtin_glue.bufferNativeRecord(host_call.ctx, host_call.output, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
+    // The constructor ids reach this record only as a plain call.
+    const constructor_ids = [_]ConstructorMethod{ .array_buffer, .shared_array_buffer };
+    for (constructor_ids) |id| {
+        if (host_call.magic != @intFromEnum(id)) continue;
+        const global = host_call.ctx.global orelse return error.TypeError;
+        _ = try exception_ops.throwTypeErrorMessage(host_call.ctx, global, "must be called with new");
+        unreachable;
+    }
     return error.TypeError;
 }
 
@@ -265,7 +256,7 @@ fn uint8ArrayCodecCall(
         @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex) => "setFromHex",
         else => return error.TypeError,
     };
-    const result = try array_ops.uint8ArrayCodecCall(
+    const result = try uint8array_codec.uint8ArrayCodecCall(
         realm.realm,
         host_call.output,
         realm.global,
@@ -279,136 +270,12 @@ fn uint8ArrayCodecCall(
 }
 
 // The engine-core TypedArray / ArrayBuffer / DataView element-access, coercion,
-// and storage-operation mechanism now lives in core/typed_array.zig (QuickJS
+// and storage-operation mechanism lives in core/typed_array.zig (QuickJS
 // places these in the engine core, with builtins as clients). This file keeps
-// the JS-visible construction primitives that read constructor options / coerce
-// arguments (construct-path entangled) plus the record-dispatch table and the
-// name/id helpers above, and re-exports each moved primitive under its
-// original name so callers (and the construct-prim implementations below) keep
-// resolving them here.
+// the JS-visible construction primitives that read constructor options /
+// coerce arguments, plus the record-dispatch table and the name/id helpers
+// above. The two re-exports below serve the test262 host and the tests.
 const typed_array_core = core.typed_array;
 
-// ArrayBuffer / SharedArrayBuffer argument-coercing constructors read the
-// `maxByteLength` option off a user object, so the conservative Phase 6b-3c
-// placement put them in exec (`exec/zig`); re-exported
-// here under their original names for the install/test side.
-
-pub const arrayBufferConstructLength = typed_array_core.arrayBufferConstructLength;
-pub const sharedArrayBufferConstructLength = typed_array_core.sharedArrayBufferConstructLength;
-pub const sharedArrayBufferFromStore = typed_array_core.sharedArrayBufferFromStore;
-
-// Pure view-construction primitives (no options `Get`, no user code) were
-// relocated to engine core (`core/typed_array.zig`) in Phase 6b-3c; re-exported
-// here so the install/test side keeps the original names. The VM construct path
-// consumes them through `core` directly.
-pub const typedArrayConstruct = typed_array_core.typedArrayConstruct;
 pub const typedArrayConstructWithOptions = typed_array_core.typedArrayConstructWithOptions;
-pub const typedArrayConstructFullBuffer = typed_array_core.typedArrayConstructFullBuffer;
-pub const typedArrayConstructFullBufferOwned = typed_array_core.typedArrayConstructFullBufferOwned;
-pub const dataViewConstruct = typed_array_core.dataViewConstruct;
-
-pub const dataViewValidateConstructorRange = typed_array_core.dataViewValidateConstructorRange;
-pub const dataViewRequireArrayBuffer = typed_array_core.dataViewRequireArrayBuffer;
-
-// --- Engine-core mechanism re-exports (moved to core/typed_array.zig) -------
-//
-// ArrayBuffer / SharedArrayBuffer storage operations.
-pub const arrayBufferSlice = typed_array_core.arrayBufferSlice;
-pub const arrayBufferSliceRange = typed_array_core.arrayBufferSliceRange;
-pub const arrayBufferSliceToImmutable = typed_array_core.arrayBufferSliceToImmutable;
-pub const arrayBufferSliceToImmutableRange = typed_array_core.arrayBufferSliceToImmutableRange;
-pub const arrayBufferTransfer = typed_array_core.arrayBufferTransfer;
-pub const arrayBufferTransferLength = typed_array_core.arrayBufferTransferLength;
-pub const arrayBufferTransferToImmutable = typed_array_core.arrayBufferTransferToImmutable;
-pub const arrayBufferTransferToImmutableLength = typed_array_core.arrayBufferTransferToImmutableLength;
-pub const sharedArrayBufferSlice = typed_array_core.sharedArrayBufferSlice;
-pub const sharedArrayBufferSliceRange = typed_array_core.sharedArrayBufferSliceRange;
-pub const sharedArrayBufferGrow = typed_array_core.sharedArrayBufferGrow;
-pub const sharedArrayBufferGrowLength = typed_array_core.sharedArrayBufferGrowLength;
-pub const arrayBufferResize = typed_array_core.arrayBufferResize;
-pub const arrayBufferResizeLength = typed_array_core.arrayBufferResizeLength;
 pub const detachArrayBuffer = typed_array_core.detachArrayBuffer;
-
-// TypedArray element read / write fabric.
-pub const typedArrayGetIndex = typed_array_core.typedArrayGetIndex;
-pub const typedArraySetIndex = typed_array_core.typedArraySetIndex;
-pub const typedArraySetElement = typed_array_core.typedArraySetElement;
-pub const typedArrayCoerceElementValue = typed_array_core.typedArrayCoerceElementValue;
-pub const typedArraySetInt32IndexFast = typed_array_core.typedArraySetInt32IndexFast;
-pub const typedArrayDefineOwnProperty = typed_array_core.typedArrayDefineOwnProperty;
-
-// DataView get/set primitives.
-pub const dataViewGet = typed_array_core.dataViewGet;
-pub const dataViewSet = typed_array_core.dataViewSet;
-pub const dataViewRejectImmutable = typed_array_core.dataViewRejectImmutable;
-pub const dataViewRequire = typed_array_core.dataViewRequire;
-pub const dataViewByteLength = typed_array_core.dataViewByteLength;
-pub const dataViewByteOffset = typed_array_core.dataViewByteOffset;
-
-// TypedArray element-mechanism predicates live in core/object.zig (the engine-
-// core storage layer); re-export under the original names so this file's
-// construction primitives and external callers keep resolving them locally.
-pub const isTypedArrayObject = core.object.isTypedArrayObject;
-pub const typedArrayOutOfBounds = core.object.typedArrayOutOfBounds;
-pub const typedArrayDetached = core.object.typedArrayDetached;
-pub const typedArrayLength = core.object.typedArrayLength;
-pub const typedArrayByteLength = core.object.typedArrayByteLength;
-pub const typedArrayByteOffset = core.object.typedArrayEffectiveByteOffset;
-pub const typedArrayIndexValid = core.object.typedArrayIndexValid;
-pub const TypedArrayCanonicalIndex = core.object.TypedArrayCanonicalIndex;
-pub const typedArrayCanonicalNumericIndex = core.object.typedArrayCanonicalNumericIndex;
-pub const typedArrayBackedByResizableBuffer = core.object.typedArrayBackedByResizableBuffer;
-pub const typedArrayRejectImmutableBuffer = core.object.typedArrayRejectImmutableBuffer;
-pub const typedArrayImmutableBuffer = core.object.typedArrayImmutableBuffer;
-pub const markArrayBufferImmutable = core.object.markArrayBufferImmutable;
-pub const arrayBufferIsImmutable = core.object.arrayBufferIsImmutable;
-
-// ----- merged from typed_array_construct.zig -----
-// ArrayBuffer / SharedArrayBuffer argument-coercing construction primitives.
-//
-// QuickJS source map: the `js_array_buffer_constructor` /
-// `js_shared_array_buffer_constructor` option-reading paths. Unlike the pure
-// view-construction primitives in `core/typed_array.zig`, these read the
-// `maxByteLength` option off a user-supplied options object via a property
-// lookup (`Get(options, "maxByteLength")`), which is spec-observable and the
-// kind of options access that can reach user code, so the conservative
-// placement keeps them one level above core, in exec, on top of the core
-// ArrayBuffer storage primitives. They are reached only through the construct
-// path (`exec/construct.zig`, the `new_array_buffer` / `new_shared_array_buffer`
-// family); `exec/buffer_ops.zig` re-exports them under their original names for
-// the install/test side.
-pub fn arrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    return bufferConstructArgs(rt, args, prototype, false);
-}
-
-pub fn sharedArrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    return bufferConstructArgs(rt, args, prototype, true);
-}
-
-/// Leftover ArrayBuffer / SharedArrayBuffer construct-args walk. The two
-/// copies were 505/505 B and 98.6% the same; comptime identity was only
-/// the final core constructor. Take `shared` at runtime. Does not fold
-/// `createArrayBufferWithPrototype` / `sharedArrayBufferConstructLength`.
-noinline fn bufferConstructArgs(
-    rt: *core.JSRuntime,
-    args: []const core.JSValue,
-    prototype: ?*core.Object,
-    shared: bool,
-) !core.JSValue {
-    const byte_length = if (args.len >= 1) try typed_array_core.toIndexUsize(rt, args[0]) else @as(usize, 0);
-    var max_byte_length: ?usize = null;
-    if (args.len >= 2 and !args[1].is(.undefined_value) and args[1].is(.object)) {
-        const options = try typed_array_core.expectObject(args[1]);
-        const key = core.atom.ids.maxByteLength;
-        const max_value = try options.getProperty(key);
-        if (!max_value.is(.undefined_value)) {
-            const max = try typed_array_core.toIndexUsize(rt, max_value);
-            if (max < byte_length) return error.RangeError;
-            max_byte_length = max;
-        }
-    }
-    if (shared) {
-        return typed_array_core.sharedArrayBufferConstructLength(rt, byte_length, max_byte_length, prototype);
-    }
-    return typed_array_core.createArrayBufferWithPrototype(rt, byte_length, max_byte_length, prototype);
-}

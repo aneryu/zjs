@@ -466,12 +466,6 @@ pub const JSValue = extern struct {
         return .{ .bits = box(kind, heap_refs.encode(reference)) };
     }
 
-    /// Compatibility relocation spelling. Internal collectors use the
-    /// carrier-checked value_heap_layout.relocate bridge instead.
-    pub inline fn withTracedHeader(self: JSValue, header: *gc.Header) JSValue {
-        return heap_layout.replacePayload(self, heap_layout.reference(header));
-    }
-
     /// Compatibility name for the heap-reference tag category. This does not
     /// establish liveness, ownership, or membership in a particular Runtime.
     pub inline fn isTracerOwned(self: JSValue) bool {
@@ -527,16 +521,7 @@ pub const JSValue = extern struct {
                 return lhs == rhs;
             }
         }
-        if (self.as(.boolean)) |lhs| {
-            if (other.as(.boolean)) |rhs| return lhs == rhs;
-        }
-        if (self.is(.null_value) or self.is(.undefined_value)) return self.same(other);
-        if (self.isBigInt() and other.isBigInt()) return self.sameValue(other);
-        if (self.isString() and other.isString()) {
-            if (self.same(other)) return true;
-            return (compareStringValues(self, other) orelse 1) == 0;
-        }
-        return self.same(other);
+        return self.sameValue(other);
     }
 };
 
@@ -574,7 +559,9 @@ fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
     return string_mod.compareStringValues(a, b, true);
 }
 
-fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {
+/// Numeric order of two BigInt values (short or heap); null if either is
+/// not a BigInt.
+pub fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {
     var lhs_scratch: [2]bignum.Limb = undefined;
     var rhs_scratch: [2]bignum.Limb = undefined;
     const lhs = bigIntParts(a, &lhs_scratch) orelse return null;

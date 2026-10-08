@@ -49,7 +49,7 @@ fn verifyWaiterRoots(rt: *core.JSRuntime) !void {
     try require(atomics.atomicsWakeWaiters(waiter.key, 1) == 1);
     try atomics.processExpiredAtomicsWaiters(ctx);
     try require(rt.job_queue.jobs.len == 1);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(rt.job_queue.jobs[0].payload.atomics_waiter.promise.heapReference().? == moved);
     try require(rt.gc.containsHeader(rt.job_queue.jobs[0].payload.atomics_waiter.promise.cycleMarkHeader().?));
     var job = rt.job_queue.takeFirst().?;
@@ -81,7 +81,7 @@ pub fn main() !void {
     try verifyTailBufferPublication();
     try verifyStringAddRoots();
     try verifyPrimitiveBoxingRoots();
-    try verifyDispatchNameSnapshot();
+    try verifyConstructorKindDispatch();
     try verifyPureValueReadWindows();
     try verifyBareNumberAutoInitRoots();
     try verifyNumberParseCoercionRoots();
@@ -118,14 +118,14 @@ pub fn main() !void {
     rt.unregisterRootProvider(provider);
     try require((try reference.get(rt)).bits == value.bits);
     try require(rt.active_value_roots != null);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(rt.gc.containsHeader(header));
     try require((try reference.get(rt)).asStringBodyRaw().?.eqlBytes("production exact root"));
     roots.deactivate();
     if (reference.get(rt)) |_| return error.ExpiredReferenceAccepted else |err| {
         if (err != error.InactiveRoot) return err;
     }
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(!rt.gc.containsHeader(header));
 
     try roots.activate(rt);
@@ -207,8 +207,8 @@ pub fn main() !void {
     try verifyJsonGapReadWindows();
     try verifyJsonStringifyCallbackRoots();
     try verifyJsonStringifyGetterRoots();
-    try verifyNativeJsonStringifyRoots();
-    try verifyNativeJsonAutoInitRoots();
+    try verifyJsonStringifyOwnKeysRoots();
+    try verifyJsonStringifyAutoInitRoots();
     try verifyIteratorResult(rt);
     try verifyCallEntryRoots();
     try verifyCallSiteLifetime();
@@ -256,9 +256,9 @@ fn verifyBulkDescriptorResultRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             const source = rt.liveObjectFromWeakIdentity(self.source).?;
-            try require(source.deleteProperty(rt, core.atom.ids.name));
-            try require(source.deleteProperty(rt, self.key));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try require(try source.deleteProperty(rt, core.atom.ids.name));
+            try require(try source.deleteProperty(rt, self.key));
+            _ = try rt.collectFull(null, .declared_only);
             self.lost = rt.liveObjectFromWeakIdentity(self.incoming) == null or rt.atoms.name(self.key) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
             return .{ .value = core.JSValue.int32(17) };
@@ -294,7 +294,7 @@ fn verifyBulkDescriptorResultRoots() !void {
             } else {
                 var kept = try core.JSValueHandle.init(rt, (try result).?);
                 defer kept.deinit();
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const out = core.Object.fromHeader(kept.get().refHeader().?);
                 const first = core.Object.fromHeader((try out.getProperty(core.atom.ids.name)).refHeader().?);
                 try require((try first.getProperty(core.atom.ids.value)).same(rt.liveObjectFromWeakIdentity(probe.incoming).?.value()));
@@ -333,7 +333,7 @@ fn verifyDescriptorResultRoots() !void {
                 if (budget != null and budget.? == 0) try require(if (result) |_| false else |err| err == error.OutOfMemory);
                 var kept = try core.JSValueHandle.init(rt, returned);
                 defer kept.deinit();
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const object = core.Object.fromHeader(kept.get().refHeader().?);
                 const expected = rt.liveObjectFromWeakIdentity(identity).?.value();
                 if (accessor) {
@@ -363,7 +363,7 @@ fn verifyObjectGroupByRoots() !void {
             const rt = ctx.runtime;
             if (stage == 5 and argc == 2) self.item = rt.registerWeakObjectIdentity(core.Object.fromHeader(args[1].refHeader().?)) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == 7) self.closes += 1;
-            _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = rt.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == 6) self.lost = rt.liveObjectFromWeakIdentity(self.item.?) == null;
             return core.JSValue.boolean(self.lost or stage == self.failure or (stage == 7 and self.close_failure));
         }
@@ -408,7 +408,9 @@ fn verifyObjectGroupByRoots() !void {
                 const result = zjs.exec.object_ops.objectGroupByCall(ctx, null, global, &args, null, null);
                 if (probe.lost) return error.LostObjectGroupByItem;
                 try require(rt.active_value_roots == null);
-                try require(probe.closes == if (failure >= 4) @as(usize, 1) else 0);
+                // IteratorStepValue failures (next/done/value, stages 2-4) do
+                // not close the iterator; later consumer failures do.
+                try require(probe.closes == if (failure >= 5) @as(usize, 1) else 0);
                 if (failure != 0) {
                     try require(if (result) |_| false else |err| err == error.JSException);
                     var exception = try core.JSValueHandle.init(rt, ctx.takeException());
@@ -418,7 +420,7 @@ fn verifyObjectGroupByRoots() !void {
                 } else {
                     var kept = try core.JSValueHandle.init(rt, (try result).?);
                     defer kept.deinit();
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const out = core.Object.fromHeader(kept.get().refHeader().?);
                     try require(out.getPrototype() == null);
                     for ([_][]const u8{ "group0", "group1" }, 0..) |name, group_index| {
@@ -446,7 +448,7 @@ fn verifyFromEntriesRoots() !void {
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
             if (stage == 8) self.closes += 1;
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             return core.JSValue.boolean(stage == self.failure or (stage == 8 and self.close_failure));
         }
     };
@@ -486,7 +488,9 @@ fn verifyFromEntriesRoots() !void {
                 defer source.deinit();
                 const result = zjs.exec.object_ops.objectFromEntriesCall(ctx, null, global, &.{source.get()}, null, null);
                 try require(rt.active_value_roots == null);
-                try require(probe.closes == if (failure >= 4) @as(usize, 1) else 0);
+                // IteratorStepValue failures (next/done/value, stages 2-4) do
+                // not close the iterator; later consumer failures do.
+                try require(probe.closes == if (failure >= 5) @as(usize, 1) else 0);
                 if (failure != 0) {
                     try require(if (result) |_| false else |err| err == error.JSException);
                     try require(probe.seen & (@as(u32, 1) << @intCast(failure)) != 0);
@@ -497,7 +501,7 @@ fn verifyFromEntriesRoots() !void {
                 } else {
                     var kept = try core.JSValueHandle.init(rt, (try result).?);
                     defer kept.deinit();
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const value = try core.Object.fromHeader(kept.get().refHeader().?).getProperty(try rt.internAtom("entryKey"));
                     try require((try core.Object.fromHeader(value.refHeader().?).getProperty(try rt.internAtom("marker"))).same(core.JSValue.int32(42)));
                 }
@@ -517,7 +521,7 @@ fn verifyOwnPropertyKeyConversionRoots() !void {
         fn thunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, entry: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             const rt = ctx.runtime;
-            _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = rt.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or (self.needs_accessor and rt.liveObjectFromWeakIdentity(self.accessor) == null);
             if (self.lost or self.fail) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
@@ -603,8 +607,8 @@ fn verifyObjectAssignRoots() !void {
             const self: *@This() = @constCast(@fieldParentPtr("owner", owner));
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
-            try require(rt.liveObjectFromWeakIdentity(self.source).?.deleteProperty(rt, self.key));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try require(try rt.liveObjectFromWeakIdentity(self.source).?.deleteProperty(rt, self.key));
+            _ = try rt.collectFull(null, .declared_only);
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or (!self.direct and rt.liveObjectFromWeakIdentity(self.later) == null) or rt.atoms.name(self.key) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
             return .{ .value = core.JSValue.int32(17) };
@@ -712,7 +716,7 @@ fn verifyArrayLengthConversionRoots() !void {
                 defer method.deinit();
                 const entry = try rt.allocNativeEntry(.{ .target = core.NativeEntry.code(&Probe.thunk), .kind = .managed, .state = &probe });
                 core.Object.fromHeader(method.get().refHeader().?).installNativeEntry(entry);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const source = try core.Object.createPlainObject(rt, null);
                 try source.defineOwnProperty(rt, core.atom.predefinedId("Symbol.toPrimitive", .symbol).?, core.Descriptor.data(method.get(), .all));
                 probe.identity = try rt.registerWeakObjectIdentity(source);
@@ -758,8 +762,8 @@ fn verifyBulkDescriptorRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             const properties = rt.liveObjectFromWeakIdentity(self.properties).?;
-            try require(properties.deleteProperty(rt, core.atom.ids.name));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try require(try properties.deleteProperty(rt, core.atom.ids.name));
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -826,8 +830,8 @@ fn verifyDescriptorConversionRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             const descriptor = rt.liveObjectFromWeakIdentity(self.descriptor).?;
-            try require(descriptor.deleteProperty(rt, self.field));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try require(try descriptor.deleteProperty(rt, self.field));
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -957,10 +961,10 @@ fn verifyNativeMethodTableRootsMode(comptime reserve_only: bool) !void {
                 try require(budget != null and err == error.OutOfMemory);
                 // Bulk installation commits one property at a time. Resume
                 // only the uncommitted suffix, preserving the new-key contract.
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
             }
             if (installed < methods.len) try zjs.exec.standard_globals.defineNativeMethodsAssumingNew(rt, core.Object.fromHeader(kept.get().refHeader().?), methods[installed..]);
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require((try core.Object.fromHeader(kept.get().refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(99)));
             for (methods) |entry| {
                 const key = try rt.internAtom(entry.name);
@@ -1004,14 +1008,14 @@ fn verifyNamespacePublicationRoots() !void {
                 } else |err| {
                     try require(budget != null and err == error.OutOfMemory);
                     try require(rt.active_value_roots == null);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const live = core.Object.fromHeader(global.get().refHeader().?);
                     try require(live.propKindAt(live.findProperty(case.key).?) == .auto_init);
                     result = live.getProperty(case.key);
                 }
                 var namespace = try core.JSValueHandle.init(rt, try result);
                 defer namespace.deinit();
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 try require((try core.Object.fromHeader(global.get().refHeader().?).getProperty(case.key)).same(namespace.get()));
                 for (case.methods) |name| {
                     const key = try rt.internAtom(name);
@@ -1031,10 +1035,11 @@ fn verifyNamespacePublicationRoots() !void {
 }
 
 fn verifyAutoInitBuilderRoots() !void {
+    const web = @import("zjs_host").web;
     const infos = [_]core.property.AutoInit{
-        .{ .name = "navigator", .length = 0, .kind = .navigator },
+        web.navigator_descriptor,
         .{ .name = "hostCtor", .length = 0, .host_function_kind = 1, .host_function_prototype = true },
-        .{ .name = "performance", .length = 0, .kind = .performance },
+        web.performance_descriptor,
         .{ .name = "unscopables", .length = 0, .kind = .array_unscopables },
     };
     for ([_]bool{ false, true }) |nursery| {
@@ -1065,12 +1070,12 @@ fn verifyAutoInitBuilderRoots() !void {
                 } else |err| {
                     try require(budget != null and err == error.OutOfMemory);
                     try require(rt.active_value_roots == null);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     result = core.Object.fromHeader(target.get().refHeader().?).getProperty(key);
                 }
                 var kept = try core.JSValueHandle.init(rt, try result);
                 defer kept.deinit();
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const value = kept.get();
                 const object = core.Object.fromHeader(value.refHeader().?);
                 try require((try core.Object.fromHeader(target.get().refHeader().?).getProperty(key)).same(value));
@@ -1114,7 +1119,7 @@ fn verifyAutoInitNativePreparationRoots() !void {
         fn prepare(rt: *core.JSRuntime, _: *const core.property.AutoInit, value: core.JSValue) anyerror!void {
             const self = active;
             self.produced = try rt.registerWeakObjectIdentity(core.Object.fromHeader(value.refHeader().?));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.produced) == null;
             if (self.fail or self.lost) return error.OutOfMemory;
@@ -1148,7 +1153,7 @@ fn verifyAutoInitNativePreparationRoots() !void {
             defer kept.deinit();
             try require(zjs.exec.call_runtime.isCallableValue(kept.get()));
             try require((try object.getProperty(core.atom.ids.name)).same(kept.get()));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
             const produced = rt.liveObjectFromWeakIdentity(probe.produced) orelse return error.LostAutoInitNativeResult;
             try require(kept.get().same(produced.value()));
@@ -1171,16 +1176,16 @@ fn verifyAutoInitReadRoots() !void {
             const self: *@This() = @constCast(@fieldParentPtr("owner", owner));
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
             if (self.replace) {
                 const target = rt.liveObjectFromWeakIdentity(self.target).?;
-                try require(target.deleteProperty(rt, key));
+                try require(try target.deleteProperty(rt, key));
                 // Neither the placeholder nor its atom is reachable from the
                 // target now. The in-flight transaction must still name both.
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 try target.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(99), .all));
             }
             var result = try core.JSValueHandle.init(rt, (try core.Object.create(rt, core.class.ids.object, null)).value());
@@ -1218,7 +1223,7 @@ fn verifyAutoInitReadRoots() !void {
                     if (probe.replace) {
                         try require(if (result) |_| false else |err| err == error.IncompatibleDescriptor);
                         try require((try Probe.read(object, rt, key, descriptor_read)).same(core.JSValue.int32(99)));
-                        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                        _ = try rt.collectFull(null, .declared_only);
                         try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
                         try require(rt.liveObjectFromWeakIdentity(probe.produced) == null);
                         continue;
@@ -1233,7 +1238,7 @@ fn verifyAutoInitReadRoots() !void {
                     defer kept.deinit();
                     try require((try Probe.read(object, rt, key, descriptor_read)).same(kept.get()));
                     try require(probe.calls == if (fail) @as(usize, 2) else 1);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
                     const produced = rt.liveObjectFromWeakIdentity(probe.produced) orelse return error.LostAutoInitReadResult;
                     try require(kept.get().same(produced.value()));
@@ -1256,7 +1261,7 @@ fn verifyPropertyRedefinitionRoots() !void {
             const self: *@This() = @constCast(@fieldParentPtr("owner", owner));
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -1350,16 +1355,16 @@ fn verifyNamedNativePublicationRoots() !void {
             } else |err| {
                 try require(budget != null and err == error.OutOfMemory);
                 try require(rt.active_value_roots == null);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 try require(global.cachedRealmValue(rt, .callsite_prototype) == null);
                 // A failed partial publication must also permit a clean retry.
                 result = zjs.exec.object_ops.callSitePrototypeFromGlobal(rt, global);
             }
             var kept = try core.JSValueHandle.init(rt, (try result).value());
             defer kept.deinit();
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const object = core.Object.fromHeader(kept.get().refHeader().?);
-            const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
+            const methods = [_]struct { name: []const u8, id: core.function.EngineHelperMethod }{
                 .{ .name = "getFunction", .id = .callsite_get_function },
                 .{ .name = "getFunctionName", .id = .callsite_get_function_name },
                 .{ .name = "getFileName", .id = .callsite_get_file_name },
@@ -1371,7 +1376,7 @@ fn verifyNamedNativePublicationRoots() !void {
                 const method = try object.getProperty(try rt.internAtom(expected.name));
                 try require(zjs.exec.call_runtime.isCallableValue(method));
                 const function = core.Object.fromHeader(method.refHeader().?);
-                try require(function.nativeFunctionId() == core.function.nativeBuiltinId(.host, @intFromEnum(expected.id)));
+                try require(function.nativeFunctionId() == core.function.nativeBuiltinId(.engine_helper, @intFromEnum(expected.id)));
                 try require((try function.getProperty(core.atom.ids.length)).same(core.JSValue.int32(0)));
                 try require(zjs.exec.string_ops.stringValueUnitsEqualBytes(try function.getProperty(core.atom.ids.name), expected.name));
             }
@@ -1394,7 +1399,7 @@ fn verifyIteratorFromRoots() !void {
                 return core.JSValue.undefinedValue();
             }
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             if (stage == 3) ctx.runtime.gc.heap_budget.gc_threshold = 0;
             return core.JSValue.undefinedValue();
@@ -1430,12 +1435,10 @@ fn verifyIteratorFromRoots() !void {
                     const owner = core.Object.fromHeader(wrapper.get().refHeader().?);
                     const target = rt.liveObjectFromWeakIdentity(probe.iterator.?) orelse break :exercise error.LostIteratorFromTarget;
                     try require(owner.iteratorTargetSlot().*.?.same(target.value()));
-                    const next_method = try owner.getProperty(core.atom.ids.next);
-                    const next = zjs.exec.iterator_ops.iteratorWrapNext(ctx, null, global, wrapper.get(), core.Object.fromHeader(next_method.refHeader().?), null, null) catch |err| break :exercise err;
-                    try require((try core.Object.fromHeader(next.?.refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(42)));
-                    const return_method = try core.Object.fromHeader(wrapper.get().refHeader().?).getProperty(core.atom.ids.return_);
-                    const returned = zjs.exec.iterator_ops.iteratorWrapReturn(ctx, null, global, wrapper.get(), core.Object.fromHeader(return_method.refHeader().?), null, null) catch |err| break :exercise err;
-                    try require((try core.Object.fromHeader(returned.?.refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(42)));
+                    const next = zjs.exec.iterator_ops.iteratorWrapMethodCall(ctx, null, global, wrapper.get(), .next, null, null) catch |err| break :exercise err;
+                    try require((try core.Object.fromHeader(next.refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(42)));
+                    const returned = zjs.exec.iterator_ops.iteratorWrapMethodCall(ctx, null, global, wrapper.get(), .return_, null, null) catch |err| break :exercise err;
+                    try require((try core.Object.fromHeader(returned.refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(42)));
                     break :exercise {};
                 };
                 if (failure != 0) {
@@ -1471,7 +1474,7 @@ fn verifySpreadDenseRoots() !void {
             try require(index == start + 128);
             var kept = try core.JSValueHandle.init(rt, (rt.liveObjectFromWeakIdentity(identity) orelse return error.LostSpreadDenseTarget).value());
             defer kept.deinit();
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const array = core.Object.fromHeader(kept.get().refHeader().?);
             const source_array = core.Object.fromHeader(source.get().refHeader().?);
             const n = try rt.internAtom("n");
@@ -1499,14 +1502,14 @@ fn verifyIteratorAppendRoots() !void {
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
             if (stage == 3) self.next_gets += 1;
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (ctx.runtime.liveObjectFromWeakIdentity(self.target) == null) self.lost = true;
             if (self.lost or stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
         }
     };
     for ([_]bool{ false, true }) |nursery| {
-        for ([_]bool{ false, true }) |spread| {
+        {
             for ([_]i32{ 0, 1, 2, 3, 4 }) |failure| {
                 const rt = try core.JSRuntime.create(std.heap.page_allocator, .{});
                 defer rt.destroy();
@@ -1529,10 +1532,7 @@ fn verifyIteratorAppendRoots() !void {
                 const target = try core.Object.createArray(rt, null);
                 try target.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(99), .all));
                 probe.target = try rt.registerWeakObjectIdentity(target);
-                const result = if (spread)
-                    zjs.exec.call_runtime.appendSpreadValuesEnumerate(ctx, null, global, target, source.get(), 1)
-                else
-                    zjs.exec.call_runtime.appendIteratorValues(ctx, null, global, target, source.get(), 1);
+                const result = zjs.exec.call_runtime.appendSpreadValuesEnumerate(ctx, null, global, target, source.get(), 1);
                 if (probe.lost) return error.LostIteratorAppendTarget;
                 if (failure != 0) {
                     if (result) |_| return error.ExpectedIteratorAppendFailure else |err| try require(err == error.OutOfMemory or err == error.JSException);
@@ -1545,7 +1545,7 @@ fn verifyIteratorAppendRoots() !void {
                         const value = try array.getProperty(core.Atom.taggedInt(@intCast(index)));
                         try require((try core.Object.fromHeader(value.refHeader().?).getProperty(try rt.internAtom("n"))).as(.int).? == @as(i32, @intCast(index)));
                     }
-                    try require(probe.next_gets == (if (spread) @as(usize, 1) else 3));
+                    try require(probe.next_gets == 1);
                 }
                 try require(rt.active_value_roots == null);
             }
@@ -1571,7 +1571,7 @@ fn verifyIteratorStepRoots() !void {
                 return core.JSValue.undefinedValue();
             }
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (self.argument) |id| {
                 if (stage <= 2 and ctx.runtime.liveObjectFromWeakIdentity(id) == null) self.lost = true;
             }
@@ -1583,10 +1583,11 @@ fn verifyIteratorStepRoots() !void {
         }
     };
     for ([_]bool{ false, true }) |nursery| {
-        for ([_]bool{ false, true }) |record| {
+        {
             for ([_]bool{ false, true }) |done| {
                 for ([_]i32{ 0, 1, 2, 3, 4 }) |failure| {
-                    const reads_value = record == done;
+                    // IteratorStepValue reads `value` only on a not-done step.
+                    const reads_value = !done;
                     if (failure == 4 and !reads_value) continue;
                     const rt = try core.JSRuntime.create(std.heap.page_allocator, .{});
                     defer rt.destroy();
@@ -1608,17 +1609,11 @@ fn verifyIteratorStepRoots() !void {
                     defer rt.nativeAllocator().free(script);
                     var iterator = try core.JSValueHandle.init(rt, try context.eval(script, .{}));
                     defer iterator.deinit();
-                    var argument = core.JSValue.undefinedValue();
-                    if (record) {
-                        const object = try core.Object.createPlainObject(rt, null);
-                        probe.argument = try rt.registerWeakObjectIdentity(object);
-                        argument = object.value();
-                    }
-                    const result: anyerror!zjs.exec.iterator_ops.IteratorStepResult = if (record)
-                        zjs.exec.iterator_ops.iteratorStepResult(ctx, null, global, iterator.get(), argument)
-                    else blk: {
-                        const step = zjs.exec.iterator_ops.iteratorStepValue(ctx, null, global, iterator.get()) catch |err| break :blk err;
-                        break :blk .{ .result = core.JSValue.undefinedValue(), .value = step.value, .done = step.done };
+                    // Boundary 1 (the `next` getter) runs when the Iterator Record
+                    // is made; the step argument exists only after that.
+                    const result: anyerror!zjs.exec.iterator_ops.IteratorStep = blk: {
+                        const iterator_record = zjs.exec.iterator_ops.getIteratorDirect(ctx, null, global, iterator.get(), null, null) catch |err| break :blk err;
+                        break :blk zjs.exec.iterator_ops.iteratorStepValue(ctx, null, global, iterator_record);
                     };
                     if (probe.lost) return error.LostIteratorStepRoot;
                     if (failure != 0) {
@@ -1629,7 +1624,6 @@ fn verifyIteratorStepRoots() !void {
                         try require(step.done == done);
                         try require(step.value.same(if (reads_value) core.JSValue.int32(42) else core.JSValue.undefinedValue()));
                         try require((probe.seen & (1 << 4) != 0) == reads_value);
-                        if (record) try require(step.result.same((rt.liveObjectFromWeakIdentity(probe.step.?) orelse return error.LostIteratorStepRoot).value()));
                         if (nursery and !probe.moved) return error.IteratorStepDidNotMove;
                     }
                     try require(rt.active_value_roots == null);
@@ -1648,7 +1642,7 @@ fn verifyZipCollectionRoots() !void {
             if (argc != 1) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.TypeError);
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
         }
@@ -1713,9 +1707,8 @@ fn verifyZipCollectionRoots() !void {
                 } else {
                     var helper = try core.JSValueHandle.init(rt, try result);
                     defer helper.deinit();
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
-                    const next_method = try core.Object.fromHeader(helper.get().refHeader().?).getProperty(core.atom.ids.next);
-                    const step = (try zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), core.Object.fromHeader(next_method.refHeader().?), null, null)).?;
+                    _ = try rt.collectFull(null, .declared_only);
+                    const step = try zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                     const row = core.Object.fromHeader((try core.Object.fromHeader(step.refHeader().?).getProperty(core.atom.ids.value)).refHeader().?);
                     const first = try row.getProperty(if (keyed) try rt.internAtom("a") else core.Atom.taggedInt(0));
                     try require((try core.Object.fromHeader(first.refHeader().?).getProperty(try rt.internAtom("n"))).as(.int).? == 101);
@@ -1733,7 +1726,7 @@ fn verifyConcatCreationRoots() !void {
     const Probe = struct {
         fn getMethod(ctx: *core.JSContext, _: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
             const fail = (try core.Object.fromHeader(value.refHeader().?).getProperty(core.atom.ids.done)).same(core.JSValue.boolean(true));
-            _ = try ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try ctx.runtime.collectFull(null, .declared_only);
             if (fail) return error.OutOfMemory;
             return global.getProperty(core.atom.ids.next);
         }
@@ -1761,13 +1754,13 @@ fn verifyConcatCreationRoots() !void {
             if (fail) {
                 if (result) |_| return error.ExpectedConcatGetterFailure else |err| try require(err == error.OutOfMemory);
                 try require(rt.active_value_roots == null);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 for (identities) |identity| try require(rt.liveObjectFromWeakIdentity(identity) == null);
                 continue;
             }
             var helper = try core.JSValueHandle.init(rt, try result);
             defer helper.deinit();
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const records = core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorTargetSlot().*.?.refHeader().?);
             for (identities, 0..) |identity, index| {
                 const input = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostConcatInput;
@@ -1793,6 +1786,9 @@ fn verifyZipCreationRoots() !void {
                     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
                     rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
                     if (warm) _ = try zjs.exec.iterator_ops.iteratorHelperPrototype(rt, global);
+                    // Collect bootstrap garbage first: otherwise the budget
+                    // sweep below measures how much of it a collection frees.
+                    _ = try rt.collectFull(null, .declared_only);
                     var identities: [4]usize = undefined;
                     const inputs = setup: {
                         var roots = core.runtime.ExactValueRoots(4){};
@@ -1818,22 +1814,23 @@ fn verifyZipCreationRoots() !void {
                         if (keyed) core.Object.fromHeader(inputs[3].refHeader().?) else null,
                         0,
                         .shortest,
-                        keyed,
                     );
                     rt.setMemoryLimit(std.math.maxInt(usize));
                     if (result) |_| {
-                        if (extra_budget == 0) return error.ExpectedZipAllocationFailure;
+                        // A warm realm allocates only the helper, which may land
+                        // in a free cell; a cold one must build the prototype.
+                        if (extra_budget == 0 and !warm) return error.ExpectedZipAllocationFailure;
                     } else |err| {
                         try require(err == error.OutOfMemory and extra_budget != null);
                         try require(rt.active_value_roots == null);
-                        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                        _ = try rt.collectFull(null, .declared_only);
                         for (identities) |identity| try require(rt.liveObjectFromWeakIdentity(identity) == null);
                         continue;
                     }
                     var helper = try core.JSValueHandle.init(rt, try result);
                     defer helper.deinit();
                     rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const owner = core.Object.fromHeader(helper.get().refHeader().?);
                     const edges = [_]?core.JSValue{ owner.iteratorTargetSlot().*, owner.iteratorZipNexts(), owner.iteratorZipPads(), owner.iteratorZipKeys() };
                     for (identities[0..if (keyed) @as(usize, 4) else 3], edges[0..if (keyed) @as(usize, 4) else 3]) |identity, edge| {
@@ -1854,7 +1851,7 @@ fn verifyZipCallbackRoots() !void {
         fn thunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, entry: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             self.calls += 1;
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (self.fail and self.calls == 2) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
         }
@@ -1883,14 +1880,13 @@ fn verifyZipCallbackRoots() !void {
                 else
                     "Iterator.zip([{ next() { return { get done() { zipBoundaryGc(); return false; }, value: {n: 11} }; }, return() { zipBoundaryGc(); return {}; } }, { next() { return { get done() { zipBoundaryGc(); return false; }, value: {n: 22} }; }, return() { zipBoundaryGc(); return {}; } }])", .{}));
                 defer helper.deinit();
-                const next_method = try core.Object.fromHeader(helper.get().refHeader().?).getProperty(core.atom.ids.next);
-                const result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), core.Object.fromHeader(next_method.refHeader().?), null, null);
+                const result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                 if (fail) {
                     if (result) |_| return error.ExpectedZipGetterFailure else |err| try require(err == error.OutOfMemory or err == error.JSException);
                     try require(probe.calls == 3);
                     try require(core.Object.fromHeader(helper.get().refHeader().?).iteratorTargetSlot().* == null);
                 } else {
-                    const row = try core.Object.fromHeader((try result).?.refHeader().?).getProperty(core.atom.ids.value);
+                    const row = try core.Object.fromHeader((try result).refHeader().?).getProperty(core.atom.ids.value);
                     for ([_]i32{ 11, 22 }, 0..) |expected, index| {
                         const key = if (keyed) try rt.internAtom(if (index == 0) "a" else "b") else core.Atom.taggedInt(@intCast(index));
                         const value = try core.Object.fromHeader(row.refHeader().?).getProperty(key);
@@ -1898,8 +1894,7 @@ fn verifyZipCallbackRoots() !void {
                         try require((try core.Object.fromHeader(value.refHeader().?).getProperty(try rt.internAtom("n"))).as(.int).? == expected);
                     }
                     try require(probe.calls == 2);
-                    const return_method = try core.Object.fromHeader(helper.get().refHeader().?).getProperty(core.atom.ids.return_);
-                    const closed = (try zjs.exec.iterator_ops.iteratorHelperReturn(ctx, null, global, helper.get(), core.Object.fromHeader(return_method.refHeader().?), null, null)).?;
+                    const closed = try zjs.exec.iterator_ops.iteratorHelperReturn(ctx, null, global, helper.get(), null, null);
                     try require((try core.Object.fromHeader(closed.refHeader().?).getProperty(core.atom.ids.done)).same(core.JSValue.boolean(true)));
                     try require(probe.calls == 4);
                     try require(core.Object.fromHeader(helper.get().refHeader().?).iteratorTargetSlot().* == null);
@@ -1920,7 +1915,7 @@ fn verifyFlatMapInnerPublication() !void {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             self.calls += 1;
             if (self.collect) {
-                _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+                _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             }
             if (self.fail and self.calls == 2) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
@@ -1950,24 +1945,23 @@ fn verifyFlatMapInnerPublication() !void {
                     .{},
                 ));
                 defer helper.deinit();
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 try require(!helper.get().refHeader().?.metaConst().flags.young);
-                const next_method = try core.Object.fromHeader(helper.get().refHeader().?).getProperty(core.atom.ids.next);
-                const result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), core.Object.fromHeader(next_method.refHeader().?), null, null);
+                const result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                 try require(!core.Object.fromHeader(helper.get().refHeader().?).generatorExecuting());
                 if (fail) {
                     if (result) |_| return error.ExpectedFlatMapGetterFailure else |err| try require(err == error.OutOfMemory or err == error.JSException);
                     try require(probe.calls == 2);
                     try require(core.Object.fromHeader(helper.get().refHeader().?).iteratorData() == null);
                 } else {
-                    try require((try core.Object.fromHeader((try result).?.refHeader().?).getProperty(core.atom.ids.value)).as(.int).? == 42);
+                    try require((try core.Object.fromHeader((try result).refHeader().?).getProperty(core.atom.ids.value)).as(.int).? == 42);
                     const inner_id = try rt.registerWeakObjectIdentity(core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorData().?.refHeader().?));
                     const next_id = try rt.registerWeakObjectIdentity(core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorInnerNext().?.refHeader().?));
                     if (nursery) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
                     const owner = core.Object.fromHeader(helper.get().refHeader().?);
                     try require(owner.iteratorData().?.same((rt.liveObjectFromWeakIdentity(inner_id) orelse return error.LostFlatMapInner).value()));
                     try require(owner.iteratorInnerNext().?.same((rt.liveObjectFromWeakIdentity(next_id) orelse return error.LostFlatMapNext).value()));
-                    const again = (try zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), core.Object.fromHeader(next_method.refHeader().?), null, null)).?;
+                    const again = try zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                     try require((try core.Object.fromHeader(again.refHeader().?).getProperty(core.atom.ids.value)).as(.int).? == 42);
                     try require(probe.calls == 4);
                 }
@@ -1991,7 +1985,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
         failure: usize,
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             self.calls += 1;
-            _ = try ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try ctx.runtime.collectFull(null, .declared_only);
             const callback = ctx.runtime.liveObjectFromWeakIdentity(self.callback_id);
             if (callback == null or ctx.runtime.liveObjectFromWeakIdentity(self.receiver_id) == null) {
                 self.lost = true;
@@ -2059,7 +2053,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
                     defer roots.deactivate();
                     const kept = try roots.ref(0);
                     try kept.set(rt, (try result).?);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const helper = core.Object.fromHeader((try kept.get(rt)).refHeader().?);
                     try require(helper.iteratorTargetSlot().*.?.same(rt.liveObjectFromWeakIdentity(probe.receiver_id).?.value()));
                     try require(helper.iteratorNextSlot().*.?.same(rt.liveObjectFromWeakIdentity(probe.callback_id).?.value()));
@@ -2090,7 +2084,7 @@ fn verifyIteratorCloseExceptionMode(comptime mode: enum { single, all, normal })
             // A later callback may clear/replace the pending exception. The
             // completion must retain its own copy until all closes finish.
             ctx.clearException();
-            _ = try ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try ctx.runtime.collectFull(null, .declared_only);
             if (ctx.runtime.liveObjectFromWeakIdentity(self.identity) == null) {
                 self.lost = true;
                 return error.OutOfMemory;
@@ -2158,7 +2152,7 @@ fn verifyIteratorCloseExceptionMode(comptime mode: enum { single, all, normal })
                 .normal => 2,
             }));
             const expected = rt.liveObjectFromWeakIdentity(probe.identity) orelse return error.LostIteratorCloseException;
-            try require(ctx.hasException() and rt.current_exception.same(expected.value()));
+            try require(ctx.hasException() and rt.exception.value.same(expected.value()));
             try require(rt.active_value_roots == null);
         }
     }
@@ -2179,7 +2173,7 @@ fn verifyIteratorTerminalRoots(comptime method: core.host_function.builtin_metho
         fail: bool,
         fn collect(self: *@This(), ctx: *core.JSContext) !void {
             if (self.accumulator) |header| {
-                _ = try ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try ctx.runtime.collectFull(null, .declared_only);
                 const current = ctx.runtime.liveObjectFromWeakIdentity(self.identity.?) orelse {
                     self.lost = true;
                     return error.OutOfMemory;
@@ -2259,9 +2253,8 @@ fn verifyIteratorTerminalRoots(comptime method: core.host_function.builtin_metho
             var result: anyerror!?core.JSValue = if (method == .filter) helper: {
                 var kept = try core.JSValueHandle.init(rt, (try zjs.exec.iterator_ops.iteratorPrototypeMethodCall(ctx, null, global, inputs[0], &.{inputs[1]}, @intFromEnum(method), null, null)).?);
                 defer kept.deinit();
-                const next_method = try core.Object.fromHeader(kept.get().refHeader().?).getProperty(core.atom.ids.next);
-                const next_result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, kept.get(), core.Object.fromHeader(next_method.refHeader().?), null, null) catch |err| break :helper err;
-                break :helper try core.Object.fromHeader(next_result.?.refHeader().?).getProperty(core.atom.ids.value);
+                const next_result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, kept.get(), null, null) catch |err| break :helper err;
+                break :helper try core.Object.fromHeader(next_result.refHeader().?).getProperty(core.atom.ids.value);
             } else zjs.exec.iterator_ops.iteratorPrototypeMethodCall(ctx, null, global, inputs[0], &.{ inputs[1], core.JSValue.int32(0) }, @intFromEnum(method), null, null);
             if (probe.lost) return error.LostIteratorAccumulator;
             try require(probe.next_calls == (if (method == .find or method == .filter) @as(usize, 1) else 2));
@@ -2343,12 +2336,12 @@ fn verifyCallSiteLifetimeRoute(comptime bytecode_route: bool, comptime internal_
     const identity = try rt.registerWeakObjectIdentity(core.Object.fromHeader(receiver.get().refHeader().?));
     receiver.deinit();
     callee.deinit();
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     const held = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostCallSiteOwnedReceiver;
     try require((try site.call(&.{})).same(held.value()));
     site.deinit();
     try require(rt.active_value_roots == null);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(rt.liveObjectFromWeakIdentity(identity) == null);
 }
 
@@ -2368,7 +2361,7 @@ fn verifyCallEntryRootsMode(comptime mode: enum { root, site, site_this, interna
             const self: *@This() = @ptrCast(@alignCast(state.?));
             self.polls += 1;
             if (mode == .root) @memset(self.args, core.JSValue.undefinedValue());
-            _ = runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = runtime.collectFull(null, .declared_only) catch |err| {
                 self.gc_error = err;
                 return true;
             };
@@ -2446,7 +2439,7 @@ fn verifyCallEntryRootsMode(comptime mode: enum { root, site, site_this, interna
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(runtime, returned);
-                _ = try runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try runtime.collectFull(null, .declared_only);
                 try require(runtime.gc.containsHeader((try kept.get(runtime)).refHeader().?));
             }
             try require(runtime.active_value_roots == (if (mode == .internal_site or mode == .internal_this) &site.internal_roots.frame else null));
@@ -2478,7 +2471,7 @@ fn verifyRetainedNurseryPrototype() !void {
             frame.activate(rt);
             defer frame.deactivate(rt);
             if (major) {
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
             } else {
                 _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
             }
@@ -2533,10 +2526,10 @@ fn verifyCollectionGroupRoots() !void {
                 // Remove the source's edge so the caller's item slot is the
                 // only strong owner until the group publishes it.
                 const array = rt.liveObjectFromWeakIdentity(id).?;
-                try require(array.deleteProperty(rt, core.Atom.taggedInt(@intCast(self.calls))));
+                try require(try array.deleteProperty(rt, core.Atom.taggedInt(@intCast(self.calls))));
             }
             if (rt.gc.nursery.enabled) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             self.lost_source = if (self.source_identity) |id| rt.liveObjectFromWeakIdentity(id) == null else !rt.gc.containsHeader(self.source.cycleMarkHeader().?);
             self.lost_item = if (identity) |id| rt.liveObjectFromWeakIdentity(id) == null else !rt.gc.containsHeader(item);
             self.lost_callback = rt.liveObjectFromWeakIdentity(self.callback_identity) == null;
@@ -2644,7 +2637,7 @@ fn verifyCollectionGroupRoots() !void {
                     if (mode == 1) try require(inputs[0].ropeBody().?.flatString() == null);
                     if (mode == 3) try require(inputs[0].ropeBody().?.buffer != null);
                     if (nursery and mode == 4) try require(probe.moved_items > 0);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     const map = core.Object.fromHeader((try kept.get(rt)).cycleMarkHeader().?);
                     try require(map.getPrototype() == rt.liveObjectFromWeakIdentity(probe.prototype_identity));
                     const entries = map.collectionEntries();
@@ -2683,7 +2676,7 @@ fn verifyTailBufferPublication() !void {
     try right.set(rt, (try core.string.String.createAscii(rt, "!")).value());
     const measured = try core.string.createTailBufferRope(rt, core.string.asFlat(try left.get(rt)).?, core.string.asFlat(try right.get(rt)).?);
     const charge = core.string.accountedStorageSizeFromHeader(measured.buffer.?.header());
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     // Admit the buffer but collect at node allocation. The unpublished
     // buffer must remain live, so this cap must produce a recoverable OOM.
     rt.setMemoryLimit(rt.gc.heap_budget.bytes + charge);
@@ -2782,7 +2775,7 @@ fn verifyStringAddRoots() !void {
                         else => unreachable,
                     }
                     try temporary.set(rt, core.JSValue.undefinedValue());
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     break :setup [_]core.JSValue{ try left.get(rt), try right.get(rt) };
                 };
                 var candidate_peak: usize = 0;
@@ -2814,7 +2807,7 @@ fn verifyStringAddRoots() !void {
                 const kept = try roots.ref(0);
                 try kept.set(rt, try result);
                 for (0..2) |pass| {
-                    if (pass == 1) _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    if (pass == 1) _ = try rt.collectFull(null, .declared_only);
                     const value = try kept.get(rt);
                     if (core.string.stringValueLenUnchecked(value) != expected.len) return error.StringAddResultChanged;
                     for (expected, 0..) |unit, index| {
@@ -2913,14 +2906,14 @@ fn verifyPrimitiveBoxingRoots() !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 try require(core.Object.fromHeader((try kept.get(rt)).refHeader().?).objectData().?.same(inputs.input));
             }
         }
     }
 }
 
-fn verifyDispatchNameSnapshot() !void {
+fn verifyConstructorKindDispatch() !void {
     const Probe = struct {
         constructor: core.runtime.RootedValueRef,
         mode: usize,
@@ -2936,8 +2929,8 @@ fn verifyDispatchNameSnapshot() !void {
             if (self.mode != 0) try require(visible.ropeBody().?.isLinearized() == (self.mode == 2));
             const flat = if (visible.ropeBody()) |rope| rope.flatString() else core.string.asFlat(visible);
             const name_header = if (flat) |body| body.header() else null;
-            try require(constructor.deleteProperty(rt, core.atom.ids.name));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try require(try constructor.deleteProperty(rt, core.atom.ids.name));
+            _ = try rt.collectFull(null, .declared_only);
             const before = rt.active_value_roots;
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
             const parse_float = try global.getProperty(comptime core.atom.predefinedId("parseFloat", .string).?);
@@ -2990,6 +2983,9 @@ fn verifyDispatchNameSnapshot() !void {
                 try constructor.set(rt, try core.function.nativeFunction(ctx, "SharedArrayBuffer", 1));
                 const constructor_object = core.Object.fromHeader((try constructor.get(rt)).refHeader().?);
                 constructor_object.nativeDispatchNameSlot().* = core.atom.null_atom;
+                // [[Construct]] dispatches on the constructor kind; the name
+                // the coercion callback deletes and recycles is never read.
+                constructor_object.setNativeConstructorKind(.shared_array_buffer);
                 if (mode != 0) {
                     try target.set(rt, (try core.string.String.createAscii(rt, "SharedArray")).value());
                     try input.set(rt, (try core.string.String.createAscii(rt, "Buffer")).value());
@@ -3015,7 +3011,7 @@ fn verifyDispatchNameSnapshot() !void {
                     // JavaScript exception; only the host boundary restores it.
                     if (result) |_| return error.ExpectedDispatchCallbackOom else |err| if (err != error.JSException) return err;
                     try require(probe.injected and ctx.exceptionIsOutOfMemory());
-                } else if (core.Object.fromHeader((try result).refHeader().?).class_id != core.class.ids.shared_array_buffer) return error.LostDispatchNameSnapshot;
+                } else if (core.Object.fromHeader((try result).refHeader().?).class_id != core.class.ids.shared_array_buffer) return error.LostConstructorKindDispatch;
                 try require(probe.calls == 1);
                 try require(rt.active_value_roots == before);
             }
@@ -3053,7 +3049,7 @@ fn verifyPureValueReadWindows() !void {
         rt.setMemoryLimit(0);
         rt.gc.heap_budget.gc_threshold = 0;
         const epoch = rt.gc.collection_epoch;
-        const native_before = rt.diagnostics.allocations.allocated_bytes;
+        const native_before = rt.allocation_diagnostics.allocated_bytes;
         failing.fail_index = failing.alloc_index;
         failing.resize_fail_index = failing.resize_index;
         {
@@ -3084,7 +3080,7 @@ fn verifyPureValueReadWindows() !void {
         try require(try core.number.parseFloatValue(rt, inputs[0]) == 123);
         if (mode == 1 or mode == 2) try require(inputs[0].ropeBody().?.isLinearized() == (mode == 2));
         try require(rt.gc.collection_epoch == epoch);
-        try require(rt.diagnostics.allocations.allocated_bytes == native_before);
+        try require(rt.allocation_diagnostics.allocated_bytes == native_before);
         try require(rt.active_value_roots == null);
         if (comptime @import("builtin").mode == .Debug) try require(rt.active_no_gc_scope == null);
     }
@@ -3106,7 +3102,7 @@ fn verifyBareNumberAutoInitRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = rt.collectFull(null, .declared_only) catch |err| {
                 self.collection_failure = err;
                 return error.ReferenceError;
             };
@@ -3141,7 +3137,7 @@ fn verifyBareNumberAutoInitRoots() !void {
                     try array.set(rt, (try core.Object.createArray(rt, prototype)).value());
                     const object = core.Object.fromHeader((try array.get(rt)).cycleMarkHeader().?);
                     try object.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.undefinedValue(), .all));
-                    try require(object.deleteProperty(rt, core.Atom.taggedInt(0)));
+                    try require(try object.deleteProperty(rt, core.Atom.taggedInt(0)));
                     probe.array = try rt.registerWeakObjectIdentity(object);
                     if (mode < 2) {
                         try text.set(rt, (try core.string.String.createAscii(rt, if (mode == 0) "123" else "10")).value());
@@ -3232,7 +3228,7 @@ fn verifyNumberAndIndexCoercionRoots(comptime index_read: bool) !void {
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             const rt = ctx.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.gc.collection_epoch > epoch);
             self.calls += 1;
             if (self.calls == 2) {
@@ -3243,7 +3239,7 @@ fn verifyNumberAndIndexCoercionRoots(comptime index_read: bool) !void {
                 try require(nested.as(.int).? == 42);
                 try require(rt.active_value_roots == before);
                 self.reentries += 1;
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
             }
             if (self.text) |text| if (!rt.gc.containsHeader(text)) {
                 self.lost = true;
@@ -3342,7 +3338,7 @@ fn verifyBitmapHeapBudgetReclaim() !void {
             if (minor) {
                 _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
             } else {
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
             }
             try require(rt.gc.collection_epoch > epoch);
             if (rt.gc.heap_budget.bytes != baseline) return error.BitmapReclaimLeakedHeapBudget;
@@ -3415,7 +3411,7 @@ fn verifyRawJsonConstructionRoots() !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const object = core.Object.fromHeader((try kept.get(rt)).cycleMarkHeader().?);
                 if (!zjs.exec.json_ops.isRawJSON(try kept.get(rt))) return error.InvalidRawJsonClass;
                 if (object.flags.extensible or object.getPrototype() != null) return error.InvalidRawJsonIntegrity;
@@ -3427,7 +3423,7 @@ fn verifyRawJsonConstructionRoots() !void {
     }
 }
 
-fn verifyNativeJsonAutoInitRoots() !void {
+fn verifyJsonStringifyAutoInitRoots() !void {
     const Probe = struct {
         owner: core.property.AutoInitModuleOwner = .{ .resolve = resolve },
         target: usize = 0,
@@ -3443,7 +3439,7 @@ fn verifyNativeJsonAutoInitRoots() !void {
             const realm: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = realm.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = rt.collectFull(null, .declared_only) catch |err| {
                 self.collection_failure = err;
                 return error.OutOfMemory;
             };
@@ -3467,6 +3463,8 @@ fn verifyNativeJsonAutoInitRoots() !void {
                 rt.gc.scheduler.host_quiescent = true;
                 const ctx = try core.JSContext.create(rt, .{});
                 defer ctx.destroy();
+                defer ctx.clearException();
+                const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
                 var probe = Probe{ .property_list = property_list, .fail_once = fail_once };
                 var inputs = setup: {
                     var roots = core.runtime.ExactValueRoots(4){};
@@ -3486,7 +3484,7 @@ fn verifyNativeJsonAutoInitRoots() !void {
                         try replacer.set(rt, (try core.Object.createArray(rt, core.Object.fromHeader((try child.get(rt)).cycleMarkHeader().?))).value());
                         const array = core.Object.fromHeader((try replacer.get(rt)).cycleMarkHeader().?);
                         try array.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.undefinedValue(), .all));
-                        try require(array.deleteProperty(rt, core.Atom.taggedInt(0)));
+                        try require(try array.deleteProperty(rt, core.Atom.taggedInt(0)));
                     } else {
                         try child.set(rt, (try core.Object.create(rt, core.class.ids.module_ns, null)).value());
                         try core.Object.fromHeader((try child.get(rt)).cycleMarkHeader().?).defineModuleAutoInitProperty(rt, core.atom.ids.value, ctx, &probe.owner);
@@ -3499,18 +3497,18 @@ fn verifyNativeJsonAutoInitRoots() !void {
                     break :setup [_]core.JSValue{ try value.get(rt), try replacer.get(rt), try space.get(rt) };
                 };
                 if (fail_once) {
-                    const first = zjs.exec.json_ops.stringify(rt, inputs[0], inputs[1], inputs[2]);
+                    const first = zjs.exec.json_ops.jsonStringifyCall(ctx, null, global, &inputs, null, null);
                     if (probe.collection_failure) |err| return err;
-                    if (probe.lost) return error.LostNativeJsonAutoInitInput;
-                    if (first) |_| return error.ExpectedNativeJsonReferenceError else |err| try require(err == error.ReferenceError);
+                    if (probe.lost) return error.LostJsonAutoInitInput;
+                    if (first) |_| return error.ExpectedJsonAutoInitReferenceError else |err| try require(err == error.ReferenceError);
                     try require(rt.active_value_roots == null);
                     // Reacquire the movable input before retrying. Array and
                     // rope carriers retain stable addresses in this collector.
-                    inputs[0] = (rt.liveObjectFromWeakIdentity(probe.target) orelse return error.LostNativeJsonAutoInitInput).value();
+                    inputs[0] = (rt.liveObjectFromWeakIdentity(probe.target) orelse return error.LostJsonAutoInitInput).value();
                 }
-                const result = try zjs.exec.json_ops.stringify(rt, inputs[0], inputs[1], inputs[2]);
+                const result = try zjs.exec.json_ops.jsonStringifyCall(ctx, null, global, &inputs, null, null);
                 if (probe.collection_failure) |err| return err;
-                if (probe.lost) return error.LostNativeJsonAutoInitInput;
+                if (probe.lost) return error.LostJsonAutoInitInput;
                 try require(core.string.asFlat(result).?.eqlBytes(if (property_list) "{\n  \"value\": 9\n}" else "{\n  \"value\": {\n    \"value\": 9\n  }\n}"));
                 try require(probe.calls == (if (fail_once) @as(usize, 2) else 1));
                 try require(!inputs[2].ropeBody().?.isLinearized());
@@ -3521,7 +3519,7 @@ fn verifyNativeJsonAutoInitRoots() !void {
     }
 }
 
-fn verifyNativeJsonStringifyRoots() !void {
+fn verifyJsonStringifyOwnKeysRoots() !void {
     const Probe = struct {
         ancestor: usize = 0,
         child: usize = 0,
@@ -3538,7 +3536,7 @@ fn verifyNativeJsonStringifyRoots() !void {
             self.calls += 1;
             if (self.calls > 1) return error.OutOfMemory;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = rt.collectFull(null, .declared_only) catch |err| {
                 self.failure = err;
                 return error.OutOfMemory;
             };
@@ -3563,8 +3561,12 @@ fn verifyNativeJsonStringifyRoots() !void {
                     defer rt.destroy();
                     rt.gc.nursery.enabled = nursery;
                     rt.gc.scheduler.host_quiescent = true;
+                    const ctx = try core.JSContext.create(rt, .{});
+                    defer ctx.destroy();
+                    defer ctx.clearException();
+                    const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
                     var probe = Probe{ .fail = fail };
-                    const binding = try rt.registerClass(.{ .class_name = "NativeJsonKeys", .binding_data = &probe, .exotic_methods = &Probe.methods });
+                    const binding = try rt.registerClass(.{ .class_name = "JsonOwnKeys", .binding_data = &probe, .exotic_methods = &Probe.methods });
                     const input = setup: {
                         var roots = core.runtime.ExactValueRoots(2){};
                         try roots.activate(rt);
@@ -3585,14 +3587,14 @@ fn verifyNativeJsonStringifyRoots() !void {
                         }
                         break :setup try parent.get(rt);
                     };
-                    const result = zjs.exec.json_ops.stringify(rt, input, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+                    const result = zjs.exec.json_ops.jsonStringifyCall(ctx, null, global, &.{input}, null, null);
                     if (probe.failure) |err| return err;
-                    if (probe.lost) return error.LostNativeJsonInput;
+                    if (probe.lost) return error.LostJsonOwnKeysInput;
                     try require(!probe.skipped and probe.calls == 1);
                     if (fail) {
-                        if (result) |_| return error.ExpectedNativeJsonFailure else |err| try require(err == error.OutOfMemory);
+                        if (result) |_| return error.ExpectedJsonOwnKeysFailure else |err| try require(err == error.OutOfMemory);
                     } else if (cycle) {
-                        if (result) |_| return error.ExpectedNativeJsonCycle else |err| try require(err == error.TypeError);
+                        if (result) |_| return error.ExpectedJsonOwnKeysCycle else |err| try require(err == error.TypeError);
                     } else try require(core.string.asFlat(try result).?.eqlBytes(if (array) "[{\"value\":{\"value\":7}}]" else "{\"value\":{\"value\":7}}"));
                     if (nursery) try require(probe.moved);
                     try require(rt.active_value_roots == null);
@@ -3620,17 +3622,17 @@ fn verifyJsonStringifyGetterRoots() !void {
             }
             const identity = try rt.registerWeakObjectIdentity(core.Object.fromHeader(header));
             if (stage == 2 and self.delete_later) {
-                try require(core.Object.fromHeader(header).deleteProperty(rt, self.later_key));
+                try require(try core.Object.fromHeader(header).deleteProperty(rt, self.later_key));
             }
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.gc.collection_epoch > epoch);
             if (stage == 2 and rt.atoms.name(self.later_key) == null) return error.LostStringifySnapshotAtom;
             self.calls += 1;
             // Reenter the serializer with its own cycle stack while the
             // outer getter/toJSON and enumeration frames remain active.
             const nested = try zjs.exec.json_ops.jsonStringifyCall(ctx, null, try zjs.exec.zjs_vm.contextGlobal(ctx), &.{core.JSValue.int32(42)}, null, null);
-            try require(core.string.asFlat(nested.?).?.eqlBytes("42"));
+            try require(core.string.asFlat(nested).?.eqlBytes("42"));
             self.reentries += 1;
             const current = rt.liveObjectFromWeakIdentity(identity) orelse return error.InvalidStringifyGetterReceiver;
             self.moved = self.moved or current.gcHeader() != header;
@@ -3696,7 +3698,7 @@ fn verifyJsonStringifyGetterRoots() !void {
                 const result = zjs.exec.json_ops.jsonStringifyCall(ctx, null, global, &.{input}, null, null);
                 if (probe.invalid_receiver) return error.InvalidStringifyGetterReceiver;
                 if (fail_at == 0) {
-                    try require(core.string.asFlat((try result).?).?.eqlBytes(if (delete_later) "{\"a\":1}" else "{\"a\":1,\"json-boundary-later\":2}"));
+                    try require(core.string.asFlat(try result).?.eqlBytes(if (delete_later) "{\"a\":1}" else "{\"a\":1,\"json-boundary-later\":2}"));
                 } else if (result) |_| return error.ExpectedStringifyGetterFailure else |err| try require(err == error.OutOfMemory or err == error.JSException);
                 try require(probe.calls == (if (fail_at == 0) expected_calls else fail_at));
                 try require(probe.reentries == probe.calls);
@@ -3733,7 +3735,7 @@ fn verifyJsonStringifyCallbackRoots() !void {
             const result = try roots.ref(0);
             try result.set(rt, args[1]);
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.gc.collection_epoch > epoch);
             const current = rt.liveObjectFromWeakIdentity(identity) orelse return error.InvalidStringifyReceiver;
             self.moved = self.moved or current.gcHeader() != header;
@@ -3799,7 +3801,7 @@ fn verifyJsonStringifyCallbackRoots() !void {
                         try expected.appendSlice(rt.nativeAllocator(), "{\"a\":1,\"b\":2}");
                         try expected.appendNTimes(rt.nativeAllocator(), '}', depth);
                         if (array) try expected.append(rt.nativeAllocator(), ']');
-                        if (!core.string.asFlat((try result).?).?.eqlBytes(expected.items)) return error.StringifyCallbackOutputMismatch;
+                        if (!core.string.asFlat(try result).?.eqlBytes(expected.items)) return error.StringifyCallbackOutputMismatch;
                     }
                     if (probe.calls != (if (fail or cycle) @as(usize, 1) else 2)) return error.StringifyCallbackCountMismatch;
                     if (nursery and !probe.moved) return error.StringifyReceiverDidNotMove;
@@ -3846,7 +3848,7 @@ fn verifyJsonGapReadWindows() !void {
             // fail. Partial output belongs to the callee even on OOM.
             rt.setMemoryLimit(0);
             rt.gc.heap_budget.gc_threshold = 0;
-            const native_before = rt.diagnostics.allocations.allocated_bytes;
+            const native_before = rt.allocation_diagnostics.allocated_bytes;
             const epoch = rt.gc.collection_epoch;
             failing.fail_index = failing.alloc_index + offset;
             failing.resize_fail_index = failing.resize_index;
@@ -3862,7 +3864,7 @@ fn verifyJsonGapReadWindows() !void {
                 try require(err == error.OutOfMemory);
                 failures += 1;
             }
-            try require(native_before == rt.diagnostics.allocations.allocated_bytes);
+            try require(native_before == rt.allocation_diagnostics.allocated_bytes);
             if (mode == 1 or mode == 2) try require(input.ropeBody().?.isLinearized() == (mode == 2));
             try require(rt.gc.collection_epoch == epoch);
             if (comptime @import("builtin").mode == .Debug) try require(rt.active_no_gc_scope == null);
@@ -3889,10 +3891,10 @@ fn verifyJsonStringifyOptionRoots() !void {
             const key = try rt.internAtom("orphan-option-key");
             if (self.calls == 0) {
                 const array = rt.liveObjectFromWeakIdentity(self.replacer) orelse return error.LostStringifyReplacer;
-                _ = array.deleteProperty(rt, core.Atom.taggedInt(0));
+                _ = try array.deleteProperty(rt, core.Atom.taggedInt(0));
             }
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.gc.collection_epoch > epoch);
             self.calls += 1;
             const target = rt.liveObjectFromWeakIdentity(self.target);
@@ -3950,7 +3952,7 @@ fn verifyJsonStringifyOptionRoots() !void {
             const result = zjs.exec.json_ops.jsonStringifyCall(ctx, null, global, &inputs, null, null);
             if (probe.lost) return error.LostStringifyOptionRoot;
             if (fail_call == 0) {
-                try require(core.string.asFlat((try result).?).?.eqlBytes("{}"));
+                try require(core.string.asFlat(try result).?.eqlBytes("{}"));
             } else if (result) |_| return error.ExpectedStringifyOptionFailure else |err| try require(err == error.OutOfMemory or err == error.JSException);
             try require(probe.calls == (if (fail_call == 0) @as(usize, 2) else fail_call));
             if (nursery) try require(probe.moved);
@@ -4016,7 +4018,6 @@ fn verifyJsonReviverRoots() !void {
         invalid_holder: bool = false,
         mode: usize,
         fail_call: usize,
-        shadowed_first: bool,
         moved: bool = false,
         fn run(self: *@This(), ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
             if (args.len != 3) return error.InvalidReviverArguments;
@@ -4037,9 +4038,9 @@ fn verifyJsonReviverRoots() !void {
             } else {
                 const context = core.Object.fromHeader(args[2].cycleMarkHeader().?);
                 const source = try context.getProperty(core.atom.ids.source);
-                if (first and self.shadowed_first) {
-                    try require(source.is(.undefined_value));
-                } else try require(core.string.asFlat(source).?.eqlBytes(if (first) "1" else "2"));
+                // A duplicate key's record is its last definition, the one
+                // the property holds, so "a" always reports the source "1".
+                try require(core.string.asFlat(source).?.eqlBytes(if (first) "1" else "2"));
             }
             const identity = try rt.registerWeakObjectIdentity(core.Object.fromHeader(header));
             var roots = core.runtime.ExactValueRoots(1){};
@@ -4048,7 +4049,7 @@ fn verifyJsonReviverRoots() !void {
             const result = try roots.ref(0);
             try result.set(rt, args[1]);
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(rt.gc.collection_epoch > epoch);
             const current = rt.liveObjectFromWeakIdentity(identity) orelse return error.InvalidReviverHolder;
             self.moved = self.moved or current.gcHeader() != header;
@@ -4077,7 +4078,7 @@ fn verifyJsonReviverRoots() !void {
                 defer ctx.destroy();
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                var probe = Probe{ .mode = mode, .fail_call = fail_call, .shadowed_first = nursery };
+                var probe = Probe{ .mode = mode, .fail_call = fail_call };
                 rt.gc.scheduler.host_quiescent = true;
                 var source_bytes = std.ArrayList(u8).empty;
                 defer source_bytes.deinit(rt.nativeAllocator());
@@ -4104,7 +4105,7 @@ fn verifyJsonReviverRoots() !void {
                 const result = zjs.exec.json_ops.jsonParseCall(ctx, null, global, &inputs, null, null);
                 if (probe.invalid_holder) return error.InvalidReviverHolder;
                 if (fail_call == 0) {
-                    const object = core.Object.fromHeader((try result).?.cycleMarkHeader().?);
+                    const object = core.Object.fromHeader((try result).cycleMarkHeader().?);
                     const a = try object.getProperty(try rt.internAtom("a"));
                     switch (mode) {
                         0 => try require(a.as(.int).? == 1),
@@ -4226,7 +4227,7 @@ fn verifyDateCoercionRoots() !void {
         lost: bool = false,
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             const rt = ctx.runtime;
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             self.calls += 1;
             if ((self.check_receiver and !rt.gc.containsHeader(self.receiver)) or
                 (self.check_later and rt.liveObjectFromWeakIdentity(self.later_identity) == null))
@@ -4255,13 +4256,14 @@ fn verifyDateCoercionRoots() !void {
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
                 var probe: Probe = undefined;
                 const inputs = setup: {
-                    var roots = core.runtime.ExactValueRoots(4){};
+                    var roots = core.runtime.ExactValueRoots(5){};
                     try roots.activate(rt);
                     defer roots.deactivate();
                     const callable = try roots.ref(0);
                     const first = try roots.ref(1);
                     const later = try roots.ref(2);
                     const date = try roots.ref(3);
+                    const new_target = try roots.ref(4);
                     try callable.set(rt, try core.function.nativeFunction(ctx, "dateBoundaryCoercion", 0));
                     const entry = try rt.allocNativeEntry(.{ .target = core.NativeEntry.code(&Probe.thunk), .kind = .managed, .state = &probe });
                     core.Object.fromHeader((try callable.get(rt)).cycleMarkHeader().?).installNativeEntry(entry);
@@ -4270,17 +4272,21 @@ fn verifyDateCoercionRoots() !void {
                         try core.Object.fromHeader((try root.get(rt)).cycleMarkHeader().?).defineOwnProperty(rt, core.atom.ids.valueOf, core.Descriptor.data(try callable.get(rt), .all));
                     }
                     try date.set(rt, try zjs.exec.date_ops.construct(rt, &.{core.JSValue.int32(0)}));
-                    break :setup [_]core.JSValue{ try date.get(rt), try first.get(rt), try later.get(rt) };
+                    // `new.target.prototype` is read after the arguments are
+                    // converted; only new.target keeps it alive until then.
+                    try new_target.set(rt, (try core.Object.createPlainObject(rt, null)).value());
+                    try core.Object.fromHeader((try new_target.get(rt)).cycleMarkHeader().?).defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(try later.get(rt), .all));
+                    break :setup [_]core.JSValue{ try date.get(rt), try first.get(rt), try later.get(rt), try new_target.get(rt) };
                 };
                 const later_identity = try rt.registerWeakObjectIdentity(core.Object.fromHeader(inputs[2].cycleMarkHeader().?));
                 probe = .{ .receiver = inputs[0].cycleMarkHeader().?, .later_identity = later_identity, .check_receiver = mode < 4, .check_later = mode >= 2, .fail = fail };
                 const result = switch (mode) {
-                    0 => zjs.exec.date_ops.dateSetTime(ctx, null, global, inputs[0], inputs[1..], null, null),
-                    1 => zjs.exec.date_ops.dateSetYear(ctx, null, global, inputs[0], inputs[1..], null, null),
-                    2 => zjs.exec.date_ops.dateCapturedSetterCall(ctx, null, global, inputs[0], .set_hours, inputs[1..], null, null),
-                    3 => zjs.exec.builtin_dispatch.callInternalRecord(ctx, null, global, &.{}, null, inputs[0], .{ .domain = .date, .id = @intFromEnum(zjs.exec.date_ops.PrototypeMethod.set_utc_hours) }, inputs[1..], null, null),
-                    4 => zjs.exec.date_ops.dateStaticCall(ctx, null, global, core.JSValue.undefinedValue(), .utc, inputs[1..], null, null),
-                    else => optionalValueResult(zjs.exec.date_ops.dateConstructWithPrototype(ctx, null, global, core.Object.fromHeader(inputs[2].cycleMarkHeader().?), inputs[1..@as(usize, if (mode == 5) 2 else 3)])),
+                    0 => zjs.exec.date_ops.dateSetTime(ctx, null, global, inputs[0], inputs[1..3]),
+                    1 => zjs.exec.date_ops.dateSetYear(ctx, null, global, inputs[0], inputs[1..3]),
+                    2 => zjs.exec.date_ops.dateCapturedSetterCall(ctx, null, global, inputs[0], .set_hours, inputs[1..3]),
+                    3 => zjs.exec.builtin_dispatch.callInternalRecord(ctx, null, global, &.{}, null, inputs[0], .{ .domain = .date, .id = @intFromEnum(zjs.exec.date_ops.PrototypeMethod.set_utc_hours) }, inputs[1..3], null, null),
+                    4 => optionalValueResult(zjs.exec.date_ops.dateUtcCall(ctx, null, global, inputs[1..3])),
+                    else => optionalValueResult(zjs.exec.call_runtime.constructValueOrBytecodeWithNewTarget(ctx, null, global, try global.getProperty(try rt.internAtom("Date")), inputs[1..@as(usize, if (mode == 5) 2 else 3)], null, null, inputs[3])),
                 };
                 try require(!probe.lost);
                 if (fail) {
@@ -4293,7 +4299,7 @@ fn verifyDateCoercionRoots() !void {
                     const date = core.Object.fromHeader((try result).?.cycleMarkHeader().?);
                     try require(date.getPrototype() == rt.liveObjectFromWeakIdentity(later_identity));
                 } else try require((try result).?.isNumber());
-                if (nursery and (mode == 2 or mode >= 5)) {
+                if (nursery and mode == 2) {
                     // The second argument is not part of the first callback's
                     // invocation. Only the setter's mutable snapshot roots it.
                     const moved = rt.liveObjectFromWeakIdentity(later_identity).?;
@@ -4326,7 +4332,7 @@ fn verifyDateCallbackChains() !void {
                 self.stale = true;
                 return error.DateCallbackReceiverStale;
             }
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const current = rt.liveObjectFromWeakIdentity(self.receiver_id) orelse {
                 self.lost = true;
                 return error.DateCallbackReceiverLost;
@@ -4415,8 +4421,11 @@ fn verifyDateCallbackChains() !void {
                     break :setup [_]core.JSValue{ try receiver.get(rt), try hint.get(rt) };
                 };
                 const result = switch (mode) {
-                    0 => zjs.exec.date_ops.dateToJsonCall(ctx, null, global, inputs[0], &.{}, null, null),
-                    4, 5, 7 => optionalValueResult(zjs.exec.date_ops.dateConstructWithPrototype(ctx, null, global, null, inputs[0..1])),
+                    0 => optionalValueResult(zjs.exec.date_ops.dateToJsonCall(ctx, null, global, inputs[0], null, null)),
+                    4, 5, 7 => blk: {
+                        const date_constructor = try global.getProperty(try rt.internAtom("Date"));
+                        break :blk optionalValueResult(zjs.exec.call_runtime.constructValueOrBytecodeWithNewTarget(ctx, null, global, date_constructor, inputs[0..1], null, null, date_constructor));
+                    },
                     6 => optionalValueResult(zjs.exec.value_ops.toPrimitiveForNumber(ctx, null, global, inputs[0])),
                     else => optionalValueResult(zjs.exec.date_ops.dateToPrimitiveCall(ctx, null, global, inputs[0], inputs[1..], null, null)),
                 };
@@ -4440,7 +4449,10 @@ fn verifyDateCallbackChains() !void {
                 else
                     (if (fail_stage == 1) 1 else if (fail_stage == 2) 12 else 123);
                 if (probe.sequence != expected) return error.DateCallbackOrderMismatch;
-                if (nursery and !probe.moved) return error.DateCallbackDidNotMove;
+                // Construction roots its argument window as borrowed, which a
+                // moving collection pins, so only the method calls move it.
+                const constructs = mode == 4 or mode == 5 or mode == 7;
+                if (nursery and !constructs and !probe.moved) return error.DateCallbackDidNotMove;
                 try require(rt.active_value_roots == null);
             }
         }
@@ -4545,15 +4557,15 @@ fn verifyEvacuationRollback() !void {
             if (collectReadonlyRootFixture(rt, null, minor)) |_| return error.ExpectedTraceFailure else |err| {
                 try require(err == failure);
             }
-            try require(probe.saw_move and !rt.roots.isTracing() and !rt.gc_running);
+            try require(probe.saw_move and !rt.roots.isTracing() and !rt.gc.hot.collecting);
             try require(rt.gc.heap_budget.bytes == heap_before);
             try require(probe.object_alias == first_object);
             try require((try first.get(rt)).bits == before[0].bits);
             try require((try second.get(rt)).bits == before[1].bits);
             try require(weak.get().bits == before[0].bits);
             try require(weak.slot.?.identity.? == weak_identity);
-            try require(rt.weak_object_ids.count() == 1 and rt.weak_id_objects.count() == 1);
-            try require(rt.weak_object_ids.get(@intFromPtr(first_object.gcHeader())).? == weak_identity >> 1);
+            try require(rt.weak.object_ids.count() == 1 and rt.weak.id_objects.count() == 1);
+            try require(rt.weak.object_ids.get(@intFromPtr(first_object.gcHeader())).? == weak_identity >> 1);
             for (probe.aliases, before) |restored, previous| {
                 try require(restored.bits == previous.bits);
                 try require(!core.gc.headerForwarded(restored.cycleMarkHeader().?));
@@ -4562,12 +4574,12 @@ fn verifyEvacuationRollback() !void {
             try require((try second_object.getProperty(core.atom.ids.value)).bits == before[0].bits);
             try rt.gc.verifyHeapAccounting(rt);
             // A failed retirement requires a major before minors resume.
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const moved_first = try first.get(rt);
             const moved_second = try second.get(rt);
             try require(weak.get().bits == moved_first.bits);
             try require(weak.slot.?.identity.? == weak_identity);
-            try require(!rt.weak_object_ids.contains(@intFromPtr(first_object.gcHeader())));
+            try require(!rt.weak.object_ids.contains(@intFromPtr(first_object.gcHeader())));
             try require(moved_first.bits != before[0].bits and moved_second.bits != before[1].bits);
             try require(probe.aliases[0].bits == moved_first.bits and probe.aliases[1].bits == moved_second.bits);
             try require(probe.object_alias == core.Object.fromHeader(moved_first.cycleMarkHeader().?));
@@ -4641,13 +4653,13 @@ fn verifyWeakEphemeronRelocation() !void {
                     if (strong_value) try require((try value_root.get(rt)).bits == entries[0].value.bits);
                     try key_root.set(rt, core.JSValue.undefinedValue());
                     try value_root.set(rt, core.JSValue.undefinedValue());
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     try require(table.weakCollectionEntries().len == 0);
                     try require(!weak_middle.isAlive() and !weak_value.isAlive());
                     try require(weak_middle.get().is(.undefined_value) and weak_value.get().is(.undefined_value));
-                    try require(rt.weak_object_ids.count() == 0 and rt.weak_id_objects.count() == 0);
+                    try require(rt.weak.object_ids.count() == 0 and rt.weak.id_objects.count() == 0);
                     try require(callback.calls == 1);
-                    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                    _ = try rt.collectFull(null, .declared_only);
                     try require(callback.calls == 1);
                     try rt.gc.verifyHeapAccounting(rt);
                 }
@@ -4669,7 +4681,7 @@ fn verifyFunctionHomeObject() !void {
             const closure = try core.Object.create(rt, core.class.ids.bytecode_function, null);
             try (try roots.ref(0)).set(rt, closure.value());
             if (auxiliary) _ = try closure.functionSourceSlot(rt);
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(!closure.gcHeader().meta().flags.young);
             var previous: ?*core.gc.Header = null;
             for (0..2) |_| {
@@ -4682,13 +4694,13 @@ fn verifyFunctionHomeObject() !void {
                 const stored = closure.functionHomeObject().?;
                 try require(rt.gc.containsHeader(stored.gcHeader()));
                 try require(nursery == (@intFromPtr(stored) != before));
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 if (previous) |old| try require(!rt.gc.containsHeader(old));
                 try require(closure.functionHomeObject() == stored);
                 previous = stored.gcHeader();
             }
             try closure.setFunctionHomeObject(rt, null);
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(closure.functionHomeObject() == null);
             try require(!rt.gc.containsHeader(previous.?));
         }
@@ -4733,10 +4745,10 @@ fn verifyAccessorSlots() !void {
             try require((moved_getter.bits == moved_setter.bits) == shared);
             try require(rt.gc.containsHeader(moved_getter.cycleMarkHeader().?));
             try require(rt.gc.containsHeader(moved_setter.cycleMarkHeader().?));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(object.asAccessorAt(index).?.getterValue().bits == moved_getter.bits);
             try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             try require(!rt.gc.containsHeader(moved_getter.cycleMarkHeader().?));
             try require(!rt.gc.containsHeader(moved_setter.cycleMarkHeader().?));
         }
@@ -4781,7 +4793,7 @@ fn collectReadonlyRootFixture(rt: *core.JSRuntime, roots: ?*const core.runtime.V
     if (minor) {
         _ = try core.gc_trace_stw.collectMinor(rt, roots, .declared_only);
     } else {
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(roots, .declared_only);
+        _ = try rt.collectFull(roots, .declared_only);
     }
 }
 
@@ -4826,7 +4838,7 @@ fn verifyReadonlyNurseryRoots() !void {
                 if (result) |_| return error.ExpectedTraceFailure else |err| {
                     if (err != error.OutOfMemory) return err;
                 }
-                try require(!rt.gc_running and !rt.roots.isTracing());
+                try require(!rt.gc.hot.collecting and !rt.roots.isTracing());
                 try require(!core.gc.headerForwarded(object.gcHeader()));
                 try require((try writable.get(rt)).bits == borrowed[0].bits);
                 provider_state.fail = false;
@@ -4836,7 +4848,7 @@ fn verifyReadonlyNurseryRoots() !void {
             try require(rt.gc.containsHeader(object.gcHeader()));
             try require(!core.gc.headerForwarded(object.gcHeader()));
             // Retention also has to survive a later full collection.
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(extra_roots, .declared_only);
+            _ = try rt.collectFull(extra_roots, .declared_only);
             try require((try writable.get(rt)).bits == borrowed[0].bits);
             try require(rt.gc.containsHeader(object.gcHeader()));
         }
@@ -4858,7 +4870,9 @@ fn verifyRegExpLegacyStaticsRoots(rt: *core.JSRuntime) !void {
     @memcpy(bytes[long_len + 2 ..], "abCDRR");
     const unset = std.math.maxInt(usize);
     const captures = [_]usize{ 2, long_len + 2, long_len + 2, long_len + 4 } ++ [_]usize{unset} ** 14 ++ [_]usize{ long_len + 4, long_len + 6, unset, unset };
-    const found = zjs.exec.string_ops.RegExpMatch{ .index = 2, .len = long_len + 4, .capture_slots = &captures, .capture_count = 11 };
+    // Ten groups: the last one ("CD") lies beyond $1..$9, so lastParen
+    // needs its own rooted slot.
+    const found = zjs.exec.string_ops.RegExpMatch{ .index = 2, .len = long_len + 4, .capture_slots = &captures, .capture_count = 10 };
     for ([_]bool{ false, true }) |nursery| {
         rt.gc.nursery.enabled = nursery;
         _ = try ctx.eval("/(old)/.exec('old');", .{});
@@ -4885,7 +4899,7 @@ fn verifyRegExpLegacyStaticsRoots(rt: *core.JSRuntime) !void {
         try zjs.exec.string_ops.updateRegExpLegacyStaticsForMatch(rt, global, source, &found, bytes.len);
         try require(rt.gc.collection_epoch > retry_epoch);
         try require(rt.active_value_roots == before);
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         try require(!legacy.lazy_no_capture_match);
         try require(core.string.stringValueLenUnchecked(legacy.last_match.?) == long_len + 4);
         try require(core.string.stringValueLenUnchecked(legacy.captures[0].?) == long_len);
@@ -4939,7 +4953,7 @@ fn verifyRegExpCaptureResultRoots(rt: *core.JSRuntime) !void {
         defer retained.deactivate();
         const result = try retained.ref(0);
         try result.set(rt, array.value());
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
 
         // The incoming string has no caller root during full construction.
         const input = (try core.string.String.createUtf16(rt, &.{ 'x', 'x', 'a', 0x100, 'y', 'y' })).value();
@@ -4950,7 +4964,7 @@ fn verifyRegExpCaptureResultRoots(rt: *core.JSRuntime) !void {
         try result.set(rt, try zjs.exec.string_ops.createRegExpMatchArrayFromValue(rt, global, input, &found, 6, true));
         try require(rt.gc.collection_epoch > build_epoch);
         try require(rt.gc.pins.count() == pins);
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         const letter = try rt.internAtom("letter");
         const output = core.value_semantics.objectFromValue(try result.get(rt)).?;
         try require(output.arrayLength() == 3);
@@ -4998,7 +5012,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
             rt.setMemoryLimit(0);
             defer rt.setMemoryLimit(null);
             if (mode == 0) {
-                if (zjs.exec.regexp_ops.regExpTestFastNoResult(ctx.core, core.value_semantics.objectFromValue(inputs[0]).?, inputs[1])) |_| return error.ExpectedRegExpInputOom else |err| {
+                if (zjs.exec.regexp_ops.regExpTestFastNoResult(ctx.core, global, core.value_semantics.objectFromValue(inputs[0]).?, inputs[1])) |_| return error.ExpectedRegExpInputOom else |err| {
                     if (err != error.OutOfMemory) return err;
                 }
             } else {
@@ -5016,7 +5030,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
             rt.gc.heap_budget.gc_threshold = 0;
             const retry_epoch = rt.gc.collection_epoch;
             const result = if (mode == 0)
-                (try zjs.exec.regexp_ops.regExpTestMethod(ctx.core, null, global, inputs[0], &.{inputs[1]}, null, null)).?
+                try zjs.exec.regexp_ops.regExpTestMethod(ctx.core, null, global, inputs[0], &.{inputs[1]}, null, null)
             else
                 try zjs.exec.regexp_ops.regExpExecMethod(ctx.core, null, global, inputs[0], &.{inputs[1]}, null, null);
             try require(rt.gc.collection_epoch > retry_epoch);
@@ -5031,7 +5045,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 const letter = try rt.internAtom("letter");
                 const array = core.value_semantics.objectFromValue(try kept.get(rt)).?;
                 try require(array.arrayLength() == 3);
@@ -5080,7 +5094,7 @@ fn verifyRegExpProgramCommit() !void {
                 try source.set(rt, (try core.string.String.createAscii(rt, "a")).value());
                 try right.set(rt, (try core.string.String.createUtf16(rt, &.{0x100})).value());
                 try source.set(rt, (try core.string.String.createRope(rt, try source.get(rt), try right.get(rt))).value());
-                _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+                _ = try rt.collectFull(null, .declared_only);
                 base = rt.gc.heap_budget.bytes;
                 break :inputs [_]core.JSValue{ try owner.get(rt), try source.get(rt) };
             };
@@ -5113,7 +5127,7 @@ fn verifyRegExpProgramCommit() !void {
             defer retained.deactivate();
             const owner = try retained.ref(0);
             try owner.set(rt, inputs[0]);
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
             const published = core.value_semantics.objectFromValue(try owner.get(rt)).?;
             try require(core.string.stringValueLenUnchecked(published.regexpSource().?) == 2);
             try require(core.string.stringValueCodeUnitAtUnchecked(published.regexpSource().?, 1) == 0x100);
@@ -5245,7 +5259,7 @@ fn verifyRegExpSourcePublication(rt: *core.JSRuntime) !void {
     defer roots.deactivate();
     const output = try roots.ref(0);
     try output.set(rt, clone);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     const object = core.value_semantics.objectFromValue(try output.get(rt)).?;
     try require(core.string.asFlat(object.regexpSource().?).?.eqlBytes("ab"));
     try require(object.regexpCompiledBytecode().len != 0);
@@ -5312,19 +5326,19 @@ fn verifyExceptionNameReads(rt: *core.JSRuntime) !void {
             try core.value_semantics.objectFromValue(try owner.get(rt)).?.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(try source.get(rt), .all));
             if (inherited) try owner.set(rt, (try core.Object.createPlainObject(rt, core.value_semantics.objectFromValue(try owner.get(rt)).?)).value());
             _ = ctx.throwValue(try owner.get(rt));
-            const pending = rt.current_exception;
+            const pending = rt.exception.value;
             const epoch = rt.gc.collection_epoch;
             const heap_bytes = rt.gc.heap_budget.bytes;
-            const native_bytes = rt.diagnostics.allocations.allocated_bytes;
+            const native_bytes = rt.allocation_diagnostics.allocated_bytes;
             rt.setMemoryLimit(0);
             defer rt.setMemoryLimit(null);
             try require(zjs.exec.exception_ops.pendingExceptionMatchesError(ctx, err));
             try require(!zjs.exec.exception_ops.pendingExceptionMatchesError(ctx, error.SyntaxError));
             try require(zjs.exec.exception_ops.pendingExceptionMatchesError(ctx, error.JSException));
-            try require(rt.current_exception.same(pending));
+            try require(rt.exception.value.same(pending));
             try require(rt.gc.collection_epoch == epoch);
             try require(rt.gc.heap_budget.bytes == heap_bytes);
-            try require(rt.diagnostics.allocations.allocated_bytes == native_bytes);
+            try require(rt.allocation_diagnostics.allocated_bytes == native_bytes);
             try require(!(try source.get(rt)).ropeBody().?.isLinearized());
         }
     }
@@ -5376,7 +5390,7 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     rt.gc.nursery.enabled = false;
     defer rt.gc.nursery.enabled = nursery_enabled;
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     const count = rt.gc.liveCountKind(.object);
     const epoch = rt.gc.collection_epoch;
     const before = rt.active_value_roots;
@@ -5392,7 +5406,7 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
     try require(rt.active_value_roots == before);
     try require(rt.gc.liveCountKind(.object) == count + 1);
     rt.setMemoryLimit(null);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(rt.gc.liveCountKind(.object) == count);
     {
         const threshold = rt.gc.heap_budget.gc_threshold;
@@ -5419,7 +5433,7 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
         defer roots.deactivate();
         const function = try roots.ref(0);
         try function.set(rt, created);
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         const object = core.value_semantics.objectFromValue(try function.get(rt)).?;
         try require(object.class_id == core.class.ids.c_function);
         try require(object.getPrototype() == ctx.core.cached_function_proto);
@@ -5554,7 +5568,7 @@ fn verifyStringCaseRoots(rt: *core.JSRuntime) !void {
             const epoch = rt.gc.collection_epoch;
             const before = rt.active_value_roots;
             const header = input.cycleMarkHeader().?;
-            const result = try zjs.exec.string_ops.methodCall(rt, input, method, &.{});
+            const result = try zjs.exec.string_ops.unicodeCaseString(rt, input, method == 3);
             const expected: []const u16 = if (mode == 2)
                 (if (method == 2) &.{ 'A', 0x3a3, ' ', 'S', 'S', 0xd800 } else &.{ 'a', 0x3c2, ' ', 0xdf, 0xd800 })
             else if (method == 2) &.{ 'A', 'B', '-', 'Z' } else &.{ 'a', 'b', '-', 'z' };
@@ -5590,9 +5604,9 @@ fn verifyStringSplitRoots(rt: *core.JSRuntime) !void {
             try separator.set(rt, (try core.string.String.createRope(rt, try left.get(rt), try right.get(rt))).value());
             if (mode == 1) try separator.set(rt, (try rt.emptyString()).value());
             if (mode == 2) try separator.set(rt, core.JSValue.undefinedValue());
-            // Exercise the native-text fallback as well as the rope path.
+            // Exercise a flat source as well as the rope path.
             if (mode == 4) {
-                try source.set(rt, core.JSValue.int32(121));
+                try source.set(rt, (try core.string.String.createAscii(rt, "121")).value());
                 try separator.set(rt, (try core.string.String.createAscii(rt, "2")).value());
             }
             break :input [_]core.JSValue{ try source.get(rt), try separator.get(rt) };
@@ -5769,7 +5783,7 @@ fn verifyStableHeaderRoot(rt: *core.JSRuntime) !void {
     roots.activate(rt);
     defer roots.deactivate(rt);
     try require(rt.active_value_roots == &roots);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try require(rt.gc.containsHeader(&shape.header));
 }
 
@@ -5849,14 +5863,14 @@ fn verifyRegExpMatchAll(rt: *core.JSRuntime) !void {
     rt.gc.scheduler.host_quiescent = true;
     rt.gc.heap_budget.gc_threshold = 0;
     const epoch = rt.gc.collection_epoch;
-    const result = (try zjs.exec.string_ops.regExpSymbolMatchAll(ctx.core, null, global, rx, &arguments, null, null)) orelse return error.ExpectedMatchAllIterator;
+    const result = try zjs.exec.string_ops.regExpSymbolMatchAll(ctx.core, null, global, rx, &arguments, null, null);
     try require(rt.gc.collection_epoch > epoch);
     var roots = core.runtime.ExactValueRoots(1){};
     try roots.activate(rt);
     defer roots.deactivate();
     const published = try roots.ref(0);
     try published.set(rt, result);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     const iterator = core.value_semantics.objectFromValue(try published.get(rt)).?;
     try require(iterator.class_id == core.class.ids.regexp_string_iterator);
     try require(iterator.iteratorTargetSlot().* != null);
@@ -5903,7 +5917,7 @@ fn verifyRegExpSplitEntry(rt: *core.JSRuntime) !void {
     rt.gc.scheduler.host_quiescent = true;
     rt.gc.heap_budget.gc_threshold = 0;
     const epoch = rt.gc.collection_epoch;
-    const result = (try zjs.exec.string_ops.regExpSymbolSplit(ctx.core, null, global, rx, &arguments, null, null)) orelse return error.ExpectedSplitResult;
+    const result = try zjs.exec.string_ops.regExpSymbolSplit(ctx.core, null, global, rx, &arguments, null, null);
     try require(rt.gc.collection_epoch > epoch);
     const array = core.value_semantics.objectFromValue(result).?;
     const part = try array.getProperty(core.Atom.taggedInt(0));

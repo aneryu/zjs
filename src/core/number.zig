@@ -10,6 +10,25 @@ const core = @import("root.zig");
 const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
 
+extern "c" fn pow(x: f64, y: f64) f64;
+extern "c" fn hypot(x: f64, y: f64) f64;
+
+/// Number::exponentiate (§6.1.6.1.3). `std.math.pow` is several ulp off for
+/// ordinary inputs (`10 ** 308`); libm's is within an ulp. The one IEEE
+/// difference: ±1 raised to ±Infinity is NaN in ECMAScript, 1 in C.
+pub fn exponentiate(base: f64, exponent: f64) f64 {
+    if (!std.math.isFinite(exponent) and @abs(base) == 1) return std.math.nan(f64);
+    // x ** 2 is one correctly rounded multiplication; the linked libm's pow
+    // can round the halfway case of a large square away from even.
+    if (exponent == 2) return base * base;
+    return pow(base, exponent);
+}
+
+/// libm `hypot` (correctly rounded where `std.math.hypot` is not).
+pub fn hypot2(x: f64, y: f64) f64 {
+    return hypot(x, y);
+}
+
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
 /// narrow subset used by transitional `parse_int` bytecode.
 pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?core.JSValue) !f64 {

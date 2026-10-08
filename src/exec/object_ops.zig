@@ -1,14 +1,13 @@
 //! Execution-layer object, property, prototype, proxy, and function-object algorithms.
 //!
-//! Object/value arguments are borrowed unless a helper explicitly takes or
-//! duplicates them; returned JSValues are owned, and persistent object slots
-//! retain their own reference. The alias wall is a compatibility seam across
-//! extracted exec modules, preserving call sites and ownership boundaries. Keep
-//! the measured `ctx`/`output`/`global`/caller-function/caller-frame tuple
+//! Values are traced by the GC, not reference counted: arguments and results
+//! need no ownership transfer, but a value held only in a native local must be
+//! rooted across anything that can allocate. Keep the
+//! `ctx`/`output`/`global`/caller-function/caller-frame tuple
 //! explicit: the threaded `global` is cross-realm authority, not necessarily
 //! `ctx.globalObject()`. Benchmark-hot object/property arms must not be shared
 //! with cold generic paths. Core mappings include QuickJS primitive-prototype,
-//! closure, and function-object paths at quickjs.c.
+//! closure, and function-object paths.
 
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
@@ -16,31 +15,26 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const call_mod = @import("call.zig");
-const call = call_mod;
+const call = @import("call.zig");
 const construct_mod = @import("construct.zig");
 const date_ops = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
+const reflect_ops = @import("reflect_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const value_ops = @import("value_ops.zig");
-const vm_property_globals = @import("vm_property.zig");
+const vm_property = @import("vm_property.zig");
 const stack_mod = @import("stack.zig");
 const Vm = @import("tailcall_dispatch.zig").Vm;
-const HostError = exceptions.HostError;
-const exceptions = @import("exception_ops.zig");
+const HostError = exception_ops.HostError;
 const exception_ops = @import("exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const module_mod = @import("module.zig");
-const coercion_ops = @import("value_ops.zig");
-const error_stack_ops = @import("exception_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const property_direct = @import("property_ops.zig");
 const regexp_fastpath = @import("regexp_ops.zig");
-const slot_ops = @import("property_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 // --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
@@ -52,19 +46,15 @@ const RegExpMatch = string_ops.RegExpMatch;
 const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
 const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
-const appendOwnedAtom = core.atom.appendOwnedAtom;
 const arrayLengthAssignmentValue = array_ops.arrayLengthAssignmentValue;
-const arrayLengthDefineValue = array_ops.arrayLengthDefineValue;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const arrayPrototypeValuesFromGlobal = array_ops.arrayPrototypeValuesFromGlobal;
 const asyncFunctionPrototypeFromGlobal = promise_ops.asyncFunctionPrototypeFromGlobal;
-const asyncGeneratorFunctionPrototypeFromGlobal = promise_ops.asyncGeneratorFunctionPrototypeFromGlobal;
 const asyncGeneratorPrototypeFromGlobal = promise_ops.asyncGeneratorPrototypeFromGlobal;
-const atomListContains = core.atom.atomListContains;
 const callAccessorSetter = call_runtime.callAccessorSetter;
-const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
+const callSiteFunctionNameValue = exception_ops.callSiteFunctionNameValue;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
-const captureErrorStack = error_stack_ops.captureErrorStack;
+const captureErrorStack = exception_ops.captureErrorStack;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
 const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
 const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
@@ -81,7 +71,6 @@ const getStringIndexValue = string_ops.getStringIndexValue;
 const importMetaUrlValue = module_mod.importMetaUrlValue;
 const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
-const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const lengthIndexValue = array_ops.lengthIndexValue;
 const mappedArgumentsValue = call_runtime.mappedArgumentsValue;
 const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
@@ -92,7 +81,6 @@ const objectEntryArrayValue = array_ops.objectEntryArrayValue;
 const regExpAutoInitBuiltinMatches = string_ops.regExpAutoInitBuiltinMatches;
 const regExpNativeBuiltinMatches = string_ops.regExpNativeBuiltinMatches;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
-const rejectModuleNamespaceSuperSet = promise_ops.rejectModuleNamespaceSuperSet;
 const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
 const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
 const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
@@ -103,18 +91,18 @@ const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const throwSetFailureTypeError = call_runtime.throwSetFailureTypeError;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
-const toLengthIndex = coercion_ops.toLengthIndex;
+const toLengthIndex = value_ops.toLengthIndex;
 const toPrimitiveForString = string_ops.toPrimitiveForString;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 const typedArrayCanonicalGet = array_ops.typedArrayCanonicalGet;
+const typedArrayCanonicalDelete = array_ops.typedArrayCanonicalDelete;
 const typedArrayCanonicalHas = array_ops.typedArrayCanonicalHas;
 const typedArrayCanonicalOwnDescriptor = array_ops.typedArrayCanonicalOwnDescriptor;
 const typedArrayCanonicalIndexExists = array_ops.typedArrayCanonicalIndexExists;
-const typedArrayCanonicalSet = array_ops.typedArrayCanonicalSet;
 const typedArrayDefineOwnPropertyVm = array_ops.typedArrayDefineOwnPropertyVm;
 const typedArrayOwnKeys = array_ops.typedArrayOwnKeys;
 const typedArrayPrototypeSet = array_ops.typedArrayPrototypeSet;
-const valueTruthy = coercion_ops.valueTruthy;
+const valueTruthy = value_ops.valueTruthy;
 
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     // Use the realm-cached `%Object.prototype%` (O(1) array index, like QuickJS's
@@ -129,7 +117,7 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
     if (rt.contextForGlobal(global)) |ctx| {
         if (ctx.classPrototypeObject(core.class.ids.object)) |prototype| return prototype;
     }
-    return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
+    return constructorPrototypeFromGlobalAtom(global, core.atom.ids.Object);
 }
 
 /// Global-binding walk of `global[name].prototype`. Result objects that spec
@@ -138,22 +126,18 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
 /// Kept for embedder fallbacks where no class table has been published.
 pub fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object, constructor_name: []const u8) ?*core.Object {
     const ctor_key = rt.internAtom(constructor_name) catch return null;
-    return constructorPrototypeFromGlobalAtom(rt, global, ctor_key);
+    return constructorPrototypeFromGlobalAtom(global, ctor_key);
 }
 
-pub fn constructorPrototypeFromGlobalAtom(rt: *core.JSRuntime, global: *core.Object, constructor_atom: core.Atom) ?*core.Object {
-    // Borrowed reads only, so no runtime is needed; `rt` stays for uniformity
-    // with the rest of the `*PrototypeFromGlobal*` family, whose callers hold
-    // it anyway.
-    _ = rt;
+pub fn constructorPrototypeFromGlobalAtom(global: *core.Object, constructor_atom: core.Atom) ?*core.Object {
     if (global.getOwnDataObjectBorrowed(constructor_atom)) |constructor| {
         if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     }
     return null;
 }
 
-pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Function);
+pub fn functionPrototypeFromGlobal(global: *core.Object) ?*core.Object {
+    return constructorPrototypeFromGlobalAtom(global, core.atom.ids.Function);
 }
 
 pub fn cachedRealmObject(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
@@ -174,7 +158,7 @@ pub fn primitivePrototypeFromRealmOrGlobal(
     // Embedder fallback when the realm slot is unpublished. Standard boxing
     // uses the cached intrinsic, so replacing `globalThis.String` is not
     // observable here.
-    return constructorPrototypeFromGlobalAtom(rt, global, constructor_atom);
+    return constructorPrototypeFromGlobalAtom(global, constructor_atom);
 }
 
 fn primitivePrototypeForAccess(rt: *core.JSRuntime, global: *core.Object, primitive: core.JSValue) ?*core.Object {
@@ -239,49 +223,68 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Ob
     const next_atom = core.atom.ids.next;
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 1);
     const next_object = try property_ops.expectObject(next);
-    next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
+    next_object.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
     try next_object.addGeneratorNextFunction(rt);
     try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, .method));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.return_, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.throw, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
-    const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
+    const tag_atom = comptime core.atom.predefinedId("Symbol.toStringTag", .symbol).?;
     const tag = try value_ops.createStringValue(rt, "Generator");
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, .{ .configurable = true }));
 }
 
-pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
-    if (cachedRealmObject(rt, global, .generator_function_prototype)) |stored| return stored;
-    const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
+const GeneratorFunctionFamily = struct {
+    name: []const u8,
+    constructor_kind: core.host_function.NativeConstructorKind,
+    prototype_slot: core.object.RealmValueSlot,
+    constructor_slot: core.object.RealmValueSlot,
+};
+
+/// %GeneratorFunction.prototype% or %AsyncGeneratorFunction.prototype% and
+/// its constructor, created on first use. `instancePrototypeFromGlobal`
+/// returns the family's generator prototype, which becomes its `prototype`.
+fn generatorFunctionFamilyPrototype(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    comptime family: GeneratorFunctionFamily,
+    comptime instancePrototypeFromGlobal: anytype,
+) !*core.Object {
+    if (cachedRealmObject(rt, global, family.prototype_slot)) |stored| return stored;
+    const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(global));
     const object_value = object.value();
-    const constructor = try core.function.nativeFunctionForGlobal(rt, global, "GeneratorFunction", 1);
+    const constructor = try core.function.nativeFunctionForGlobal(rt, global, family.name, 1);
     const constructor_object = try property_ops.expectObject(constructor);
+    constructor_object.setNativeConstructorKind(family.constructor_kind);
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
     try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(object_value, .none));
     try object.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), .{ .configurable = true }));
-    try storeRealmValue(rt, global, .generator_function_constructor, constructor_object.value());
-    const generator_prototype = try generatorPrototypeFromGlobal(rt, global);
-    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(generator_prototype.value(), .{ .configurable = true }));
-    try generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, .{ .configurable = true }));
-    try defineToStringTag(rt, object, "GeneratorFunction");
-    try storeRealmValue(rt, global, .generator_function_prototype, object_value);
+    try storeRealmValue(rt, global, family.constructor_slot, constructor_object.value());
+    const instance_prototype = try instancePrototypeFromGlobal(rt, global);
+    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(instance_prototype.value(), .{ .configurable = true }));
+    try instance_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, .{ .configurable = true }));
+    try defineToStringTag(rt, object, family.name);
+    try storeRealmValue(rt, global, family.prototype_slot, object_value);
     return object;
 }
 
-// qjs js_closure_global_var: the capture waterfall for a
-// global reference is [global_var_obj lexical VARREF] -> [global_obj VARREF
-// property] -> [shared uninitialized_vars side-table cell], REGARDLESS of the
-// closure var's own lexical bit — a plain reference captures a pre-existing
-// global lexical's cell directly, and an undeclared name shares the parked cell
-// that a later declaration (js_closure_define_global_var) will reuse. The shared
-// table cell carries no per-capture flags; is_lexical/is_const are stamped only
-// at definition time (add_var_ref, 17210-17223).
-fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_bytecode.BytecodeClosureVar) !*core.VarRef {
-    const cell_value = try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name);
-    return core.VarRef.fromValue(cell_value) orelse {
-        return error.InvalidBytecode;
-    };
+pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+    return generatorFunctionFamilyPrototype(rt, global, .{
+        .name = "GeneratorFunction",
+        .constructor_kind = .generator_function,
+        .prototype_slot = .generator_function_prototype,
+        .constructor_slot = .generator_function_constructor,
+    }, generatorPrototypeFromGlobal);
+}
+
+pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+    return generatorFunctionFamilyPrototype(rt, global, .{
+        .name = "AsyncGeneratorFunction",
+        .constructor_kind = .async_generator_function,
+        .prototype_slot = .async_generator_function_prototype,
+        .constructor_slot = .async_generator_function_constructor,
+    }, promise_ops.asyncGeneratorPrototypeFromGlobal);
 }
 
 fn bytecodeFunctionClassId(fb: *const bytecode.FunctionBytecode) core.ClassId {
@@ -330,8 +333,8 @@ fn bytecodeFunctionPrototypeForRealm(
     if (realm.classPrototypeObject(class_id)) |prototype| return prototype;
     const global = realm.global orelse return error.InvalidBuiltinRegistry;
     const prototype = switch (kind) {
-        .normal => functionPrototypeFromGlobal(ctx.runtime, global) orelse return error.InvalidBuiltinRegistry,
-        .generator => (try generatorFunctionPrototypeFromGlobal(ctx.runtime, global)) orelse return error.InvalidBuiltinRegistry,
+        .normal => functionPrototypeFromGlobal(global) orelse return error.InvalidBuiltinRegistry,
+        .generator => try generatorFunctionPrototypeFromGlobal(ctx.runtime, global),
         .async => try asyncFunctionPrototypeFromGlobal(ctx.runtime, global),
         .async_generator => try asyncGeneratorFunctionPrototypeFromGlobal(ctx.runtime, global),
     };
@@ -357,10 +360,9 @@ pub const ClosureCaptureSource = union(enum) {
     custom: ClosureCellResolver,
 };
 
-fn ownedClosureCell(_: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
-    return core.VarRef.fromValue(owned) orelse {
-        return error.InvalidBytecode;
-    };
+/// The closure cell a value must be; anything else is malformed bytecode.
+pub fn closureCellFromValue(value: core.JSValue) !*core.VarRef {
+    return core.VarRef.fromValue(value) orelse error.InvalidBytecode;
 }
 
 /// Construct one root GLOBAL/GLOBAL_DECL cell exactly where qjs closure2 pass
@@ -374,7 +376,7 @@ pub fn createRootGlobalClosureCell(
     cv: bytecode.function_bytecode.BytecodeClosureVar,
 ) !*core.VarRef {
     switch (cv.closureType()) {
-        .global, .global_ref => return ownedClosureCell(ctx.runtime, try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name)),
+        .global, .global_ref => return closureCellFromValue(try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name)),
         .global_decl => {},
         else => return error.InvalidBytecode,
     }
@@ -389,7 +391,7 @@ pub fn createRootGlobalClosureCell(
             fb.isDirectOrIndirectEval(),
             cv.varKind() == .global_function_decl,
         )) orelse try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name);
-    return ownedClosureCell(ctx.runtime, cell_value);
+    return closureCellFromValue(cell_value);
 }
 
 /// One qjs js_closure2 closure-type arm (qjs:17297-17331). This is only the
@@ -407,15 +409,19 @@ inline fn resolveNestedClosureCell(
         // production bounds return — finalize sized the windows.
         .local => try frame.captureLocal(ctx.runtime, cv.var_idx),
         .arg => try frame.captureArg(ctx.runtime, cv.var_idx),
-        .ref => blk: {
+        .ref, .global_ref => blk: {
             std.debug.assert(cv.var_idx < frame.var_refs.len);
             break :blk frame.var_refs[cv.var_idx];
         },
-        .global_ref => blk: {
-            std.debug.assert(cv.var_idx < frame.var_refs.len);
-            break :blk frame.var_refs[cv.var_idx];
-        },
-        .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
+        // qjs js_closure_global_var: the capture waterfall for a
+        // global reference is [global_var_obj lexical VARREF] -> [global_obj VARREF
+        // property] -> [shared uninitialized_vars side-table cell], REGARDLESS of the
+        // closure var's own lexical bit — a plain reference captures a pre-existing
+        // global lexical's cell directly, and an undeclared name shares the parked cell
+        // that a later declaration (js_closure_define_global_var) will reuse. The shared
+        // table cell carries no per-capture flags; is_lexical/is_const are stamped only
+        // at definition time (add_var_ref, 17210-17223).
+        .global, .global_decl => try closureCellFromValue(try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name)),
         .module_decl, .module_import => blk: {
             try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
             break :blk frame.var_refs[cv.var_idx];
@@ -452,13 +458,13 @@ fn attachFunctionCaptures(
             slots[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
         },
         .root_global => {
-            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            try vm_property.validateGlobalVarDeclarations(ctx, global, fb);
             for (closure_vars, 0..) |cv, idx| {
                 slots[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
             }
         },
         .custom => |resolver| {
-            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            try vm_property.validateGlobalVarDeclarations(ctx, global, fb);
             for (closure_vars, 0..) |cv, idx| {
                 slots[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
             }
@@ -584,11 +590,7 @@ fn installOrdinaryFunctionPrototype(
     else
         objectPrototypeFromGlobal(ctx.runtime, global);
     const prototype = try core.Object.create(ctx.runtime, core.class.ids.object, generator_prototype);
-    var prototype_raw_owned = true;
-    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, prototype.gcHeader());
-    const prototype_value = prototype.value();
-    prototype_raw_owned = false;
-    try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .{ .writable = true }));
+    try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype.value(), .{ .writable = true }));
 }
 
 pub fn createBytecodeFunctionObject(
@@ -685,6 +687,48 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
+/// Create an Error-class instance with the `message` and `cause` that every
+/// Error constructor installs (InstallErrorCause). The caller keeps
+/// `message` and `options` rooted.
+fn createErrorWithMessageAndCause(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    message: core.JSValue,
+    options: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !*core.Object {
+    const rt = ctx.runtime;
+    const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
+
+    // No own `name` property: it lives on the per-class prototype only, so
+    // patching `X.prototype.name` reflects on existing instances and a
+    // new.target-derived prototype supplies its own name.
+    if (!message.is(.undefined_value)) {
+        const message_string = try toStringForAnnexB(ctx, output, global, message, caller_function, caller_frame);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message_string, .method));
+    }
+
+    if (options.is(.object)) {
+        const cause_key = core.atom.ids.cause;
+        if (try hasValueProperty(ctx, output, global, try property_ops.expectObject(options), cause_key, caller_function, caller_frame)) {
+            var cause = try getValueProperty(ctx, output, global, options, cause_key, caller_function, caller_frame);
+            var root_values = [_]*core.JSValue{&cause};
+            var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
+            root_frame.activate(rt);
+            defer root_frame.deactivate(rt);
+            try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause, .method));
+        }
+    }
+    return instance;
+}
+
+fn argOrUndefined(args: []const core.JSValue, index: usize) core.JSValue {
+    return if (index < args.len) args[index] else core.JSValue.undefinedValue();
+}
+
 pub fn aggregateErrorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -695,48 +739,16 @@ pub fn aggregateErrorConstructWithPrototype(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    var cause_val = core.JSValue.undefinedValue();
-    var root_values = [_]*core.JSValue{
-        &cause_val,
-    };
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
     defer rooted_args_buffer.deinit();
     const rooted_args = rooted_args_buffer.values();
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
 
-    const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    const instance_value = instance.value();
-
-    // No own `name` property: it lives on the per-class prototype only
-    // (qjs js_error_constructor quickjs.c defines message/cause/errors).
-
-    if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value)) {
-        const message = try toStringForAnnexB(ctx, output, global, rooted_args[1], caller_function, caller_frame);
-        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
-    }
-
-    if (rooted_args.len >= 3 and rooted_args[2].is(.object)) {
-        const cause_key = core.atom.ids.cause;
-        const options = try property_ops.expectObject(rooted_args[2]);
-        if (try hasValueProperty(ctx, output, global, rooted_args[2], options, cause_key, caller_function, caller_frame)) {
-            cause_val = try getValueProperty(ctx, output, global, rooted_args[2], cause_key, caller_function, caller_frame);
-            try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_val, .method));
-            cause_val = core.JSValue.undefinedValue();
-        }
-    }
-
-    const errors_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
-    const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, errors_value, caller_function, caller_frame);
-    const errors_array_value = errors_array.value();
-    try instance.defineOwnProperty(rt, core.atom.ids.errors, core.Descriptor.data(errors_array_value, .method));
+    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, argOrUndefined(rooted_args, 1), argOrUndefined(rooted_args, 2), caller_function, caller_frame);
+    const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, argOrUndefined(rooted_args, 0), caller_function, caller_frame);
+    try instance.defineOwnProperty(rt, core.atom.ids.errors, core.Descriptor.data(errors_array.value(), .method));
 
     try captureErrorStack(ctx, global, instance);
-
-    return instance_value;
+    return instance.value();
 }
 
 test "aggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
@@ -808,15 +820,16 @@ pub fn suppressedErrorConstructWithPrototype(
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
 
-    if (rooted_args.len >= 3 and !rooted_args[2].is(.undefined_value)) {
-        const message = try toStringForAnnexB(ctx, output, global, rooted_args[2], caller_function, caller_frame);
+    const message_arg = argOrUndefined(rooted_args, 2);
+    if (!message_arg.is(.undefined_value)) {
+        const message = try toStringForAnnexB(ctx, output, global, message_arg, caller_function, caller_frame);
         try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
-    const error_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
+    const error_value = argOrUndefined(rooted_args, 0);
     try instance.defineOwnProperty(rt, core.atom.ids.error_, core.Descriptor.data(error_value, .method));
 
-    const suppressed_value = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
+    const suppressed_value = argOrUndefined(rooted_args, 1);
     try instance.defineOwnProperty(rt, core.atom.ids.suppressed, core.Descriptor.data(suppressed_value, .method));
 
     try captureErrorStack(ctx, global, instance);
@@ -865,13 +878,8 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
 
 pub fn disposableStackConstructWithPrototype(
     ctx: *core.JSContext,
-    global: *core.Object,
     prototype: ?*core.Object,
 ) !core.JSValue {
-    // `prototype` is already resolved from new.target by the caller, so the
-    // realm global is not consulted; the parameter keeps this in shape with the
-    // other `*ConstructWithPrototype` entry points the construct paths select.
-    _ = global;
     const stack = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, stack.gcHeader());
     return stack.value();
@@ -880,53 +888,18 @@ pub fn errorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    name: []const u8,
     prototype: ?*core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const rt = ctx.runtime;
-    var cause_val = core.JSValue.undefinedValue();
-    var root_values = [_]*core.JSValue{
-        &cause_val,
-    };
-    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, args);
     defer rooted_args_buffer.deinit();
     const rooted_args = rooted_args_buffer.values();
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
 
-    const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    const instance_value = instance.value();
-
-    // No own `name` property: it lives on the per-class prototype only, so
-    // patching `X.prototype.name` reflects on existing instances and a
-    // new.target-derived prototype supplies its own name (qjs
-    // js_error_constructor quickjs.c defines only message/cause).
-    _ = name;
-
-    if (rooted_args.len >= 1 and !rooted_args[0].is(.undefined_value)) {
-        const message = try toStringForAnnexB(ctx, output, global, rooted_args[0], caller_function, caller_frame);
-        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
-    }
-
-    if (rooted_args.len >= 2 and rooted_args[1].is(.object)) {
-        const cause_key = core.atom.ids.cause;
-        const options = try property_ops.expectObject(rooted_args[1]);
-        if (try hasValueProperty(ctx, output, global, rooted_args[1], options, cause_key, caller_function, caller_frame)) {
-            cause_val = try getValueProperty(ctx, output, global, rooted_args[1], cause_key, caller_function, caller_frame);
-            try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_val, .method));
-            cause_val = core.JSValue.undefinedValue();
-        }
-    }
-
+    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, argOrUndefined(rooted_args, 0), argOrUndefined(rooted_args, 1), caller_function, caller_frame);
     try captureErrorStack(ctx, global, instance);
-
-    return instance_value;
+    return instance.value();
 }
 
 test "errorConstructWithPrototype preserves direct symbol cause" {
@@ -951,7 +924,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     ctx.runtime.formatting_error_stack = true;
     defer ctx.runtime.formatting_error_stack = false;
 
-    const error_value = try errorConstructWithPrototype(ctx, null, global, "Error", null, &args, null, null);
+    const error_value = try errorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     const object = objectFromValue(error_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(cause_atom) != null);
@@ -972,7 +945,7 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
     const filename = if (entry.is_native)
         core.JSValue.nullValue()
     else
-        try value_ops.createStringValue(ctx.runtime, ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>");
+        try value_ops.createStringValueLossy(ctx.runtime, ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>");
     const function_name_value = try callSiteFunctionNameValue(ctx, entry);
     try object.setCallSiteMetadata(
         ctx.runtime,
@@ -999,7 +972,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     // GC reclaims the partial object after this scope leaves the root chain.
     values[0] = (try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global))).value();
 
-    const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
+    const methods = [_]struct { name: []const u8, id: core.function.EngineHelperMethod }{
         .{ .name = "getFunction", .id = .callsite_get_function },
         .{ .name = "getFunctionName", .id = .callsite_get_function_name },
         .{ .name = "getFileName", .id = .callsite_get_file_name },
@@ -1008,7 +981,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
         .{ .name = "isNative", .id = .callsite_is_native },
     };
     for (methods) |method| {
-        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, objectFromValue(values[0]).?, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
+        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, objectFromValue(values[0]).?, method.name, 0, core.function.nativeBuiltinId(.engine_helper, @intFromEnum(method.id)));
     }
     try defineToStringTag(rt, objectFromValue(values[0]).?, "CallSite");
 
@@ -1016,42 +989,40 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     return objectFromValue(values[0]).?;
 }
 
-pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
-    if (object.class_id != core.class.ids.regexp) return false;
-    if (object.hasOwnProperty(atom_id)) return false;
-    const proto = object.getPrototype() orelse return false;
-    if (proto.hasExoticMethods()) return false;
-    // Shape-hash probe of the prototype, mirroring qjs js_is_standard_regexp's
-    // find_property_regexp (not a linear property walk).
-    const property_index = proto.findProperty(atom_id) orelse return false;
-    const prop_flags = core.property.Flags.fromBits(proto.shapeProps()[property_index].flags);
-    if (prop_flags.isAccessor()) return false;
-    const entry = proto.propertyEntry(property_index).*;
-    return switch (proto.propKindAt(property_index)) {
+const regexp_exec_atom = core.atom.predefinedId("exec", .string).?;
+
+/// The RegExp.prototype property `atom_id` that `object` (a genuine RegExp
+/// without an own `atom_id`) inherits, found by a side-effect-free shape probe
+/// (qjs find_property_regexp).
+fn regExpInheritedProperty(object: *core.Object, atom_id: core.Atom) ?struct { holder: *core.Object, index: usize } {
+    if (object.class_id != core.class.ids.regexp) return null;
+    if (object.hasOwnProperty(atom_id)) return null;
+    const proto = object.getPrototype() orelse return null;
+    if (proto.hasExoticMethods()) return null;
+    const index = proto.findProperty(atom_id) orelse return null;
+    return .{ .holder = proto, .index = index };
+}
+
+/// `object.exec` is the built-in RegExp.prototype.exec (qjs js_is_standard_regexp).
+pub fn regExpExecIsDefault(object: *core.Object) bool {
+    const found = regExpInheritedProperty(object, regexp_exec_atom) orelse return false;
+    const entry = found.holder.propertyEntry(found.index).*;
+    const expected_id = @intFromEnum(method_ids.regexp.PrototypeMethod.exec);
+    return switch (found.holder.propKindAt(found.index)) {
         .data => regExpNativeBuiltinMatches(entry.slot.data, expected_id),
         .auto_init => regExpAutoInitBuiltinMatches(core.property.autoInit(entry.slot.auto_init).*, expected_id),
         .var_ref, .accessor => false,
     };
 }
 
-/// Side-effect-free check that a RegExp flag getter (`flags`/`global`/`unicode`/
-/// `sticky`) resolves to the default native accessor -- the accessor analog of
-/// `regExpPrototypeMethodIsDefault`, used to gate the standard-regexp fast
-/// paths exactly like QuickJS `check_regexp_getter`. Crucially this NEVER
-/// invokes the getter, so probing it has no observable effect (the failing
-/// `Symbol.replace/get-*-err` tests require the generic path to observe an
-/// overridden getter in spec order instead).
-pub fn regExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
-    if (object.class_id != core.class.ids.regexp) return false;
-    if (object.hasOwnProperty(atom_id)) return false;
-    const proto = object.getPrototype() orelse return false;
-    if (proto.hasExoticMethods()) return false;
-    // Shape-hash probe of the prototype, mirroring qjs check_regexp_getter's
-    // find_property_regexp (not a linear property walk).
-    const property_index = proto.findProperty(atom_id) orelse return false;
-    const entry = proto.propertyEntry(property_index).*;
-    return switch (proto.propKindAt(property_index)) {
-        .accessor => regExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
+/// A RegExp flag getter resolves to the built-in accessor (qjs
+/// check_regexp_getter). It NEVER invokes the getter, so probing has no
+/// observable effect; an overridden getter sends callers to the generic path.
+fn regExpGetterIsDefault(object: *core.Object, comptime getter: method_ids.regexp.AccessorMethod) bool {
+    const atom_id = comptime core.atom.predefinedId(@tagName(getter), .string).?;
+    const found = regExpInheritedProperty(object, atom_id) orelse return false;
+    return switch (found.holder.propKindAt(found.index)) {
+        .accessor => regExpNativeBuiltinMatches(found.holder.propertyEntry(found.index).*.slot.accessor.getterValue(), @intFromEnum(getter)),
         .auto_init, .data, .var_ref => false,
     };
 }
@@ -1061,25 +1032,20 @@ pub fn regExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Object, 
 /// and `flags`/`global`/`unicode` getters are all the pristine built-ins. Only
 /// then may a fast path read flags straight from the compiled bytecode and skip
 /// the observable property reads the spec otherwise mandates.
-pub fn regExpIsStandard(rt: *core.JSRuntime, object: *core.Object) bool {
+pub fn regExpIsStandard(object: *core.Object) bool {
     if (object.class_id != core.class.ids.regexp) return false;
     // QuickJS `js_is_standard_regexp` requires `JS_IsNumber(lastIndex)`: a
     // non-number lastIndex (string "1", {}, ...) must take the generic path so
     // ToLength coercion is observed (sticky/global use lastIndex directly).
-    if (object.regexpLastIndex()) |last_index| {
-        if (!last_index.isNumber()) return false;
-    } else return false;
-    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return false;
-    if (!regExpPrototypeMethodIsDefault(rt, object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) return false;
-    const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return false;
-    if (!regExpPrototypeGetterIsDefault(rt, object, flags_atom, @intFromEnum(method_ids.regexp.AccessorMethod.flags))) return false;
-    const global_atom = (comptime core.atom.predefinedId("global", .string)) orelse return false;
-    if (!regExpPrototypeGetterIsDefault(rt, object, global_atom, @intFromEnum(method_ids.regexp.AccessorMethod.global))) return false;
-    const unicode_atom = (comptime core.atom.predefinedId("unicode", .string)) orelse return false;
-    if (!regExpPrototypeGetterIsDefault(rt, object, unicode_atom, @intFromEnum(method_ids.regexp.AccessorMethod.unicode))) return false;
-    return true;
+    const last_index = object.regexpLastIndex() orelse return false;
+    if (!last_index.isNumber()) return false;
+    return regExpExecIsDefault(object) and
+        regExpGetterIsDefault(object, .flags) and
+        regExpGetterIsDefault(object, .global) and
+        regExpGetterIsDefault(object, .unicode);
 }
 
+/// Set(O, P, V, true) (§7.3.4) on an object.
 pub fn setValuePropertyStrict(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1090,37 +1056,19 @@ pub fn setValuePropertyStrict(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const object = try property_ops.expectObject(object_value);
-    if (object.proxyTarget() != null) {
-        const ok = try proxySetValueProperty(ctx, output, global, object_value, object, atom_id, value, caller_function, caller_frame);
-        if (!ok) return error.TypeError;
-        return;
-    }
-    const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-    if (core.object.isTypedArrayObject(object)) {
-        if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value_to_set)) return;
-    }
-    // Match QuickJS's first `find_own_property` branch: a writable own data
-    // property is updated before any prototype/accessor walk. This also covers
-    // synthesized own data slots such as RegExp `lastIndex`.
-    if (try object.setOwnWritableDataProperty(ctx.runtime, atom_id, value_to_set)) return;
-    const called_setter = callAccessorSetter(ctx, output, global, object_value, object, atom_id, value, caller_function, caller_frame) catch |err| switch (err) {
-        error.AccessorWithoutSetter => return error.TypeError,
-        else => return err,
-    };
-    if (called_setter) return;
-    object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
-        error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible => return error.TypeError,
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
+    _ = try property_ops.expectObject(object_value);
+    _ = try setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, true);
 }
 
-pub fn regExpPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?OwnedPrototype {
-    const constructor_value = regExpConstructorFromGlobal(rt, global) catch return null;
+/// The realm's `RegExp.prototype` (borrowed), or null when `RegExp` is not an
+/// object with a data `prototype`.
+pub fn regExpPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
+    const constructor_value = regExpConstructorFromGlobal(rt, global) catch |err| switch (err) {
+        error.TypeError => return null,
+        else => return err,
+    };
     const constructor = objectFromValue(constructor_value) orelse return null;
-    const prototype = constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
-    return OwnedPrototype.fromObject(prototype);
+    return constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
 pub fn datePrototypeMethod(
@@ -1134,12 +1082,12 @@ pub fn datePrototypeMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     switch (method) {
-        .to_json => if (try date_ops.dateToJsonCall(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
-        .set_year => if (try date_ops.dateSetYear(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
-        .set_time => if (try date_ops.dateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
+        .to_json => return date_ops.dateToJsonCall(ctx, output, global, this_value, caller_function, caller_frame),
+        .set_year => if (try date_ops.dateSetYear(ctx, output, global, this_value, args)) |value| return value,
+        .set_time => if (try date_ops.dateSetTime(ctx, output, global, this_value, args)) |value| return value,
         else => {},
     }
-    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method, args, caller_function, caller_frame)) |value| return value;
+    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method, args)) |value| return value;
     // Remaining (non-special-cased) prototype methods run the plain
     // `methodCallArgs` body, which lives in `exec/date_ops.zig`. Route it
     // through the record table's func-object-free arm so exec carries no
@@ -1179,7 +1127,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
-    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
+    const groups_atom = comptime core.atom.predefinedId("groups", .string).?;
     if (!found.has_named_captures) {
         try defineFreshNonIndexDataProperty(rt, objectFromValue(values[1]).?, groups_atom, core.JSValue.undefinedValue(), .all);
         return;
@@ -1299,13 +1247,13 @@ pub fn primitivePrototypeMethod(
         },
         5 => {
             if (class_tag != 4) return error.TypeError;
-            return symbolPrimitiveValue(rt, this_value) catch |err| switch (err) {
+            return symbolPrimitiveValue(this_value) catch |err| switch (err) {
                 error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
             };
         },
         else => {},
     }
-    const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
+    const primitive = primitivePrototypeThisValue(this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
     return switch (method_tag) {
         1 => if (class_tag == 1) blk: {
             // `Number.prototype.toString` body lives in `number_ops.zig`;
@@ -1320,14 +1268,15 @@ pub fn primitivePrototypeMethod(
         else
             value_ops.toStringValue(rt, primitive),
         2 => primitive,
+        // BigInt.prototype.toLocaleString: no Intl, so the base-10 form.
+        8 => if (class_tag == 3) bigIntPrototypeToString(ctx, output, global, primitive, &.{}, caller_function, caller_frame) else error.TypeError,
         else => error.TypeError,
     };
 }
 
-/// `Symbol(...)` called as a function (never a constructor). Mirrors the
-/// retired string-name dispatch branch in `call.zig`: coerce the optional
-/// description through the user-visible ToString path, then mint a fresh
-/// value symbol.
+/// `Symbol(...)` called as a function (never a constructor): coerce the
+/// optional description through the user-visible ToString path, then mint a
+/// fresh value symbol.
 fn symbolConstructorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1353,14 +1302,14 @@ fn symbolConstructorCall(
 /// `get Symbol.prototype.description`: unwraps a symbol primitive or a
 /// Symbol wrapper object and returns its description string (or undefined).
 fn symbolDescriptionValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
-    const primitive = try symbolPrimitiveValue(rt, this_value);
+    const primitive = try symbolPrimitiveValue(this_value);
     const body = primitive.asSymbolBody() orelse return error.TypeError;
     return body.descriptionValue(rt);
 }
 
 /// `Symbol.prototype[Symbol.toPrimitive]`: returns the wrapped symbol
 /// primitive; throws TypeError for any other receiver.
-fn symbolPrimitiveValue(_: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
+fn symbolPrimitiveValue(this_value: core.JSValue) !core.JSValue {
     if (this_value.is(.symbol)) return this_value;
     if (!this_value.is(.object)) return error.TypeError;
     const header = this_value.refHeader() orelse return error.TypeError;
@@ -1381,6 +1330,7 @@ pub fn throwPrimitivePrototypeTypeError(
 ) !core.JSValue {
     const error_global = objectRealmGlobal(function_object) orelse global;
     const message = switch (class_tag) {
+        1 => "not a number",
         2 => "not a boolean",
         3 => "not a bigint",
         4 => "not a symbol",
@@ -1392,63 +1342,14 @@ pub fn throwPrimitivePrototypeTypeError(
     return error.JSException;
 }
 
-pub fn getNumberPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Object) ?u32 {
-    // Pure decode of the function object's native-builtin id; `rt` is kept to
-    // match the sibling `get*PrototypeMethodId` probes the VM calls uniformly.
-    _ = rt;
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
-    if (native_ref.domain != .number) return null;
-    return switch (native_ref.id) {
-        @intFromEnum(method_ids.number.PrototypeMethod.to_string),
-        @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string),
-        @intFromEnum(method_ids.number.PrototypeMethod.to_fixed),
-        @intFromEnum(method_ids.number.PrototypeMethod.to_exponential),
-        @intFromEnum(method_ids.number.PrototypeMethod.to_precision),
-        => native_ref.id,
-        else => null,
-    };
-}
-
-pub fn numberPrototypeMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    // Route to the `.number` domain record (the method body lives in
-    // `number_ops.zig`, beside its coercion boundary). The
-    // record handler coerces the receiver/argument itself, so the raw
-    // `this_value`/`args` are forwarded unchanged. Accept the legacy small ids
-    // (1..5) used by historical fast-call sites as well as the
-    // `PrototypeMethod` enum ids baked into installed native functions.
-    const id: u32 = switch (method_id) {
-        1, @intFromEnum(method_ids.number.PrototypeMethod.to_string) => @intFromEnum(method_ids.number.PrototypeMethod.to_string),
-        2, @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string) => @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string),
-        3, @intFromEnum(method_ids.number.PrototypeMethod.to_fixed) => @intFromEnum(method_ids.number.PrototypeMethod.to_fixed),
-        4, @intFromEnum(method_ids.number.PrototypeMethod.to_exponential) => @intFromEnum(method_ids.number.PrototypeMethod.to_exponential),
-        5, @intFromEnum(method_ids.number.PrototypeMethod.to_precision) => @intFromEnum(method_ids.number.PrototypeMethod.to_precision),
-        else => return throwTypeErrorMessage(ctx, global, "not a number"),
-    };
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = id };
-    return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, args, caller_function, caller_frame)) orelse
-        throwTypeErrorMessage(ctx, global, "not a number");
-}
-
-pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, class_tag: i32) !core.JSValue {
-    // Tag checks and a borrowed payload read; `rt` is kept because both call
-    // sites (this file and number_ops) hand it through the same way.
-    _ = rt;
+pub fn primitivePrototypeThisValue(value: core.JSValue, class_tag: i32) !core.JSValue {
     if (class_tag == 1 and value.isNumber()) return value;
     if (class_tag == 2 and value.as(.boolean) != null) return value;
     if (class_tag == 3 and value.isBigInt()) return value;
     if (class_tag == 4 and value.is(.symbol)) return value;
     if (class_tag == 5 and value.isString()) return value;
     if (!value.is(.object)) return error.TypeError;
-    const object = try property_ops.expectObject(value);
+    const object = objectFromValue(value).?;
     const matches = switch (class_tag) {
         1 => object.class_id == core.class.ids.number,
         2 => object.class_id == core.class.ids.boolean,
@@ -1476,11 +1377,7 @@ pub fn defineErrorStackDataProperty(
         if (!ok) return error.TypeError;
         return;
     }
-    receiver.defineOwnProperty(ctx.runtime, stack_key, desc) catch |err| switch (err) {
-        error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
+    try receiver.defineOwnProperty(ctx.runtime, stack_key, desc);
 }
 
 pub fn dataViewConstructWithPrototype(
@@ -1501,6 +1398,21 @@ pub fn dataViewConstructWithPrototype(
     return core.typed_array.dataViewConstruct(rt, used_args, prototype);
 }
 
+/// PrivateFieldAdd / PrivateMethodOrAccessorAdd step 1 under
+/// `nonextensible-applies-to-private`: `? IsExtensible(O)`. A Proxy answers
+/// through its trap; an ordinary object's flag is checked by the define.
+pub fn requirePrivateElementTargetExtensible(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!void {
+    if (object.proxyTarget() == null) return;
+    if (!try proxyAwareIsExtensible(ctx, output, global, object, caller_function, caller_frame)) return error.NotExtensible;
+}
+
 pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     // NO-ALIGN(qjs): JS_DefinePrivateField raw-adds private
     // fields with add_property and never consults extensibility, so qjs lands
@@ -1509,11 +1421,8 @@ pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, a
     // "If O.[[Extensible]] is false, throw a TypeError") mandates the throw
     // (language/statements/class/elements/private-class-field-on-nonextensible-
     // objects.js), so zjs keeps the NotExtensible -> TypeError behavior.
-    if (rt.atoms.kind(atom_id) == .private and object.hasOwnProperty(atom_id)) return error.TypeError;
-    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all)) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
+    if (rt.atoms.kind(atom_id) == .private and object.hasOwnProperty(atom_id)) return error.PrivateMemberExists;
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn constructWeakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype: ?*core.Object) !core.JSValue {
@@ -1557,13 +1466,13 @@ pub fn constructCollectionWithPrototypeFromVm(
     // ref built from `kind`.
     const construct_id = core.host_function.builtin_method_id_lookup.collection.constructIdForKind(kind) orelse return error.TypeError;
     const collection_construct_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = construct_id };
-    const collection_value = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, collection_construct_ref, prototype, &.{}, null, null)) orelse return error.TypeError;
+    const collection_value = (try builtin_dispatch.callConstructRecord(ctx, output, global, null, collection_construct_ref, prototype, &.{}, null, null)) orelse return error.TypeError;
     if (args.len == 0 or args[0].is(.undefined_value) or args[0].is(.null_value)) return collection_value;
 
     const adder_name: []const u8 = if (kind == 1 or kind == 3) "set" else "add";
     const adder_key = try ctx.runtime.internAtom(adder_name);
     const adder = try getValueProperty(ctx, output, global, collection_value, adder_key, null, null);
-    if (!isCallableValue(adder)) return error.TypeError;
+    if (!isCallableValue(adder)) return error.NotAFunction;
 
     // The dense array read used to be selected here, on `isArray()` alone, so
     // an array with an own `@@iterator` — or a patched
@@ -1576,37 +1485,14 @@ pub fn constructCollectionWithPrototypeFromVm(
     return collection_value;
 }
 
-/// Owned result of an observable `constructor.prototype` lookup.
-///
-/// QuickJS keeps the returned JSValue alive until `JS_NewObjectProtoClass`
-/// retains the prototype through the new object's shape. A bare `*Object`
-/// cannot express that lifetime: a Proxy/getter may return a fresh object whose
-/// only reference is the property result. Callers must keep this handle alive
-/// through the operation that retains `object()`, then call `deinit`.
-pub const OwnedPrototype = struct {
-    value: core.JSValue,
-
-    pub fn fromObject(prototype: ?*core.Object) OwnedPrototype {
-        return .{ .value = if (prototype) |prototype_object| prototype_object.value() else core.JSValue.nullValue() };
-    }
-
-    pub fn object(self: OwnedPrototype) ?*core.Object {
-        return objectFromValue(self.value);
-    }
-
-    pub fn deinit(self: *OwnedPrototype, _: *core.JSRuntime) void {
-        self.value = core.JSValue.undefinedValue();
-    }
-};
-
-pub fn constructorPrototypeObject(rt: *core.JSRuntime, constructor: core.JSValue) !OwnedPrototype {
-    if (!constructor.is(.object)) return OwnedPrototype.fromObject(null);
+pub fn constructorPrototypeObject(constructor: core.JSValue) !?*core.Object {
+    if (!constructor.is(.object)) return null;
     if (objectFromValue(constructor)) |object| {
-        if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return OwnedPrototype.fromObject(prototype);
+        if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     }
-    const prototype_value = try property_ops.getPropertyValue(rt, constructor, core.atom.ids.prototype);
-    if (prototype_value.is(.object)) return .{ .value = prototype_value };
-    return OwnedPrototype.fromObject(null);
+    const prototype_value = try property_ops.getPropertyValue(constructor, core.atom.ids.prototype);
+    if (prototype_value.is(.object)) return objectFromValue(prototype_value);
+    return null;
 }
 
 pub fn dynamicFunctionNewTargetPrototype(
@@ -1617,9 +1503,9 @@ pub fn dynamicFunctionNewTargetPrototype(
     kind: DynamicFunctionKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !OwnedPrototype {
+) !?*core.Object {
     const prototype_value = try getValueProperty(ctx, output, global, new_target, core.atom.ids.prototype, caller_function, caller_frame);
-    if (prototype_value.is(.object)) return .{ .value = prototype_value };
+    if (prototype_value.is(.object)) return objectFromValue(prototype_value);
     const fallback_realm = try functionRealmContext(ctx, new_target);
     const class_id = switch (kind) {
         .normal => core.class.ids.bytecode_function,
@@ -1627,7 +1513,7 @@ pub fn dynamicFunctionNewTargetPrototype(
         .generator => core.class.ids.generator_function,
         .async_generator => core.class.ids.async_generator_function,
     };
-    return OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
+    return fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry;
 }
 
 /// Class selected by QuickJS constructor bodies when they call
@@ -1646,7 +1532,6 @@ const constructor_class_names = std.StaticStringMap(core.ClassId).initComptime(.
     .{ "Date", core.class.ids.date },
     .{ "RegExp", core.class.ids.regexp },
     .{ "Error", core.class.ids.error_ },
-    .{ "DOMException", core.class.ids.dom_exception },
     .{ "DisposableStack", core.class.ids.disposable_stack },
     .{ "AsyncDisposableStack", core.class.ids.async_disposable_stack },
     .{ "Promise", core.class.ids.promise },
@@ -1732,19 +1617,23 @@ pub fn createDataPropertyOrThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver_value: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
     value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    // CreateDataProperty takes no receiver; `receiver_value` is the already
-    // boxed `object` that the VM / Object.* call sites hold, kept so they do
-    // not have to re-box. Neither leg below reads it.
-    _ = receiver_value;
     if (object.proxyTarget() != null) {
         try proxyCreateDataPropertyOrThrow(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
+        return;
+    }
+    // A typed array's [[DefineOwnProperty]] converts the value (ToNumber /
+    // ToBigInt, observable through valueOf) and refuses an invalid index.
+    if (try array_ops.typedArrayDefineOwnPropertyVm(ctx, output, global, object, atom_id, core.Descriptor.data(value, .all))) |defined| {
+        if (!defined) {
+            _ = try throwTypeErrorMessage(ctx, global, "cannot define typed array element");
+            unreachable;
+        }
         return;
     }
     try createArrayDataOrTypedArrayElement(ctx.runtime, object, atom_id, value);
@@ -1761,36 +1650,28 @@ pub fn objectGetPrototypeOfStep(
     if (!object.isProxy()) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
             if (object.getPrototype()) |prototype| return prototype;
-            return functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global);
+            return functionPrototypeFromGlobal(objectRealmGlobal(object) orelse global);
         }
         return object.getPrototype();
     }
-    if (object.proxyHandler() == null) return error.TypeError;
-    const target_value = object.proxyTarget() orelse return error.TypeError;
+    const handler_value = try proxyHandlerForTrap(ctx, global, object);
+    const target_value = object.proxyTargetOfProxy();
     const target = objectFromValue(target_value) orelse return error.TypeError;
-    const handler_value = object.proxyHandler().?;
     const trap_key = core.atom.ids.getPrototypeOf;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) return objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    const result_proto = if (result.is(.null_value)) null else objectFromValue(result) orelse return error.TypeError;
+    const result_proto = if (result.is(.null_value)) null else objectFromValue(result) orelse return error.ProxyInvariantViolation;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
         const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
-        if (target_proto != result_proto) return error.TypeError;
+        if (target_proto != result_proto) return error.ProxyInvariantViolation;
     }
     return result_proto;
 }
 
-/// Leftover proxy [[GetPrototypeOf]] trap. candidate112 still
-/// compiles `objectGetPrototypeOfValue` (1001) as a second copy of
-/// `objectGetPrototypeOfStep` (835, extra 835, 7.4% match). The
-/// leftover is non-proxy thrower / proxy target+handler + get
-/// getPrototypeOf + missing-trap recurse + call(`[target]`) +
-/// isExtensible invariant. Comptime identity is `?*Object` vs
-/// JSValue. Take the JSValue wrap in this wrapper and reuse the
-/// already-outlined Step walk (knives 103/112). Does not turn
-/// Step into an inline wrapper (knives 94/108). Does not fold
-/// SetPrototypeOf / [[Set]] / [[Has]] / isExtensible.
+/// Inline wrapper over the outlined `objectGetPrototypeOfStep` walk
+/// (including the proxy getPrototypeOf trap); only the JSValue result
+/// wrapping differs.
 pub inline fn objectGetPrototypeOfValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1801,74 +1682,6 @@ pub inline fn objectGetPrototypeOfValue(
 ) !core.JSValue {
     const proto = try objectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     return if (proto) |prototype| prototype.value() else core.JSValue.nullValue();
-}
-
-pub fn destructuringObjectRest(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    var source_value = if (args[0].is(.object))
-        args[0]
-    else
-        try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const source = try property_ops.expectObject(source_value);
-
-    var out_value = core.JSValue.undefinedValue();
-    var value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
-    out_value = out.value();
-    const keys = try objectRestOwnKeys(ctx, output, global, source);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-
-    for (keys) |key| {
-        if (source.class_id == core.class.ids.string and key == core.atom.ids.length) continue;
-        if (try objectRestKeyExcluded(ctx, args[1..], key)) continue;
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
-        if (desc.enumerable != true) continue;
-        value = getValueProperty(ctx, output, global, args[0], key, null, null) catch |err| return err;
-        try out.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(value, .all));
-        value = core.JSValue.undefinedValue();
-    }
-    return out_value;
-}
-
-test "destructuringObjectRest roots direct symbol values while creating rest object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try zjs_vm.contextGlobal(ctx);
-
-    const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    const key = try rt.internAtom("kept");
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, .all));
-
-    const args = [_]core.JSValue{source.value()};
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const rest_value = try destructuringObjectRest(ctx, null, global, &args);
-    const rest = try property_ops.expectObject(rest_value);
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    {
-        const stored = try rest.getProperty(key);
-        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
-    }
-
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 pub fn objectRestOwnKeys(
@@ -1884,7 +1697,7 @@ pub fn objectRestOwnKeys(
         return try source.ownKeys(ctx.runtime);
     }
     const target_value = source.proxyTarget() orelse return source.ownKeys(ctx.runtime);
-    const handler_value = source.proxyHandler() orelse return error.TypeError;
+    const handler_value = try proxyHandlerForTrap(ctx, global, source);
     const own_keys_atom = core.atom.ids.ownKeys;
     const trap = try getValueProperty(ctx, output, global, handler_value, own_keys_atom, null, null);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
@@ -1900,11 +1713,14 @@ pub fn objectRestOwnKeys(
     var trap_roots = core.runtime.rootValues(.{ &trap_result, &key_value });
     trap_roots.activate(ctx.runtime);
     defer trap_roots.deactivate(ctx.runtime);
-    var out: []core.Atom = &.{};
-    errdefer core.Object.freeKeys(ctx.runtime, out);
+    var out: core.atom.AtomListBuilder = .{};
+    defer out.deinit(ctx.runtime);
+    // Duplicate check (§10.5.11 step 9): a set, not a scan of `out` per key.
+    var seen: std.AutoHashMapUnmanaged(core.Atom, void) = .empty;
+    defer seen.deinit(ctx.runtime.nativeAllocator());
     // TGC S3 §4 class B: the accumulated ids sit in a native []Atom while the
     // trap result is read key by key, which re-enters JS every iteration.
-    var out_roots = core.runtime.rootAtomList(&out);
+    var out_roots = core.runtime.rootAtomList(&out.items);
     out_roots.activate(ctx.runtime);
     defer out_roots.deactivate(ctx.runtime);
     const length_value = try getValueProperty(ctx, output, global, trap_result, core.atom.ids.length, null, null);
@@ -1914,13 +1730,13 @@ pub fn objectRestOwnKeys(
         defer index_key.deinit(ctx.runtime);
         key_value = try getValueProperty(ctx, output, global, trap_result, index_key.atom, null, null);
         defer key_value = core.JSValue.undefinedValue();
-        if (!key_value.isString() and !key_value.is(.symbol)) return error.TypeError;
+        if (!key_value.isString() and !key_value.is(.symbol)) return error.ProxyInvariantViolation;
         const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-        if (atomListContains(out, atom_id)) return error.TypeError;
-        try appendOwnedAtom(ctx.runtime, &out, atom_id);
+        if ((try seen.getOrPut(ctx.runtime.nativeAllocator(), atom_id)).found_existing) return error.ProxyInvariantViolation;
+        try out.append(ctx.runtime, atom_id);
     }
-    try validateProxyOwnKeysResult(ctx, output, global, source, target_value, out);
-    return out;
+    try validateProxyOwnKeysResult(ctx, output, global, target_value, out.items);
+    return try out.toOwnedSlice(ctx.runtime);
 }
 
 pub fn objectRestOwnPropertyDescriptor(
@@ -1931,14 +1747,6 @@ pub fn objectRestOwnPropertyDescriptor(
     key: core.Atom,
 ) !?core.Descriptor {
     return try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, null, null);
-}
-
-pub fn objectRestKeyExcluded(ctx: *core.JSContext, excluded: []const core.JSValue, key: core.Atom) !bool {
-    for (excluded) |value| {
-        const excluded_key = try property_ops.propertyKeyAtom(ctx.runtime, value);
-        if (excluded_key == key) return true;
-    }
-    return false;
 }
 
 pub fn atomicsBufferObject(object: *core.Object) !*core.Object {
@@ -2014,10 +1822,6 @@ pub fn createGeneratorObject(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    // The finalized FB is both the qjs-style execution record and the source
-    // of the frame dimensions used for the parameter-prologue allocation.
-    const nested = fb;
-
     const class_id = if (is_async) core.class.ids.async_generator else core.class.ids.generator;
     // Normal JS generator calls keep their execution state detached while the
     // parameter prologue runs, then create the public object directly with its
@@ -2039,15 +1843,15 @@ pub fn createGeneratorObject(
     var prepared_frame_ptr: ?*const zjs_vm.PreparedEntryFrame = null;
     if (detached_shell) {
         const stack_slots = try std.math.add(usize, @as(usize, fb.stack_size), 1);
-        const frame_arg_count = frame_mod.frameArgCount(nested, input_args.len);
-        const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(nested);
+        const frame_arg_count = frame_mod.frameArgCount(fb, input_args.len);
+        const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(fb);
         const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
-        const var_ref_count = frame_mod.frameVarRefStorageCount(nested, input_var_refs);
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested);
+        const var_ref_count = frame_mod.frameVarRefStorageCount(fb, input_var_refs);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(fb);
         const layout: frame_mod.SlabLayout = .{
             .args = frame_arg_count,
             .original_args = original_arg_count,
-            .locals = nested.var_count,
+            .locals = fb.var_count,
             .var_refs = var_ref_count,
             .open_var_refs = open_var_ref_count,
         };
@@ -2082,7 +1886,6 @@ pub fn createGeneratorObject(
     _ = try runGeneratorParameterInit(
         ctx,
         fb,
-        nested,
         prepared_frame_ptr,
         object,
         rooted_current,
@@ -2095,9 +1898,7 @@ pub fn createGeneratorObject(
         call_entry_global,
     );
 
-    var resolved_prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch OwnedPrototype.fromObject(null);
-    defer resolved_prototype.deinit(ctx.runtime);
-    const prototype = resolved_prototype.object();
+    const prototype = try generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async);
     if (detached_shell) {
         try object.finishGeneratorShell(ctx.runtime, prototype);
         object_registered = true;
@@ -2107,74 +1908,36 @@ pub fn createGeneratorObject(
     return object.value();
 }
 
-pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !OwnedPrototype {
+pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !?*core.Object {
     const fallback = if (is_async) try asyncGeneratorPrototypeFromGlobal(rt, global) else try generatorPrototypeFromGlobal(rt, global);
-    const function_object = core.value_semantics.objectFromValue(function_value) orelse return OwnedPrototype.fromObject(fallback);
-    if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return OwnedPrototype.fromObject(prototype);
+    const function_object = core.value_semantics.objectFromValue(function_value) orelse return fallback;
+    if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     const prototype_value = try function_object.getProperty(core.atom.ids.prototype);
-    if (prototype_value.is(.object)) return .{ .value = prototype_value };
-    return OwnedPrototype.fromObject(fallback);
+    if (prototype_value.is(.object)) return objectFromValue(prototype_value);
+    return fallback;
 }
 
-pub fn iteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, args: []const core.JSValue, id: u32) !core.JSValue {
-    if (id == @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter)) {
-        if (args.len > 0) {
-            if (!args[0].is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
-            if (!receiver.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
-        }
-    } else if (id == @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter)) {
-        const receiver_object = core.value_semantics.objectFromValue(receiver) orelse return throwTypeErrorMessage(ctx, global, "not an object");
-        if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
-            if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
-        }
-    }
-    return iterator_ops.iteratorPrototypeAccessor(ctx, global, receiver, args, id);
-}
-
-pub fn iteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
-    if (atom_id == core.atom.ids.constructor) {
-        if (!value.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
-        if (!receiver.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
-    } else if (atom_id == ((comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError)) {
-        const receiver_object = core.value_semantics.objectFromValue(receiver) orelse return throwTypeErrorMessage(ctx, global, "not an object");
-        if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
-            if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
-        }
-    }
-    return iterator_ops.iteratorPrototypeAccessorSet(ctx, global, receiver, atom_id, value);
-}
-
-pub fn iteratorPrototypeMethodCall(
+/// OrdinaryHasInstance(%Iterator%, value): the chain is read with
+/// [[GetPrototypeOf]], so a Proxy's trap answers for it.
+pub fn iteratorIsOnIteratorPrototypeChain(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.JSValue,
-    args: []const core.JSValue,
-    method_id: u32,
+    value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    return iterator_ops.iteratorPrototypeMethodCall(
-        ctx,
-        output,
-        global,
-        receiver,
-        args,
-        method_id,
-        caller_function,
-        caller_frame,
-    );
-}
-
-pub fn iteratorIsOnIteratorPrototypeChain(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) bool {
+) HostError!bool {
     const iterator = objectFromValue(value) orelse return false;
-    const iterator_proto = iteratorPrototypeFromGlobal(rt, global) orelse return false;
-    var prototype = iterator.getPrototype();
-    while (prototype) |proto| {
+    const iterator_proto = iteratorPrototypeFromGlobal(ctx.runtime, global) orelse return false;
+    var cursor = iterator.value();
+    var roots = core.runtime.rootValues(.{&cursor});
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    while (true) {
+        const proto = (try objectGetPrototypeOfStep(ctx, output, global, objectFromValue(cursor).?, caller_function, caller_frame)) orelse return false;
         if (proto == iterator_proto) return true;
-        prototype = proto.getPrototype();
+        cursor = proto.value();
     }
-    return false;
 }
 
 pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
@@ -2189,14 +1952,20 @@ pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
     defer roots.deactivate(rt);
     values[0] = (try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global))).value();
     try defineNativeDataMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 1);
+    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, .wrap_for_valid_iterator_next);
     try defineNativeDataMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 2);
+    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, .wrap_for_valid_iterator_return);
     try storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, values[0]);
     return objectFromValue(values[0]).?;
 }
 
-pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object, key: core.Atom, method_id: i32) !void {
+pub fn tagIteratorWrapPrototypeMethod(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    proto: *core.Object,
+    key: core.Atom,
+    method: core.host_function.builtin_method_ids.iterator.IntrinsicMethod,
+) !void {
     var values = [_]core.JSValue{ proto.value(), core.JSValue.undefinedValue() };
     var slots: []core.JSValue = &values;
     const globals = [_]core.JSValue{global.value()};
@@ -2206,8 +1975,8 @@ pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object,
     defer roots.deactivate(rt);
     values[1] = try objectFromValue(values[0]).?.getProperty(key);
     const method_object = objectFromValue(values[1]) orelse return;
-    (try method_object.functionIteratorWrapMethodSlot(rt)).* = @intCast(method_id);
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
+    method_object.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.iterator, @intFromEnum(method)));
+    if (functionPrototypeFromGlobal(global)) |function_proto| {
         try objectFromValue(values[1]).?.setPrototype(rt, function_proto);
     }
 }
@@ -2311,11 +2080,8 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
     // so the override arm must re-apply the same effective-strictness gate the
     // else arm uses. A runtime-strict frame therefore downgrades to an
     // UNMAPPED arguments object (spec-correct for strict functions), which
-    // needs no open-ref window and never reaches captureArg — matching
-    // has_mapped_arguments=false in the view.
-    const mapped = if (mapped_override) |requested|
-        requested and !currentFrameFunctionIsStrict(frame) and frame.function.hasSimpleParameterList()
-    else
+    // needs no open-ref window and never reaches captureArg.
+    const mapped = (mapped_override orelse true) and
         !currentFrameFunctionIsStrict(frame) and frame.function.hasSimpleParameterList();
     const args = if (mapped)
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)]
@@ -2355,7 +2121,7 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
 }
 
 pub fn installFunctionPrototypeThrowTypeErrorAccessors(rt: *core.JSRuntime, global: *core.Object, thrower: core.JSValue) !void {
-    const function_prototype = functionPrototypeFromGlobal(rt, global) orelse return;
+    const function_prototype = functionPrototypeFromGlobal(global) orelse return;
     const arguments_key = core.atom.ids.arguments;
     try function_prototype.defineOwnProperty(rt, arguments_key, core.Descriptor.accessor(thrower, thrower, .{ .configurable = true }));
     try function_prototype.defineOwnProperty(rt, core.atom.ids.caller, core.Descriptor.accessor(thrower, thrower, .{ .configurable = true }));
@@ -2544,7 +2310,7 @@ pub fn getValueProperty(
         // receiver-aware legacy compatibility helper ahead of that walk only
         // for its two actual keys; unrelated function properties must not pay
         // an outlined `caller`/`arguments` miss.
-        if (isFunctionLikeClass(object.class_id) and
+        if (core.class.isFunctionClass(object.class_id) and
             (atom_id == core.atom.ids.caller or atom_id == core.atom.ids.arguments))
         {
             if (try functionCallerArgumentsProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |function_value| {
@@ -2629,7 +2395,7 @@ noinline fn getValuePropertyNonObject(
         return getPrimitiveProperty(ctx, output, global, value, atom_id, caller_function, caller_frame);
     }
     if (value.is(.null_value) or value.is(.undefined_value)) {
-        return throwNullishPropertyTypeError(ctx, global, value, atom_id);
+        return throwNullishPropertyTypeError(ctx, global, value, atom_id, .read);
     }
     return error.TypeError;
 }
@@ -2644,7 +2410,7 @@ noinline fn functionCallerArgumentsProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!isFunctionLikeClass(object.class_id)) return null;
+    if (!core.class.isFunctionClass(object.class_id)) return null;
     // qjs gates the legacy accessors on an atom-id compare (`atom ==
     // JS_ATOM_caller`); both spellings are predefined atoms, so interning makes
     // the id test exact. Spelling out the bytes here made every property read
@@ -2660,22 +2426,18 @@ noinline fn functionCallerArgumentsProperty(
             },
         }
     }
-    if (object.functionBytecode()) |fb_value| {
-        const fb = functionBytecodeFromValue(fb_value) orelse return core.JSValue.undefinedValue();
-        if (fb.isStrictMode() or fb.runtimeStrictMode()) return error.TypeError;
-        return switch (object.class_id) {
-            core.class.ids.generator_function,
-            core.class.ids.async_function,
-            core.class.ids.async_generator_function,
-            => error.TypeError,
-            core.class.ids.bytecode_function => if (fb.hasPrototype())
-                core.JSValue.undefinedValue()
-            else
-                error.TypeError,
-            else => error.TypeError,
-        };
+    // Legacy sloppy-function extension: an ordinary non-strict function
+    // reads `caller`/`arguments` as undefined. Every other function has no
+    // such property (§17.1) and takes the ordinary prototype walk, which
+    // normally reaches %Function.prototype%'s %ThrowTypeError% accessors.
+    const fb_value = object.functionBytecode() orelse return null;
+    const fb = functionBytecodeFromValue(fb_value) orelse return null;
+    if (object.class_id == core.class.ids.bytecode_function and fb.hasPrototype() and
+        !fb.isStrictMode() and !fb.runtimeStrictMode())
+    {
+        return core.JSValue.undefinedValue();
     }
-    return error.TypeError;
+    return null;
 }
 
 noinline fn getPrivateValueProperty(
@@ -2792,6 +2554,11 @@ pub fn getValuePropertyWithReceiver(
     var current: ?*core.Object = target;
     while (current) |object| : (current = object.getPrototype()) {
         if (object.proxyTarget() != null) return getProxyProperty(ctx, output, global, receiver_value, object, atom_id, caller_function, caller_frame);
+        // TypedArray [[Get]] (§10.4.5.4): a canonical numeric key never
+        // reaches the prototype chain.
+        if (core.object.isTypedArrayObject(object)) {
+            if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
+        }
         if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
             switch (desc.kind) {
                 .data => return desc.value,
@@ -2816,7 +2583,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const prototype = primitivePrototypeForAccess(rt, objectFromValue(values[0]).?, values[1]) orelse return error.TypeError;
+    const prototype = primitivePrototypeForAccess(rt, objectFromValue(values[0]).?, values[1]) orelse return error.NullishToObject;
     if (values[1].isString()) {
         // Share the rooted, code-unit-based String wrapper construction path.
         return string_ops.constructWithPrototype(rt, values[1..2], prototype);
@@ -2912,11 +2679,18 @@ pub fn setValuePropertyWithThrow(
         return core.JSValue.undefinedValue();
     }
     const is_strict = if (caller_function) |func| functionRuntimeStrict(func) else false;
+    // A number key's atom is fresh and held by nothing; boxing a primitive
+    // base allocates, and setters and traps run JavaScript, before it is
+    // stored or named in an error.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
     if (!object_value.is(.object)) {
-        if (object_value.is(.null_value) or object_value.is(.undefined_value)) return error.TypeError;
+        if (object_value.is(.null_value) or object_value.is(.undefined_value))
+            return throwNullishPropertyTypeError(ctx, global, object_value, atom_id, .set);
         const boxed_value = try primitiveObjectForAccess(ctx.runtime, global, object_value);
         const boxed = try property_ops.expectObject(boxed_value);
-        const succeeded = try ordinarySetWithReceiver(ctx, output, global, boxed_value, boxed, object_value, atom_id, value, caller_function, caller_frame);
+        const succeeded = try ordinarySetWithReceiver(ctx, output, global, boxed, object_value, atom_id, value, caller_function, caller_frame);
         if (!succeeded and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();
     }
@@ -2926,36 +2700,29 @@ pub fn setValuePropertyWithThrow(
         if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();
     }
+    // A module namespace's [[Set]] always fails (§10.4.6.9), before any
+    // binding is read: an export still in its TDZ must not throw ReferenceError.
+    if (object.class_id == core.class.ids.module_ns) {
+        if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
+        return core.JSValue.undefinedValue();
+    }
     if (object.flags.is_with_environment and is_strict and !object.hasProperty(atom_id)) return error.ReferenceError;
     if (try setMappedArgumentsValue(ctx, object, atom_id, value)) return core.JSValue.undefinedValue();
     if (core.object.isTypedArrayObject(object)) {
-        if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value)) {
+        if (try array_ops.typedArrayNumericSet(ctx, output, global, object, object_value, atom_id, value, caller_function, caller_frame)) |ok| {
+            if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
             return core.JSValue.undefinedValue();
         }
     }
     if (object.isArray() and atom_id == core.atom.ids.length) {
-        const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-        object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
-            error.InvalidLength => return error.RangeError,
-            error.ReadOnly => {
-                if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
-                return core.JSValue.undefinedValue();
-            },
-            error.AccessorWithoutSetter => {
-                if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
-                return core.JSValue.undefinedValue();
-            },
-            error.NotExtensible => {
-                if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.NotExtensible);
-                return core.JSValue.undefinedValue();
-            },
-            error.IncompatibleDescriptor => {
-                if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.IncompatibleDescriptor);
-                return core.JSValue.undefinedValue();
-            },
-            else => return err,
-        };
-        return core.JSValue.undefinedValue();
+        // OrdinarySetWithOwnDescriptor rejects a non-writable own `length`
+        // before ArraySetLength converts the value.
+        if (!object.flags.length_writable) {
+            if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
+            return core.JSValue.undefinedValue();
+        }
+        const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value);
+        return storeOrdinaryProperty(ctx, global, object, atom_id, value_to_set, throw_on_set_failure);
     }
     if (object.isArray()) {
         if (core.array.arrayIndexFromAtom(ctx.runtime.atoms, atom_id)) |index| {
@@ -2968,7 +2735,7 @@ pub fn setValuePropertyWithThrow(
     // re-probed the same shape twice — once to classify the hit, once to
     // prove absence before the add.
     if (try object.setOrDefineOwnDataPropertyForSimpleSet(ctx.runtime, atom_id, value)) return core.JSValue.undefinedValue();
-    if (try typedArrayPrototypeSet(ctx, output, global, object_value, object, object.getPrototype(), atom_id, value, caller_function, caller_frame)) |ok| {
+    if (try typedArrayPrototypeSet(ctx, output, global, object_value, object.getPrototype(), atom_id, value, caller_function, caller_frame)) |ok| {
         if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();
     }
@@ -2985,25 +2752,29 @@ pub fn setValuePropertyWithThrow(
         if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();
     }
-    if (ctx.runtime.atoms.kind(atom_id) == .private) return error.TypeError;
-    const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-    object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
-        error.InvalidLength => return error.RangeError,
-        error.ReadOnly => {
-            if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
-            return core.JSValue.undefinedValue();
-        },
-        error.AccessorWithoutSetter => {
-            if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
-            return core.JSValue.undefinedValue();
-        },
-        error.NotExtensible => {
-            if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.NotExtensible);
-            return core.JSValue.undefinedValue();
-        },
-        error.IncompatibleDescriptor => {
-            if (throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.IncompatibleDescriptor);
-            return core.JSValue.undefinedValue();
+    const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value);
+    return storeOrdinaryProperty(ctx, global, object, atom_id, value_to_set, throw_on_set_failure);
+}
+
+/// The final ordinary [[Set]] store; a rejected write throws only when the
+/// caller's mode requires it (strict code or `force_throw`).
+fn storeOrdinaryProperty(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    object: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    throw_on_set_failure: bool,
+) HostError!core.JSValue {
+    object.setProperty(ctx.runtime, atom_id, value) catch |err| switch (err) {
+        error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => |e| {
+            if (!throw_on_set_failure) return core.JSValue.undefinedValue();
+            // A writable Array `length` rejects a shrink only at an element it
+            // cannot delete (ArraySetLength step 17.b).
+            if (e == error.IncompatibleDescriptor and object.isArray() and atom_id == core.atom.ids.length) {
+                return throwTypeErrorMessage(ctx, global, "cannot delete a non-configurable array element");
+            }
+            return throwSetFailureTypeError(ctx, global, atom_id, e);
         },
         else => return err,
     };
@@ -3039,32 +2810,52 @@ pub fn setWithOwnDescriptor(
                     .value = value,
                     .value_present = true,
                 };
-                if (receiver.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, receiver, atom_id, update_desc, caller_function, caller_frame);
-                receiver.defineOwnProperty(ctx.runtime, atom_id, update_desc) catch |err| switch (err) {
-                    error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return false,
-                    error.InvalidLength => return error.RangeError,
-                    else => return err,
-                };
-                return true;
+                return try defineOwnPropertyVm(ctx, output, global, receiver, atom_id, update_desc, .return_false, caller_function, caller_frame);
             }
-            const create_desc = core.Descriptor.data(value, .all);
-            if (receiver.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, receiver, atom_id, create_desc, caller_function, caller_frame);
-            receiver.defineOwnProperty(ctx.runtime, atom_id, create_desc) catch |err| switch (err) {
-                error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return false,
-                error.InvalidLength => return error.RangeError,
-                else => return err,
-            };
-            return true;
+            return try defineOwnPropertyVm(ctx, output, global, receiver, atom_id, core.Descriptor.data(value, .all), .return_false, caller_function, caller_frame);
         },
     }
 }
 
-pub fn bytecodeFunctionObjectTag(object: *core.Object) []const u8 {
-    const function_value = object.functionBytecode() orelse return "Function";
-    const function_bytecode = functionBytecodeFromValue(function_value) orelse return "Function";
-    if (function_bytecode.functionKind() == .async or function_bytecode.functionKind() == .async_generator) return "AsyncFunction";
-    if (function_bytecode.functionKind() == .generator) return "GeneratorFunction";
-    return "Function";
+/// What `defineOwnPropertyVm` does when an ordinary define rejects.
+pub const DefineRejection = enum {
+    /// [[DefineOwnProperty]] proper: report `false`.
+    return_false,
+    /// DefinePropertyOrThrow callers: keep the specific error
+    /// (`ReadOnly`, `NotExtensible`, `IncompatibleDescriptor`) so its message
+    /// survives.
+    keep_error,
+};
+
+/// O.[[DefineOwnProperty]](P, Desc) for any object: a Proxy's trap, a
+/// TypedArray's canonical numeric keys, an Array's `length` through
+/// ArraySetLength (which converts the value there, after ToPropertyDescriptor
+/// and only on this path), else the ordinary define.
+pub fn defineOwnPropertyVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    atom_id: core.Atom,
+    desc: core.Descriptor,
+    rejection: DefineRejection,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!bool {
+    if (object.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, object, atom_id, desc, caller_function, caller_frame);
+    if (try typedArrayDefineOwnPropertyVm(ctx, output, global, object, atom_id, desc)) |ok| return ok;
+    var define_desc = desc;
+    if (desc.value_present) {
+        define_desc.value = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, desc.value);
+    }
+    object.defineOwnProperty(ctx.runtime, atom_id, define_desc) catch |err| switch (err) {
+        error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => switch (rejection) {
+            .return_false => return false,
+            .keep_error => return err,
+        },
+        else => return err,
+    };
+    return true;
 }
 
 pub fn definePropertyWithKind(
@@ -3076,40 +2867,20 @@ pub fn definePropertyWithKind(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const object = core.value_semantics.objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
-    if (args.len < 2) return error.TypeError;
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    if (args.len < 3) return error.TypeError;
-    const desc_object = try property_ops.expectObject(args[2]);
-    const desc = try descriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
-    const defined = if (object.proxyTarget() != null)
-        proxyDefineOwnProperty(ctx, output, global, object, atom_id, desc, caller_function, caller_frame) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => {
-                if (kind == 2) return core.JSValue.boolean(false);
-                return error.TypeError;
-            },
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        }
-    else blk: {
-        if (try typedArrayDefineOwnPropertyVm(ctx, output, global, object, atom_id, desc)) |ok| {
-            break :blk ok;
-        } else {
-            object.defineOwnProperty(ctx.runtime, atom_id, desc) catch |err| switch (err) {
-                error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => {
-                    if (kind == 2) return core.JSValue.boolean(false);
-                    return error.TypeError;
-                },
-                error.InvalidLength => return error.RangeError,
-                else => return err,
-            };
-            break :blk true;
-        }
+    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const object = core.value_semantics.objectFromValue(target) orelse return error.NotAnObject;
+    const atom_id = try toPropertyKeyAtom(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), caller_function, caller_frame);
+    const attributes = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const desc_object = core.value_semantics.objectFromValue(attributes) orelse return error.InvalidPropertyDescriptor;
+    const desc = try descriptorFromObject(ctx, output, global, attributes, desc_object, object, atom_id, caller_function, caller_frame);
+    // Reflect.defineProperty (kind 2) reports failure as `false`.
+    const defined = defineOwnPropertyVm(ctx, output, global, object, atom_id, desc, .keep_error, caller_function, caller_frame) catch |err| switch (err) {
+        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => if (kind == 2) return core.JSValue.boolean(false) else return err,
+        else => return err,
     };
     if (!defined) {
         if (kind == 2) return core.JSValue.boolean(false);
-        return error.TypeError;
+        return error.CannotDefineProperty;
     }
     if (kind == 2) return core.JSValue.boolean(true);
     return args[0];
@@ -3118,22 +2889,13 @@ pub fn definePropertyWithKind(
 pub const PendingPropertyDescriptor = struct {
     atom_id: core.Atom,
     desc: core.Descriptor,
-
-    pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {}
 };
 
-/// Leftover Object.getOwnPropertyNames/Symbols own-keys array fill.
-/// candidate114 still compiles `objectOwnPropertyKeysCall` (1438) as a
-/// second copy of `objectEnumerableOwnPropertiesCall` (2672, extra 1438,
-/// 6.4% match). The leftover is ToObject + ownKeys + createArray + loop
-/// + define. Comptime identity is names/symbols (no enumerable/gopd;
-/// string vs symbol filter; bare TypeError) vs keys/values/entries
-/// (gopd + enumerable; message TypeError). Take unique admission in the
-/// names/symbols wrapper and reuse this already-outlined walk (knives
-/// 103/112/113/114). Does not turn this helper into an inline wrapper
-/// (knives 94/108). Does not fold `ownEntriesArray` / assign / integrity.
+/// One outlined own-properties walk (ToObject + [[OwnPropertyKeys]] + array
+/// fill) for Object.keys/values/entries and getOwnPropertyNames/Symbols.
+/// keys/values/entries check enumerability; names/symbols filter strings vs
+/// symbols.
 pub const OwnPropertiesKind = enum { keys, values, entries, own_names, own_symbols };
-pub const NullishOwnError = enum { message, bare };
 
 pub fn objectEnumerableOwnPropertiesCall(
     ctx: *core.JSContext,
@@ -3141,22 +2903,20 @@ pub fn objectEnumerableOwnPropertiesCall(
     global: *core.Object,
     args: []const core.JSValue,
     kind: OwnPropertiesKind,
-    nullish: NullishOwnError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) {
-        return switch (nullish) {
-            .message => @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object")),
-            .bare => error.TypeError,
-        };
-    }
+    if (args.len < 1 or args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
 
     var object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
+    // A Proxy ownKeys result lives only in this native list across the
+    // traps and allocations below; keep its atoms alive.
+    var keys_roots = core.runtime.rootAtomList(&keys);
+    keys_roots.activate(ctx.runtime);
+    defer keys_roots.deactivate(ctx.runtime);
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
@@ -3169,6 +2929,7 @@ pub fn objectEnumerableOwnPropertiesCall(
     defer root_frame.deactivate(ctx.runtime);
 
     for (keys) |key| {
+        try exception_ops.pollNativeLoop(ctx, global);
         const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         switch (kind) {
             .own_names => {
@@ -3194,7 +2955,7 @@ pub fn objectEnumerableOwnPropertiesCall(
         errdefer {
             element = core.JSValue.undefinedValue();
         }
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.Atom.taggedInt(out.arrayLength()), element, caller_function, caller_frame);
+        try createDataPropertyOrThrow(ctx, output, global, out, core.Atom.taggedInt(out.arrayLength()), element, caller_function, caller_frame);
         element = core.JSValue.undefinedValue();
     }
     return out_value;
@@ -3208,7 +2969,7 @@ pub fn objectProtoGetterCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     return objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
@@ -3223,26 +2984,16 @@ pub fn objectProtoSetterCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     if (!prototype_value.is(.null_value) and objectFromValue(prototype_value) == null) return core.JSValue.undefinedValue();
     if (objectFromValue(this_value) == null) return core.JSValue.undefinedValue();
     var args = [_]core.JSValue{ this_value, prototype_value };
-    if (try objectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame)) |_| {
-        return core.JSValue.undefinedValue();
-    }
+    _ = try objectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame);
     return core.JSValue.undefinedValue();
 }
 
-/// Leftover Object/Reflect.isExtensible trap walk. candidate113 still
-/// compiles `objectIsExtensibleCall` (847) as a third copy of
-/// `proxyAwareExtensibleOp` (960, extra 847, 4.5% match). The leftover
-/// is target+handler + get isExtensible + missing-trap recurse +
-/// call(`[target]`) + invariant. Comptime identity is the builtin
-/// JSValue/primitive admission. Take that in this wrapper and reuse
-/// the already-outlined ExtensibleOp walk (knives 103/112/113). Does
-/// not turn ExtensibleOp into an inline wrapper (knives 94/108). Does
-/// not retry leftover isExtensible/prevent merge (knife 111) or
-/// [[Set]] / [[Has]] / [[GetPrototypeOf]].
+/// Object/Reflect.isExtensible: argument admission here, then the outlined
+/// `proxyAwareExtensibleOp` walk (proxy trap + invariant check).
 pub inline fn objectIsExtensibleCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3264,17 +3015,20 @@ pub fn objectSetPrototypeOfCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
-    const prototype: ?*core.Object = if (args[1].is(.null_value))
+    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const prototype_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    if (target.is(.null_value) or target.is(.undefined_value)) return try throwTypeErrorMessage(ctx, global, "not an object");
+    const prototype: ?*core.Object = if (prototype_value.is(.null_value))
         null
     else
-        objectFromValue(args[1]) orelse return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return args[0];
-    if (object.proxyTarget() == null and objectHasImmutablePrototype(object) and object.getPrototype() != prototype) return error.TypeError;
+        objectFromValue(prototype_value) orelse return try throwTypeErrorMessage(ctx, global, "not an object");
+    const object = objectFromValue(target) orelse return target;
+    if (object.proxyTarget() == null and objectHasImmutablePrototype(object) and object.getPrototype() != prototype)
+        return try throwTypeErrorMessage(ctx, global, "prototype is immutable");
     if (object.proxyTarget() != null) {
-        if (!try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame)) return error.TypeError;
-        return args[0];
+        if (!try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame))
+            return try throwTypeErrorMessage(ctx, global, "proxy: setPrototypeOf trap returned false");
+        return target;
     }
     object.setPrototype(ctx.runtime, prototype) catch |err| switch (err) {
         // Throw via the callee realm's global (threaded in as `global`) so a
@@ -3285,7 +3039,7 @@ pub fn objectSetPrototypeOfCall(
         error.NotExtensible => return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "prototype is not extensible")),
         else => return err,
     };
-    return args[0];
+    return target;
 }
 
 pub fn reflectSetPrototypeOfCall(
@@ -3295,13 +3049,13 @@ pub fn reflectSetPrototypeOfCall(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 2) return null;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
-    const prototype: ?*core.Object = if (args[1].is(.null_value))
+) !core.JSValue {
+    const object = objectFromValue(args[0]) orelse return try throwTypeErrorMessage(ctx, global, "not an object");
+    const prototype_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const prototype: ?*core.Object = if (prototype_value.is(.null_value))
         null
     else
-        objectFromValue(args[1]) orelse return error.TypeError;
+        objectFromValue(prototype_value) orelse return try throwTypeErrorMessage(ctx, global, "not an object");
     if (object.proxyTarget() == null and objectHasImmutablePrototype(object) and object.getPrototype() != prototype) return core.JSValue.boolean(false);
     if (object.proxyTarget() != null) {
         return core.JSValue.boolean(try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame));
@@ -3321,21 +3075,25 @@ pub fn reflectConstructPrototypeVm(
     new_target: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !OwnedPrototype {
+) !?*core.Object {
+    // An own data `.prototype` object is what [[Get]] would return.
+    if (objectFromValue(new_target)) |object| {
+        if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
+    }
     const prototype_value = try getValueProperty(ctx, output, global, new_target, core.atom.ids.prototype, caller_function, caller_frame);
-    if (prototype_value.is(.object)) return .{ .value = prototype_value };
+    if (prototype_value.is(.object)) return objectFromValue(prototype_value);
     const fallback_realm = try functionRealmContext(ctx, new_target);
     if (constructorClassPrototypeId(target_name)) |class_id| {
-        return OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
+        return fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry;
     }
 
     // Native Error subclasses live in the realm `native_error_proto[]` family,
     // not the class-prototype table. GetPrototypeFromConstructor still has to
     // use that intrinsic when `newTarget.prototype` is not an object.
     if (nativeErrorKindFromConstructorName(target_name)) |kind| {
-        return OwnedPrototype.fromObject(fallback_realm.nativeErrorPrototypeObject(kind) orelse return error.InvalidBuiltinRegistry);
+        return fallback_realm.nativeErrorPrototypeObject(kind) orelse return error.InvalidBuiltinRegistry;
     }
-    return OwnedPrototype.fromObject(null);
+    return null;
 }
 
 fn objectHasImmutablePrototype(object: *core.Object) bool {
@@ -3349,11 +3107,11 @@ pub fn reflectDeletePropertyCall(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = try property_ops.expectObject(args[0]);
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    return core.JSValue.boolean(try deleteValueProperty(ctx, output, global, args[0], object, atom_id, caller_function, caller_frame));
+) !core.JSValue {
+    // A missing target is not an Object; a missing key is ToPropertyKey(undefined).
+    const object = objectFromValue(if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) orelse return error.NotAnObject;
+    const atom_id = try toPropertyKeyAtom(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), caller_function, caller_frame);
+    return core.JSValue.boolean(try deleteValueProperty(ctx, output, global, object, atom_id, caller_function, caller_frame));
 }
 
 pub fn reflectGetOwnPropertyDescriptorCall(
@@ -3363,12 +3121,12 @@ pub fn reflectGetOwnPropertyDescriptorCall(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
+) !core.JSValue {
+    // A missing target is not an Object; a missing key is ToPropertyKey(undefined).
+    const object = objectFromValue(if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) orelse return error.NotAnObject;
+    const atom_id = try toPropertyKeyAtom(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), caller_function, caller_frame);
     var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
-    try call_mod.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
+    call.materializeMappedArgumentsDescriptorValue(ctx.runtime, object, atom_id, &desc);
     return try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
 }
 
@@ -3379,9 +3137,9 @@ pub fn reflectGetPrototypeOfCall(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
+) !core.JSValue {
+    if (args.len < 1) return error.NotAnObject;
+    const object = objectFromValue(args[0]) orelse return error.NotAnObject;
     return try objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
 
@@ -3474,34 +3232,34 @@ pub fn descriptorFromObject(
     const enumerable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, enumerable_key, caller_function, caller_frame);
     const configurable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, configurable_key, caller_function, caller_frame);
 
-    const has_value = try hasValueProperty(ctx, output, global, desc_value, desc_object, value_key, null, null);
+    const has_value = try hasValueProperty(ctx, output, global, desc_object, value_key, null, null);
     if (has_value) fields[0] = try getValueProperty(ctx, output, global, desc_value, value_key, caller_function, caller_frame);
 
-    const has_writable = try hasValueProperty(ctx, output, global, desc_value, desc_object, writable_key, null, null);
+    const has_writable = try hasValueProperty(ctx, output, global, desc_object, writable_key, null, null);
     const writable = if (has_writable) blk: {
         const writable_value = try getValueProperty(ctx, output, global, desc_value, writable_key, caller_function, caller_frame);
         break :blk valueTruthy(writable_value);
     } else null;
 
-    const has_get = try hasValueProperty(ctx, output, global, desc_value, desc_object, get_key, null, null);
+    const has_get = try hasValueProperty(ctx, output, global, desc_object, get_key, null, null);
     if (has_get) {
         const value = try getValueProperty(ctx, output, global, desc_value, get_key, caller_function, caller_frame);
         if (!value.is(.undefined_value) and !isCallableValue(value)) {
-            return error.TypeError;
+            return error.InvalidAccessor;
         }
         fields[1] = value;
     }
 
-    const has_set = try hasValueProperty(ctx, output, global, desc_value, desc_object, set_key, null, null);
+    const has_set = try hasValueProperty(ctx, output, global, desc_object, set_key, null, null);
     if (has_set) {
         const value = try getValueProperty(ctx, output, global, desc_value, set_key, caller_function, caller_frame);
         if (!value.is(.undefined_value) and !isCallableValue(value)) {
-            return error.TypeError;
+            return error.InvalidAccessor;
         }
         fields[2] = value;
     }
 
-    if ((has_get or has_set) and (has_value or has_writable)) return error.TypeError;
+    if ((has_get or has_set) and (has_value or has_writable)) return error.MixedPropertyDescriptor;
     if (has_get or has_set) {
         return .{
             .kind = .accessor,
@@ -3514,14 +3272,12 @@ pub fn descriptorFromObject(
         };
     }
     if (has_value or has_writable) {
-        var value = fields[0];
-        if (has_value and target.isArray() and atom_id == core.atom.ids.length and !value.isNumber()) {
-            const coerced = try arrayLengthDefineValue(ctx, output, global, value);
-            value = coerced;
-        }
+        // ToPropertyDescriptor does not convert: an Array `length` value is
+        // converted by ArraySetLength, inside [[DefineOwnProperty]]
+        // (`defineOwnPropertyVm`).
         return .{
             .kind = .data,
-            .value = value,
+            .value = fields[0],
             .value_present = has_value,
             .writable = writable,
             .enumerable = enumerable,
@@ -3541,7 +3297,7 @@ pub fn optionalBoolDescriptorProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?bool {
-    if (!try hasValueProperty(ctx, output, global, desc_value, desc_object, atom_id, null, null)) return null;
+    if (!try hasValueProperty(ctx, output, global, desc_object, atom_id, null, null)) return null;
     const value = try getValueProperty(ctx, output, global, desc_value, atom_id, caller_function, caller_frame);
     return valueTruthy(value);
 }
@@ -3602,8 +3358,8 @@ noinline fn getSlowPropertyValueFromObject(
     if (object.class_id == core.class.ids.proxy) {
         return try getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
     }
-    // qjs JS_GetPropertyInternal after find_own miss: `is_exotic && fast_array`
-    //. TypedArray elements never occupy a shape slot, so
+    // qjs JS_GetPropertyInternal after find_own miss: `is_exotic && fast_array`.
+    // TypedArray elements never occupy a shape slot, so
     // this arm is independent of whether `object` is the original receiver —
     // a proto-chain TypedArray must still answer canonical numeric indices
     // (in-range load, OOB / non-canonical numeric → undefined) before the
@@ -3635,27 +3391,8 @@ pub fn getSuperPropertyValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var current: ?*core.Object = prototype;
-    while (current) |object| {
-        if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-            switch (desc.kind) {
-                .accessor => {
-                    if (desc.getter.is(.undefined_value)) return core.JSValue.undefinedValue();
-                    return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
-                },
-                .data => return desc.value,
-                .generic => {},
-            }
-        }
-        // Same GetInternal exotic arm as `getSlowPropertyValueFromObject`
-        //: super starts the walk at the home proto, so
-        // a TypedArray on that chain must still supply canonical indices.
-        if (core.object.isTypedArrayObject(object)) {
-            if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
-        }
-        current = object.getPrototype();
-    }
-    return core.JSValue.undefinedValue();
+    // The home object's [[Prototype]].[[Get]](key, thisValue) (§13.3.7.1).
+    return getValuePropertyWithReceiver(ctx, output, global, prototype.value(), prototype, receiver, atom_id, caller_function, caller_frame);
 }
 
 pub fn setSuperPropertyValue(
@@ -3669,40 +3406,20 @@ pub fn setSuperPropertyValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const throw_on_set_failure = setFailureShouldThrow(caller_function);
-    if (try findPropertyDescriptor(ctx.runtime, prototype, atom_id)) |desc| {
-        switch (desc.kind) {
-            .accessor => {
-                if (desc.setter.is(.undefined_value)) {
-                    // The throw helper always raises; its value arm is never
-                    // produced, so `try` is the whole control flow here.
-                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
-                    return;
-                }
-                _ = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
-                return;
-            },
-            .data => {
-                if (desc.writable == false) {
-                    // The throw helper always raises; its value arm is never
-                    // produced, so `try` is the whole control flow here.
-                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
-                    return;
-                }
-                if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
-                _ = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
-                return;
-            },
-            .generic => {},
-        }
+    // PutValue on a super reference: HomeObject.[[Prototype]].[[Set]](P, V,
+    // thisValue); the receiver itself is only ever defined on, never [[Set]].
+    if (!try reflect_ops.setWithReceiver(ctx, output, global, prototype, receiver, atom_id, value, caller_function, caller_frame) and
+        setFailureShouldThrow(caller_function))
+    {
+        _ = try throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
     }
-    if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
-    _ = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
 }
 
 pub fn findPropertyDescriptor(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.Descriptor {
-    if (try object.getOwnProperty(rt, atom_id)) |desc| return desc;
-    if (object.getPrototype()) |proto| return findPropertyDescriptor(rt, proto, atom_id);
+    var current: ?*core.Object = object;
+    while (current) |candidate| : (current = candidate.getPrototype()) {
+        if (try candidate.getOwnProperty(rt, atom_id)) |desc| return desc;
+    }
     return null;
 }
 
@@ -3713,17 +3430,8 @@ pub fn sameObjectIdentity(a: core.JSValue, b: core.JSValue) bool {
     return a_header == b_header;
 }
 
-/// Leftover proxy [[Has]] trap. candidate111 still compiles
-/// `hasPropertyForWith` (860) as a second copy of `hasValueProperty`
-/// (795, extra 795, 5.3% match). The leftover is target+handler +
-/// get `has` + missing-trap recurse + trap key + call +
-/// `validateProxyHasResult`. Comptime identity is the incoming
-/// JSValue vs `*Object` receiver. Take expectObject in the with
-/// wrapper and reuse the already-outlined `hasValueProperty` walk
-/// (knife 103: add leftover copy to a helper that already has the
-/// walk). Does not turn `hasValueProperty` into an inline wrapper
-/// (knives 94/108). Does not fold [[Set]] / isExtensible /
-/// PreventExtensions / SetPrototypeOf / [[Get]] / [[Delete]].
+/// `with`-scope [[HasProperty]]: `expectObject` on the incoming value, then
+/// the outlined `hasValueProperty` walk (including the proxy `has` trap).
 pub inline fn hasPropertyForWith(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3734,31 +3442,30 @@ pub inline fn hasPropertyForWith(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
     const object = try property_ops.expectObject(object_value);
-    return hasValueProperty(ctx, output, global, object_value, object, atom_id, caller_function, caller_frame);
+    return hasValueProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
 }
 
 pub fn hasValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
-    // `receiver` only keeps this in shape with the get/set/delete family:
-    // [[HasProperty]] takes no receiver (the trap gets `target`, and the
-    // ordinary walk never reads one). Kept so cross-file call sites in
-    // array_ops / reflect_ops stay uniform across the four operations.
-    _ = receiver;
-    const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
+    const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
     const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const handler_value = try proxyHandlerForTrap(ctx, global, object);
     const has_atom = core.atom.ids.has;
     const trap = try getValueProperty(ctx, output, global, handler_value, has_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        return hasValueProperty(ctx, output, global, target_value, target, atom_id, caller_function, caller_frame);
+        return hasValueProperty(ctx, output, global, target, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
@@ -3771,7 +3478,6 @@ pub fn ordinaryHasValueProperty(
     global: *core.Object,
     object: *core.Object,
     atom_id: core.Atom,
-    has_builtin_object_proto: bool,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
@@ -3794,7 +3500,7 @@ pub fn ordinaryHasValueProperty(
     var current = object.getPrototype();
     while (current) |proto| : (current = proto.getPrototype()) {
         if (proto.proxyTarget() != null) {
-            return try hasValueProperty(ctx, output, global, proto.value(), proto, atom_id, caller_function, caller_frame);
+            return try hasValueProperty(ctx, output, global, proto, atom_id, caller_function, caller_frame);
         }
         if (proto.class_id == core.class.ids.module_ns) {
             return proto.hasOwnProperty(atom_id);
@@ -3803,7 +3509,7 @@ pub fn ordinaryHasValueProperty(
         if (indexedExoticHasProperty(ctx.runtime, proto, atom_id)) return true;
         if (try proto.existsOwnProperty(ctx.runtime, atom_id)) return true;
     }
-    return has_builtin_object_proto;
+    return false;
 }
 
 pub fn indexedExoticHasProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
@@ -3816,35 +3522,38 @@ pub fn deleteValuePropertyOrThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
 ) !void {
-    if (!try deleteValueProperty(ctx, output, global, receiver, object, atom_id, null, null)) return error.TypeError;
+    if (!try deleteValueProperty(ctx, output, global, object, atom_id, null, null)) return error.CannotDeleteProperty;
 }
 
 pub fn deleteValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    // Same as `hasValueProperty`: [[Delete]] takes no receiver, the parameter
-    // only keeps the four property operations call-compatible.
-    _ = receiver;
     const target_value = object.proxyTarget() orelse {
-        return object.deleteProperty(ctx.runtime, atom_id);
+        // TypedArray [[Delete]] (§10.4.5.6): canonical numeric keys are
+        // never deletable in range and always "deleted" out of range.
+        if (try typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |deleted| return deleted;
+        return try object.deleteProperty(ctx.runtime, atom_id);
     };
     const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const handler_value = try proxyHandlerForTrap(ctx, global, object);
     const delete_atom = core.atom.ids.deleteProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, delete_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        return deleteValueProperty(ctx, output, global, target_value, target, atom_id, caller_function, caller_frame);
+        return deleteValueProperty(ctx, output, global, target, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
@@ -3855,8 +3564,8 @@ pub fn deleteValueProperty(
     // consulted via JS_IsExtensible (exotic — the target's isExtensible trap
     // DOES fire here, unlike js_proxy_has).
     if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
-        if (desc.configurable == false) return error.TypeError;
-        if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
+        if (desc.configurable == false) return error.ProxyInvariantViolation;
+        if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.ProxyInvariantViolation;
     }
     return true;
 }
@@ -3874,34 +3583,32 @@ pub fn defineFunctionNameProperty(rt: *core.JSRuntime, object: *core.Object, val
 pub fn objectHasNonEmptyName(rt: *core.JSRuntime, object: *core.Object) !bool {
     const existing = (try object.getOwnProperty(rt, core.atom.ids.name)) orelse return false;
     if (existing.kind != .data or !existing.value.isString()) return false;
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.nativeAllocator());
-    value_ops.appendRawString(rt, &bytes, existing.value) catch return false;
-    return bytes.items.len != 0;
+    return core.string.stringValueLen(existing.value) != 0;
 }
 
-pub fn throwNullishPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
+pub const NullishAccess = enum { read, set };
+
+/// TypeError for a property access on `null`/`undefined`, e.g.
+/// "cannot read property 'x' of undefined".
+pub fn throwNullishPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, atom_id: core.Atom, access: NullishAccess) !core.JSValue {
     const property_name = try atomPropertyName(ctx.runtime, atom_id);
     defer ctx.runtime.nativeAllocator().free(property_name);
-    const base = if (value.is(.null_value)) "null" else "undefined";
-    const message = try std.fmt.allocPrint(
-        ctx.runtime.nativeAllocator(),
-        "cannot read property '{s}' of {s}",
-        .{ property_name, base },
-    );
-    defer ctx.runtime.nativeAllocator().free(message);
-    return throwTypeErrorMessage(ctx, global, message);
+    return throwNullishAccessMessage(ctx, global, value, property_name, access);
 }
 
-pub fn throwNullishComputedPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, key: core.JSValue) !core.JSValue {
+pub fn throwNullishComputedPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, key: core.JSValue, access: NullishAccess) !core.JSValue {
     var property_name = std.ArrayList(u8).empty;
     defer property_name.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendValueString(ctx.runtime, &property_name, key);
+    return throwNullishAccessMessage(ctx, global, value, property_name.items, access);
+}
+
+fn throwNullishAccessMessage(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, property_name: []const u8, access: NullishAccess) !core.JSValue {
     const base = if (value.is(.null_value)) "null" else "undefined";
     const message = try std.fmt.allocPrint(
         ctx.runtime.nativeAllocator(),
-        "cannot read property '{s}' of {s}",
-        .{ property_name.items, base },
+        "cannot {s} property '{s}' of {s}",
+        .{ @tagName(access), property_name, base },
     );
     defer ctx.runtime.nativeAllocator().free(message);
     return throwTypeErrorMessage(ctx, global, message);
@@ -3948,34 +3655,38 @@ pub noinline fn getSuper(vm: *Vm) HostError!void {
     }
 }
 
+/// Route an opcode's error to the frame's catch handler: success when a
+/// handler took it, the error otherwise.
+pub fn catchVmError(vm: *Vm, err: HostError) HostError!void {
+    if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
+    return err;
+}
+
+/// Deliver a `throw*Message` result to the running frame's catch handler.
+/// `thrown` always fails; this only routes that error.
+pub fn catchableThrow(vm: *Vm, thrown: HostError!core.JSValue) HostError!void {
+    _ = thrown catch |err| return catchVmError(vm, err);
+    unreachable;
+}
+
 pub noinline fn getSuperValue(vm: *Vm) HostError!void {
     const ctx = vm.ctx;
     const output = vm.output;
     const global = vm.global;
     const stack = vm.stack;
     const frame = vm.frame;
-    const catch_target = vm.catch_target;
     const prop_value = try stack.pop();
     const obj = try stack.pop();
     const receiver = try stack.pop();
-    if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return;
-        return error.ReferenceError;
+    if (property_ops.adapterValueIsUninitialized(receiver)) {
+        return catchVmError(vm, error.ReferenceError);
     }
-    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, vm.function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-        return err;
-    };
-    if (obj.is(.undefined_value) or obj.is(.null_value)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
-        return error.TypeError;
-    }
+    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, vm.function, frame) catch |err| return catchVmError(vm, err);
+    if (obj.is(.undefined_value) or obj.is(.null_value))
+        return catchableThrow(vm, throwNullishPropertyTypeError(ctx, global, obj, atom_id, .read));
 
     const prototype = try property_ops.expectObject(obj);
-    const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, vm.function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-        return err;
-    };
+    const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, vm.function, frame) catch |err| return catchVmError(vm, err);
     try stack.push(value);
 }
 
@@ -3986,33 +3697,24 @@ pub noinline fn putSuperValue(vm: *Vm) HostError!void {
     const stack = vm.stack;
     const function = vm.function;
     const frame = vm.frame;
-    const catch_target = vm.catch_target;
     const value = try stack.pop();
     const prop_value = try stack.pop();
     const obj = try stack.pop();
     const receiver = try stack.pop();
-    if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return;
-        return error.ReferenceError;
+    if (property_ops.adapterValueIsUninitialized(receiver)) {
+        return catchVmError(vm, error.ReferenceError);
     }
-    if (obj.is(.undefined_value) or obj.is(.null_value)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
-        return error.TypeError;
-    }
-    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-        return err;
-    };
+    // PutValue converts the key before ToObject rejects a null home prototype.
+    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| return catchVmError(vm, err);
+    if (obj.is(.undefined_value) or obj.is(.null_value))
+        return catchableThrow(vm, throwTypeErrorMessage(ctx, global, "not an object"));
     const prototype = try property_ops.expectObject(obj);
-    setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-        return err;
-    };
+    setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn setHomeObject(vm: *Vm) HostError!void {
-    const func_value = try stackValueFromTop(vm.stack, 0);
-    const home_value = try stackValueFromTop(vm.stack, 1);
+    const func_value = try vm.stack.peekFromTop(0);
+    const home_value = try vm.stack.peekFromTop(1);
     if (func_value.is(.object) and home_value.is(.object)) {
         const func_object = try property_ops.expectObject(func_value);
         try func_object.setFunctionHomeObject(vm.ctx.runtime, try property_ops.expectObject(home_value));
@@ -4039,14 +3741,10 @@ pub noinline fn checkBrandVm(vm: *Vm) HostError!void {
                 objectRealmGlobal(function_object) orelse global
             else
                 global;
-            _ = throwTypeErrorMessage(ctx, error_global, "invalid brand on object") catch |throw_err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, vm.frame, vm.catch_target, global, throw_err)) return;
-                return throw_err;
-            };
+            _ = throwTypeErrorMessage(ctx, error_global, "invalid brand on object") catch |throw_err| return catchVmError(vm, throw_err);
             unreachable;
         }
-        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, vm.frame, vm.catch_target, global, err)) return;
-        return err;
+        return catchVmError(vm, err);
     };
 }
 
@@ -4063,23 +3761,18 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const brand_atom = try ensureHomeObjectBrand(ctx.runtime, home);
     if (rooted_obj.is(.object)) {
         const object = try property_ops.expectObject(rooted_obj);
-        if (object.hasOwnProperty(brand_atom)) return error.TypeError;
+        if (ctx.global) |global| try requirePrivateElementTargetExtensible(ctx, null, global, object, null, null);
+        if (object.hasOwnProperty(brand_atom)) return error.PrivateMemberExists;
         // NO-ALIGN(qjs): JS_AddBrand raw-adds the instance
         // brand ignoring extensibility; test262's
         // `nonextensible-applies-to-private` feature mandates the TypeError,
         // so zjs keeps the NotExtensible -> TypeError behavior.
-        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), .all)) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            else => return err,
-        };
+        try object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     }
 }
 
 pub noinline fn addBrandVm(vm: *Vm) HostError!void {
-    addBrand(vm.ctx, vm.stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    addBrand(vm.ctx, vm.stack) catch |err| return catchVmError(vm, err);
 }
 
 pub fn privateIn(
@@ -4107,10 +3800,7 @@ pub fn privateIn(
 }
 
 pub noinline fn privateInVm(vm: *Vm) HostError!void {
-    privateIn(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    privateIn(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn defineClass(vm: *Vm, opc: u8) HostError!void {
@@ -4120,7 +3810,6 @@ pub noinline fn defineClass(vm: *Vm, opc: u8) HostError!void {
     const stack = vm.stack;
     const function = vm.function;
     const frame = vm.frame;
-    const catch_target = vm.catch_target;
     const is_computed_name = opc == bytecode.opcode.op.define_class_computed;
     const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const flags = function.byteCode()[frame.pc + 4];
@@ -4160,21 +3849,16 @@ pub noinline fn defineClass(vm: *Vm, opc: u8) HostError!void {
             owes_placeholder_class_binding = true;
             superclass_value = try stack.pop();
         }
-        if (!(superclass_value.is(.object) or superclass_value.is(.null_value))) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
-            return error.TypeError;
-        }
+        if (!(superclass_value.is(.object) or superclass_value.is(.null_value)))
+            return catchableThrow(vm, throwTypeErrorMessage(ctx, global, "parent class must be constructor"));
     }
     const owned_ctor_source = ctor_source;
     ctor_source = core.JSValue.undefinedValue();
     ctor = try createClassBytecodeFunctionObject(ctx, frame, global, owned_ctor_source, atom_id);
     const ctor_object = try property_ops.expectObject(ctor);
     if (is_computed_name) {
-        computed_key = try stackValueFromTop(stack, 0);
-        const name_atom = toPropertyKeyAtom(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-            return err;
-        };
+        computed_key = try stack.peekFromTop(0);
+        const name_atom = toPropertyKeyAtom(ctx, output, global, computed_key, function, frame) catch |err| return catchVmError(vm, err);
         name_value = try functionNameValueFromAtom(ctx.runtime, name_atom, null);
         try defineFunctionNameProperty(ctx.runtime, ctor_object, name_value);
         name_value = core.JSValue.undefinedValue();
@@ -4183,21 +3867,17 @@ pub noinline fn defineClass(vm: *Vm, opc: u8) HostError!void {
     var proto_parent: ?*core.Object = objectPrototypeFromGlobal(ctx.runtime, global);
     if (superclass_value_active) {
         if (superclass_value.is(.object)) {
-            if (!(try isConstructorLike(ctx, superclass_value))) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
-                return error.TypeError;
-            }
+            if (!isConstructorLike(superclass_value))
+                return catchableThrow(vm, throwTypeErrorMessage(ctx, global, "parent class must be constructor"));
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
-            superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-                return err;
-            };
+            superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| return catchVmError(vm, err);
             if (superclass_proto.is(.object)) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
-            } else if (!superclass_proto.is(.null_value)) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
-                return error.TypeError;
+            } else if (superclass_proto.is(.null_value)) {
+                proto_parent = null;
+            } else {
+                return catchableThrow(vm, throwTypeErrorMessage(ctx, global, "parent prototype must be an object or null"));
             }
         } else {
             proto_parent = null;
@@ -4221,10 +3901,7 @@ pub noinline fn defineMethod(vm: *Vm) HostError!void {
     frame.pc += 4;
     const flags = vm.function.byteCode()[frame.pc];
     frame.pc += 1;
-    defineObjectMethod(vm.ctx.runtime, vm.stack, atom_id, flags) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    defineObjectMethod(vm.ctx.runtime, vm.stack, atom_id, flags) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn defineMethodComputed(vm: *Vm) HostError!void {
@@ -4235,14 +3912,13 @@ pub noinline fn defineMethodComputed(vm: *Vm) HostError!void {
     frame.pc += 1;
     const value = try stack.pop();
     const key_value = try stack.pop();
-    const atom_id = toPropertyKeyAtom(ctx, vm.output, vm.global, key_value, vm.function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, stack, frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
-    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, stack, frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    const atom_id = toPropertyKeyAtom(ctx, vm.output, vm.global, key_value, vm.function, frame) catch |err| return catchVmError(vm, err);
+    // A number key's atom is fresh and held by nothing until the define;
+    // naming a getter or setter ("get 1.5") allocates first.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags) catch |err| return catchVmError(vm, err);
 }
 
 fn defineObjectMethod(
@@ -4309,24 +3985,12 @@ fn defineObjectMethodValue(
             core.Descriptor.accessor(rooted_value, setter, .{ .enumerable = enumerable, .configurable = true })
         else
             core.Descriptor.accessor(getter, rooted_value, .{ .enumerable = enumerable, .configurable = true });
-        object.defineOwnProperty(rt, atom_id, desc) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            else => return err,
-        };
+        try object.defineOwnProperty(rt, atom_id, desc);
         getter = core.JSValue.undefinedValue();
         setter = core.JSValue.undefinedValue();
         return;
     }
-    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, .{ .writable = true, .enumerable = enumerable, .configurable = true })) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
-}
-
-fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
-    const index_from_top: usize = offset;
-    if (index_from_top >= stack.len()) return error.StackUnderflow;
-    return stack.values[stack.len() - 1 - index_from_top];
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, .{ .writable = true, .enumerable = enumerable, .configurable = true }));
 }
 
 fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
@@ -4343,17 +4007,16 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
 }
 
 fn hasPrivateBrand(rt: *core.JSRuntime, obj: core.JSValue, func: core.JSValue) !bool {
-    const object = try property_ops.expectObject(obj);
-    const func_object = try property_ops.expectObject(func);
+    // A bare TypeError: checkBrandVm throws it from the function's realm.
+    const object = objectFromValue(obj) orelse return error.TypeError;
+    const func_object = objectFromValue(func) orelse return error.TypeError;
     const home = func_object.functionHomeObject() orelse return error.TypeError;
     const desc = (try home.getOwnProperty(rt, core.atom.ids.Private_brand)) orelse return error.TypeError;
     const brand_atom = desc.value.asSymbolAtom() orelse return error.TypeError;
     return object.hasOwnProperty(brand_atom);
 }
 
-fn readInt(comptime T: type, bytes: []const u8) T {
-    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
-}
+const readInt = call_runtime.readInt;
 
 test "private brand atom is released with home object" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
@@ -4387,16 +4050,9 @@ test "private brand creation does not allocate atom for non-extensible home obje
 
 const ProxySetKind = enum { value, error_stack };
 
-/// Leftover proxy [[Set]] trap walk. candidate107 still compiles
-/// `proxySetTrapForErrorStackSetter` (1065) / `proxySetValueProperty`
-/// (1113, extra 1065, 10.2% match). The leftover is target+handler +
-/// get `set` + callable check + trap key + call + validateProxySetResult.
-/// Comptime identity is missing-target / missing-trap / falsy-trap
-/// policy. Take that at runtime. Public names stay `inline` and pass
-/// only the kind — no leftover setup at the wrapper (knives 94/98/108).
-/// Explicit `HostError` so `ordinarySetWithReceiver` can still call the
-/// value wrapper without an inferred-error-set cycle (knife 109).
-/// Does not fold PreventExtensions / IsExtensible.
+/// Shared proxy [[Set]] trap walk; `kind` selects the missing-target /
+/// missing-trap / falsy-result policy. Explicit `HostError` breaks the
+/// inferred-error-set cycle with `ordinarySetWithReceiver`.
 noinline fn proxySetWithTrap(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4412,23 +4068,34 @@ noinline fn proxySetWithTrap(
     const target_value = proxy.proxyTarget() orelse {
         return if (kind == .error_stack) false else error.TypeError;
     };
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const handler_value = try proxyHandlerForTrap(ctx, global, proxy);
     const set_atom = core.atom.ids.set;
     const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
         switch (kind) {
             .error_stack => return false,
             .value => {
+                // target.[[Set]](P, V, Receiver): the target's own [[Set]],
+                // exotic ones (TypedArray, nested Proxy) included.
                 const target = try property_ops.expectObject(target_value);
-                return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
+                return reflect_ops.setWithReceiver(ctx, output, global, target, receiver_value, atom_id, value, caller_function, caller_frame);
             },
         }
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) {
-        return if (kind == .error_stack) error.TypeError else false;
+        if (kind == .error_stack) {
+            _ = try throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
+            unreachable;
+        }
+        return false;
     }
     const target = try property_ops.expectObject(target_value);
     try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
@@ -4459,74 +4126,68 @@ fn proxyCreateDataPropertyOrThrow(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const trap_atom = core.atom.ids.defineProperty;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, .all)) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            else => return err,
-        };
-        return;
-    }
-    if (!isCallableValue(trap)) return error.TypeError;
-
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    const desc_value = desc_object.value();
-    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.value, value);
-    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.writable, core.JSValue.boolean(true));
-    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.enumerable, core.JSValue.boolean(true));
-    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.configurable, core.JSValue.boolean(true));
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
-    if (!value_ops.isTruthy(result)) return error.TypeError;
+    // CreateDataPropertyOrThrow = [[DefineOwnProperty]] (trap, forwarding,
+    // and invariant checks) + throw on false.
+    if (!try proxyDefineOwnProperty(ctx, output, global, proxy, atom_id, core.Descriptor.data(value, .all), caller_function, caller_frame))
+        return error.CannotDefineProperty;
 }
 
 pub fn validateProxyOwnKeysResult(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    source: *core.Object,
     target_value: core.JSValue,
     result_keys: []const core.Atom,
 ) HostError!void {
     const rt = ctx.runtime;
     const target = try property_ops.expectObject(target_value);
-    // js_proxy_get_own_property_names invariant walk:
-    // JS_IsExtensible on the target FIRST (exotic — a nested-proxy target
-    // fires its isExtensible trap), then a revoked re-check (the ownKeys trap
-    // may have revoked its own proxy, quickjs.c), then the target's own
-    // keys via JS_GetOwnPropertyNamesInternal (exotic ownKeys) and a per-key
-    // revoked re-check + JS_GetOwnPropertyInternal (exotic
-    // gopd — inner invariant violations surface as TypeErrors here).
+    // §10.5.11 invariant walk: IsExtensible(target) first (a nested-proxy
+    // target fires its isExtensible trap), then the target's own keys and a
+    // [[GetOwnProperty]] per key. Revocation is validated only in step 1, so
+    // a trap that revokes its own proxy is still checked against the
+    // captured target.
     const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, null, null);
-    if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
     const target_keys = try objectRestOwnKeys(ctx, output, global, target);
     defer core.Object.freeKeys(rt, target_keys);
+    // A Proxy ownKeys result lives only in this native list across the
+    // traps and allocations below; keep its atoms alive.
+    var target_keys_roots = core.runtime.rootAtomList(&target_keys);
+    target_keys_roots.activate(rt);
+    defer target_keys_roots.deactivate(rt);
 
-    // Mirrors qjs's tab[idx].is_enumerable found-marking: a trap-result key on
-    // a non-extensible target must correspond to a target key whose gopd walk
-    // actually found a descriptor.
-    const found = try rt.nativeAllocator().alloc(bool, result_keys.len);
-    defer rt.nativeAllocator().free(found);
-    @memset(found, false);
-
-    for (target_keys) |target_key| {
-        if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
-        const desc = (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, target_key, null, null)) orelse continue;
-        if (desc.configurable == false or !target_extensible) {
-            const idx = for (result_keys, 0..) |result_key, i| {
-                if (result_key == target_key) break i;
-            } else return error.TypeError;
-            if (!target_extensible) found[idx] = true;
-        }
+    // Step 16: [[GetOwnProperty]] for every target key before any check, so
+    // a later key's trap runs (and may throw) even when an earlier key
+    // already violates an invariant.
+    const allocator = rt.nativeAllocator();
+    const nonconfigurable = try allocator.alloc(bool, target_keys.len);
+    defer allocator.free(nonconfigurable);
+    for (target_keys, nonconfigurable) |target_key, *flag| {
+        const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, target_key, null, null);
+        flag.* = if (desc) |item| item.configurable == false else false;
     }
-    if (!target_extensible) {
-        for (found) |marked| {
-            if (!marked) return error.TypeError;
-        }
+
+    // The result keys are distinct (checked while collecting them).
+    var result_index: std.AutoHashMapUnmanaged(core.Atom, usize) = .empty;
+    defer result_index.deinit(allocator);
+    try result_index.ensureTotalCapacity(allocator, @intCast(result_keys.len));
+    for (result_keys, 0..) |result_key, i| result_index.putAssumeCapacity(result_key, i);
+    const unchecked = try allocator.alloc(bool, result_keys.len);
+    defer allocator.free(unchecked);
+    @memset(unchecked, true);
+
+    // Steps 19-22: every non-configurable key must be listed; a
+    // non-extensible target must list exactly its own keys.
+    for (target_keys, nonconfigurable) |target_key, flag| {
+        if (!flag) continue;
+        unchecked[result_index.get(target_key) orelse return error.ProxyInvariantViolation] = false;
+    }
+    if (target_extensible) return;
+    for (target_keys, nonconfigurable) |target_key, flag| {
+        if (flag) continue;
+        unchecked[result_index.get(target_key) orelse return error.ProxyInvariantViolation] = false;
+    }
+    for (unchecked) |left| {
+        if (left) return error.ProxyInvariantViolation;
     }
 }
 
@@ -4539,39 +4200,46 @@ pub fn proxyAwareOwnPropertyDescriptor(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.Descriptor {
-    if (source.proxyTarget() == null) {
+    const target_value = source.proxyTarget() orelse {
         if (try typedArrayCanonicalOwnDescriptor(ctx.runtime, source, key)) |desc| return desc;
         return source.getOwnProperty(ctx.runtime, key);
-    }
-    const target_value = source.proxyTarget() orelse return error.TypeError;
+    };
     const target = try property_ops.expectObject(target_value);
-    const handler_value = source.proxyHandler() orelse return error.TypeError;
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&key});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const handler_value = try proxyHandlerForTrap(ctx, global, source);
     const trap_atom = core.atom.ids.getOwnPropertyDescriptor;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
         return try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const key_value = try proxyTrapKeyValue(ctx.runtime, key);
     const desc_value = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    // [[GetOwnProperty]] 10.5.5: the result type is checked (step 8) before
+    // the target is consulted (step 9), and IsExtensible(target) runs only
+    // once a target descriptor or a result descriptor needs it.
+    const desc_object: ?*core.Object = if (desc_value.is(.undefined_value)) null else try property_ops.expectObject(desc_value);
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
-    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
-    if (desc_value.is(.undefined_value)) {
-        if (target_desc) |item| {
-            if (item.configurable == false or !target_extensible) return error.TypeError;
-        }
+    if (desc_object == null) {
+        const item = target_desc orelse return null;
+        if (item.configurable == false) return error.ProxyInvariantViolation;
+        if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.ProxyInvariantViolation;
         return null;
     }
-    const desc_object = try property_ops.expectObject(desc_value);
-    const result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
+    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    const result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object.?, target, key, caller_function, caller_frame);
     const complete_desc = try completeProxyDescriptor(result_desc);
-    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.TypeError;
+    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.ProxyInvariantViolation;
     if (complete_desc.configurable == false) {
         if (target_desc) |item| {
-            if (item.configurable != false) return error.TypeError;
-            if (complete_desc.kind == .data and complete_desc.writable == false and item.kind == .data and item.writable == true) return error.TypeError;
+            if (item.configurable != false) return error.ProxyInvariantViolation;
+            if (complete_desc.kind == .data and complete_desc.writable == false and item.kind == .data and item.writable == true) return error.ProxyInvariantViolation;
         } else {
-            return error.TypeError;
+            return error.ProxyInvariantViolation;
         }
     }
     return complete_desc;
@@ -4605,17 +4273,10 @@ pub fn proxyAwareExistsOwnProperty(
 
 const ProxyExtensibleKind = enum { is_extensible, prevent };
 
-/// Leftover proxy isExtensible/preventExtensions trap walk. candidate110
-/// still compiles `proxyAwareIsExtensible` (779) /
-/// `proxyAwarePreventExtensions` (756, extra 756, 14.9% match). The
-/// leftover is target+handler + get trap + callable check +
-/// call(`[target]`). Comptime identity is missing-proxy /
-/// missing-trap recurse / result check. Take that at runtime.
-/// Public names stay `inline` and pass only the kind. Explicit
-/// `HostError` so Prevent's IsExtensible check and missing-trap
-/// recurse do not form an inferred-error-set cycle (knives 109/110).
-/// Does not fold SetPrototypeOf. Does not retry leftover [[Set]] trap
-/// (knife 110).
+/// Shared proxy isExtensible / preventExtensions trap walk; `kind` selects
+/// the trap and result check. Explicit `HostError` breaks the inferred-
+/// error-set cycle through Prevent's IsExtensible check and the
+/// missing-trap recursion.
 noinline fn proxyAwareExtensibleOp(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4625,20 +4286,12 @@ noinline fn proxyAwareExtensibleOp(
     caller_frame: ?*frame_mod.Frame,
     kind: ProxyExtensibleKind,
 ) HostError!bool {
-    switch (kind) {
-        .is_extensible => {
-            if (object.proxyTarget() == null) return object.isExtensible();
-        },
-        .prevent => {
-            if (object.proxyTarget() == null) {
-                object.preventExtensions();
-                return true;
-            }
-        },
-    }
-    const target_value = object.proxyTarget() orelse return error.TypeError;
+    const target_value = object.proxyTarget() orelse return switch (kind) {
+        .is_extensible => object.isExtensible(),
+        .prevent => object.preventExtensionsChecked(),
+    };
     const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    const handler_value = try proxyHandlerForTrap(ctx, global, object);
     const trap_atom = switch (kind) {
         .is_extensible => core.atom.ids.isExtensible,
         .prevent => core.atom.ids.preventExtensions,
@@ -4647,20 +4300,20 @@ noinline fn proxyAwareExtensibleOp(
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
         return proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, kind);
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     switch (kind) {
         .is_extensible => {
             const extensible = valueTruthy(result);
             if (extensible != try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
-                return error.TypeError;
+                return error.ProxyInvariantViolation;
             }
             return extensible;
         },
         .prevent => {
             if (!valueTruthy(result)) return false;
             if (try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
-                return error.TypeError;
+                return error.ProxyInvariantViolation;
             }
             return true;
         },
@@ -4706,17 +4359,17 @@ pub fn proxyAwareSetPrototypeOf(
         return true;
     };
     const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    const handler_value = try proxyHandlerForTrap(ctx, global, object);
     const trap_atom = core.atom.ids.setPrototypeOf;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
     const proto_value = if (prototype) |proto| proto.value() else core.JSValue.nullValue();
     if (trap.is(.undefined_value) or trap.is(.null_value)) return proxyAwareSetPrototypeOf(ctx, output, global, target, prototype, caller_function, caller_frame);
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, proto_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) return false;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
         const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
-        if (target_proto != prototype) return error.TypeError;
+        if (target_proto != prototype) return error.ProxyInvariantViolation;
     }
     return true;
 }
@@ -4750,44 +4403,91 @@ pub fn isCompatibleProxyDescriptor(extensible: bool, current: ?core.Descriptor, 
     return true;
 }
 
+/// Whether `value` is a proxy with [[Call]]: a flag ProxyCreate fixes, so a
+/// long proxy chain is not walked on every call.
 pub fn proxyTargetIsCallable(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    const target = object.proxyTarget() orelse return false;
-    return target.is(.function_bytecode) or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+    return object.proxyIsCallable();
 }
 
-pub fn proxyTargetIsConstructor(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
-    const object = objectFromValue(value) orelse return false;
-    const target = object.proxyTarget() orelse return false;
-    return isConstructorLike(ctx, target);
+/// ProxyCreate(target, handler) (§10.5.14) after the Object checks: the
+/// shared body of `new Proxy` and `Proxy.revocable`.
+pub fn createProxyObject(ctx: *core.JSContext, target: core.JSValue, handler: core.JSValue) !*core.Object {
+    const rt = ctx.runtime;
+    var rooted_target = target;
+    var rooted_handler = handler;
+    var root_frame = core.runtime.rootValues(.{ &rooted_target, &rooted_handler });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const is_callable = target.is(.function_bytecode) or functionObjectFromValue(target) != null or
+        callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+    const is_constructor = isConstructorLike(target);
+    const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
+    errdefer core.Object.destroyFromHeader(rt, proxy.gcHeader());
+    try proxy.ensureProxyPayload(rt);
+    proxy.setProxyCallability(is_callable, is_constructor);
+    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_target);
+    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_handler);
+    return proxy;
+}
+
+/// SpeciesConstructor(O, defaultConstructor) (ES §7.3.22). The default is
+/// the realm intrinsic the caller passes, never a replaceable global binding.
+pub fn speciesConstructor(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object_value: core.JSValue,
+    default_constructor: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var values = [_]core.JSValue{ global.value(), object_value, default_constructor, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[3] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.constructor, caller_function, caller_frame);
+    if (values[3].is(.undefined_value)) return values[2];
+    if (!values[3].is(.object)) return error.NotAnObject;
+    const species_atom = comptime core.atom.predefinedId("Symbol.species", .symbol).?;
+    values[3] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[3], species_atom, caller_function, caller_frame);
+    if (values[3].is(.undefined_value) or values[3].is(.null_value)) return values[2];
+    if (!isConstructorLike(values[3])) return error.NotAConstructor;
+    return values[3];
+}
+
+/// The live handler of `proxy` for a trap lookup. Every trap re-enters the
+/// engine for the proxy's target, so this is also the native-stack check that
+/// bounds a deep proxy chain (qjs get_proxy_method).
+pub fn proxyHandlerForTrap(ctx: *core.JSContext, global: *core.Object, proxy: *core.Object) !core.JSValue {
+    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    return proxy.proxyHandler() orelse {
+        _ = try throwTypeErrorMessage(ctx, global, "revoked proxy");
+        unreachable;
+    };
 }
 
 pub fn callProxyApply(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    proxy_value: core.JSValue,
     proxy: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // `proxy_value` is unused: everything this needs comes off `proxy`. It
-    // stays in the signature because both call sites (call.zig,
-    // call_runtime.zig) already hold the boxed callee.
-    _ = proxy_value;
-    // Materialize the revoked-proxy TypeError here so it carries the
-    // current realm's constructor (the caller frame's `global`), not the
-    // realm where the error eventually surfaces.
-    const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
-    const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
+    const target_value = proxy.proxyTargetOfProxy();
+    const handler_value = try proxyHandlerForTrap(ctx, global, proxy);
     const apply_atom = core.atom.ids.apply;
     const trap = try getValueProperty(ctx, output, global, handler_value, apply_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_value, target_value, args, caller_function, caller_frame);
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
     return callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
 }
@@ -4797,21 +4497,8 @@ pub fn constructProxyInstance(
     target: core.JSValue,
     handler: core.JSValue,
 ) !core.JSValue {
-    const rt = ctx.runtime;
     if (objectFromValue(target) == null or objectFromValue(handler) == null) return error.TypeError;
-
-    var rooted_target = target;
-    var rooted_handler = handler;
-    var root_frame = core.runtime.rootValues(.{ &rooted_target, &rooted_handler });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
-    errdefer core.Object.destroyFromHeader(rt, proxy.gcHeader());
-    try proxy.ensureProxyPayload(rt);
-    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_target);
-    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_handler);
-    return proxy.value();
+    return (try createProxyObject(ctx, target, handler)).value();
 }
 
 test "constructProxyInstance allocates a proxy whose [[Prototype]] is null" {
@@ -4834,16 +4521,15 @@ pub fn constructProxy(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    proxy_value: core.JSValue,
     proxy: *core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target_value: core.JSValue,
 ) !core.JSValue {
-    if (!(try proxyTargetIsConstructor(ctx, proxy_value))) return error.TypeError;
-    const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
-    const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
+    if (!proxy.proxyIsConstructor()) return error.NotAConstructor;
+    const target_value = proxy.proxyTargetOfProxy();
+    const handler_value = try proxyHandlerForTrap(ctx, global, proxy);
     const construct_atom = core.atom.ids.construct;
     const trap = try getValueProperty(ctx, output, global, handler_value, construct_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
@@ -4854,11 +4540,11 @@ pub fn constructProxy(
         // new.target for their observable prototype lookup.
         return call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, target_value, args, caller_function, caller_frame, new_target_value);
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, arg_array, new_target_value }, caller_function, caller_frame);
     if (!result.is(.object)) {
-        return error.TypeError;
+        return error.NotAnObject;
     }
     return result;
 }
@@ -4873,15 +4559,20 @@ pub fn getProxyProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    const target_value = (proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy"));
-    const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy"));
-    const trap = if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const target_value = proxy.proxyTargetOfProxy();
+    const handler_value = try proxyHandlerForTrap(ctx, global, proxy);
+    const trap = if (property_ops.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
         borrowed
     else
         try getValueProperty(ctx, output, global, handler_value, core.atom.ids.get, caller_function, caller_frame);
     const target = try property_ops.expectObject(target_value);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
+        if (property_ops.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
             return borrowed;
         }
         return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);
@@ -4904,17 +4595,17 @@ pub fn validateProxyGetResult(
 ) !void {
     switch (validatePlainProxyGetResultFast(target, atom_id, result)) {
         .valid => return,
-        .invalid => return error.TypeError,
+        .invalid => return error.ProxyInvariantViolation,
         .slow => {},
     }
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
-            if (target_desc.writable == false and !result.sameValue(target_desc.value)) return error.TypeError;
+            if (target_desc.writable == false and !result.sameValue(target_desc.value)) return error.ProxyInvariantViolation;
         },
         .accessor => {
-            if (target_desc.getter.is(.undefined_value) and !result.is(.undefined_value)) return error.TypeError;
+            if (target_desc.getter.is(.undefined_value) and !result.is(.undefined_value)) return error.ProxyInvariantViolation;
         },
         .generic => {},
     }
@@ -4948,7 +4639,11 @@ fn validatePlainProxyGetResultFast(target: *core.Object, atom_id: core.Atom, res
     };
 }
 
+/// The Proxy whose [[Set]] OrdinarySet reaches for `atom_id`, if any: none
+/// when `object` or an ordinary prototype before it owns the key
+/// (OrdinarySetWithOwnDescriptor uses the first own descriptor found).
 pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?*core.Object {
+    if (try object.getOwnProperty(rt, atom_id) != null) return null;
     var current = object.getPrototype();
     while (current) |prototype| : (current = prototype.getPrototype()) {
         if (prototype.proxyTarget() != null) return prototype;
@@ -4985,72 +4680,17 @@ pub fn validateProxySetResult(
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
-            if (target_desc.writable == false and !value.sameValue(target_desc.value)) return error.TypeError;
+            if (target_desc.writable == false and !value.sameValue(target_desc.value)) return error.ProxyInvariantViolation;
         },
         .accessor => {
-            if (target_desc.setter.is(.undefined_value)) return error.TypeError;
+            if (target_desc.setter.is(.undefined_value)) return error.ProxyInvariantViolation;
         },
         .generic => {},
     }
 }
 
-pub fn proxyDefineValueForReflectSet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver_value: core.JSValue,
-    proxy: *core.Object,
-    atom_id: core.Atom,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    var rooted_value = value;
-    var key_value = core.JSValue.undefinedValue();
-    var desc_value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &rooted_value, &key_value, &desc_value });
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-
-    const get_desc_atom = core.atom.ids.getOwnPropertyDescriptor;
-    const get_desc = try getValueProperty(ctx, output, global, handler_value, get_desc_atom, caller_function, caller_frame);
-    if (!get_desc.is(.undefined_value) and !get_desc.is(.null_value)) {
-        if (!isCallableValue(get_desc)) return error.TypeError;
-        _ = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
-    }
-
-    const define_atom = core.atom.ids.defineProperty;
-    const define = try getValueProperty(ctx, output, global, handler_value, define_atom, caller_function, caller_frame);
-    if (define.is(.undefined_value) or define.is(.null_value)) {
-        const target = try property_ops.expectObject(target_value);
-        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all)) catch |err| switch (err) {
-            error.InvalidLength => return error.RangeError,
-            error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
-            else => return err,
-        };
-        return;
-    }
-    if (!isCallableValue(define)) return error.TypeError;
-    const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    desc_value = desc_object.value();
-    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.value, rooted_value);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
-    if (!valueTruthy(result)) return error.TypeError;
-    // CreateDataProperty on the proxy passes `target` to the trap; the
-    // Reflect.set receiver plays no part. The parameter is kept for the
-    // array_ops call site's symmetry with the ordinary define path.
-    _ = receiver_value;
-}
-
 pub fn proxyTargetIsCallableObject(object: *core.Object) bool {
-    if (isFunctionLikeClass(object.class_id)) return true;
-    if (!object.isProxy()) return false;
-    const target = object.proxyTarget() orelse return false;
-    return target.is(.function_bytecode) or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+    return core.class.isFunctionClass(object.class_id) or proxyTargetIsCallable(object.value());
 }
 
 pub fn proxyDefineOwnProperty(
@@ -5063,41 +4703,39 @@ pub fn proxyDefineOwnProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    // The key may be a fresh atom (a number key) that nothing else holds,
+    // and the trap lookup and call below run JavaScript.
+    var key_roots = core.runtime.rootAtoms(.{&atom_id});
+    key_roots.activate(ctx.runtime);
+    defer key_roots.deactivate(ctx.runtime);
+    const target_value = proxy.proxyTargetOfProxy();
     const target = try property_ops.expectObject(target_value);
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const handler_value = try proxyHandlerForTrap(ctx, global, proxy);
     const trap_atom = core.atom.ids.defineProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        if (target.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, target, atom_id, desc, caller_function, caller_frame);
-        target.defineOwnProperty(ctx.runtime, atom_id, desc) catch |err| switch (err) {
-            error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return false,
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        };
-        return true;
+        return try defineOwnPropertyVm(ctx, output, global, target, atom_id, desc, .return_false, caller_function, caller_frame);
     }
-    if (!isCallableValue(trap)) return error.TypeError;
+    if (!isCallableValue(trap)) return error.NotAFunction;
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) return false;
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);
-    // js_proxy_define_own_property reads the raw
-    // p->extensible flag of the target (no JS_IsExtensible call — a
-    // nested-proxy target does NOT fire its isExtensible trap here).
-    const target_extensible = target.isExtensible();
-    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, desc)) return error.TypeError;
+    // [[DefineOwnProperty]] step 11: ? IsExtensible(target), which runs a
+    // nested proxy target's trap. QuickJS reads the raw extensible flag.
+    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, desc)) return error.ProxyInvariantViolation;
     const setting_config_false = desc.configurable == false;
     if (setting_config_false) {
         if (target_desc) |item| {
-            if (item.configurable != false) return error.TypeError;
+            if (item.configurable != false) return error.ProxyInvariantViolation;
         } else {
-            return error.TypeError;
+            return error.ProxyInvariantViolation;
         }
     }
     if (target_desc) |item| {
-        if (item.configurable == false and item.kind == .data and item.writable == true and desc.kind == .data and desc.writable == false) return error.TypeError;
+        if (item.configurable == false and item.kind == .data and item.writable == true and desc.kind == .data and desc.writable == false) return error.ProxyInvariantViolation;
     }
     return true;
 }
@@ -5113,14 +4751,12 @@ pub fn validateProxyHasResult(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (result) return true;
-    // js_proxy_has: the target desc is read via
-    // JS_GetOwnPropertyInternal (exotic-dispatching — a nested-proxy target
-    // fires its own getOwnPropertyDescriptor trap and its invariant checks),
-    // while extensibility is the raw p->extensible flag (NOT JS_IsExtensible:
-    // no isExtensible trap fires here).
+    // [[HasProperty]] step 9: the target descriptor and ? IsExtensible(target)
+    // both dispatch through a nested proxy target's traps. QuickJS reads the
+    // raw extensible flag instead.
     if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
-        if (desc.configurable == false) return error.TypeError;
-        if (!target.isExtensible()) return error.TypeError;
+        if (desc.configurable == false) return error.ProxyInvariantViolation;
+        if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.ProxyInvariantViolation;
     }
     return false;
 }
@@ -5132,11 +4768,10 @@ pub fn proxyTrapKeyValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue 
     return rt.atoms.toStringValue(rt, atom_id);
 }
 
-// ----- merged from object_builtin_ops.zig -----
+// ----- Object constructor and prototype builtins -----
 // Object constructor, static/prototype records, and direct builtin bodies.
 //
 // Receiver and argument values are borrowed; returned JSValues are owned.
-// `RootedValueCopies` owns only its root/bits buffers, not the copied values.
 // Generic property, proxy, iterator, and construction algorithms remain with
 // their owning exec modules behind the alias wall below. The builtin domain
 // follows `js_object_constructor` and its tables at quickjs.c and
@@ -5145,27 +4780,8 @@ const call_site_mod = @import("call_site.zig");
 const CallSite = call_site_mod.CallSite;
 const IntegrityLevel = call_runtime.IntegrityLevel;
 const definePropertiesOnTarget = call_runtime.definePropertiesOnTarget;
-const iteratorForValue = iterator_ops.iteratorForValue;
-const closeIteratorForFromEntriesAbrupt = iterator_ops.closeIteratorForFromEntriesAbrupt;
-const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-pub const EntriesMode = core.object.EntriesMode;
-/// A native copy of borrowed values, rooted as one `.mutable` slice window.
-/// A frame of per-element `.values` pointers would not link in production
-/// (scalar frames are left to the stack scan, which cannot see this heap
-/// copy).
-const RootedValueCopies = struct {
-    values: []core.JSValue,
-
-    fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
-        const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
-        @memcpy(values, source);
-        return .{ .values = values };
-    }
-
-    fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
-        rt.nativeAllocator().free(self.values);
-    }
-};
+const iteratorGetIterator = iterator_ops.getIterator;
+const iteratorStepValue = iterator_ops.iteratorStepValue;
 pub const StaticMethod = core.host_function.builtin_method_ids.object.StaticMethod;
 pub const ConstructorMethod = core.host_function.builtin_method_ids.object.ConstructorMethod;
 pub const PrototypeMethod = enum(u32) {
@@ -5179,6 +4795,9 @@ pub const PrototypeMethod = enum(u32) {
     define_setter = 108,
     lookup_getter = 109,
     lookup_setter = 110,
+    /// The `Object.prototype.__proto__` accessor pair.
+    proto_getter = 111,
+    proto_setter = 112,
 };
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "assign")) return @intFromEnum(StaticMethod.assign);
@@ -5317,6 +4936,8 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     prototypeEntry("__defineSetter__", 2, .define_setter),
     prototypeEntry("__lookupGetter__", 1, .lookup_getter),
     prototypeEntry("__lookupSetter__", 1, .lookup_setter),
+    prototypeEntry("get __proto__", 0, .proto_getter),
+    prototypeEntry("set __proto__", 1, .proto_setter),
 };
 fn objectConstructorCall(
     native_ctx: *core.JSContext,
@@ -5332,8 +4953,7 @@ fn objectConstructorCall(
 
 /// Shared record handler for the `.object` domain. JS methods stay on the
 /// `.object` record and `objectCallForNativeRecord` (kept private). Callers
-/// that need JS behavior must pass a Realm global. The no-global arm is
-/// data-plane only: own data descriptors, no getter [[Call]].
+/// that need JS behavior must pass a Realm global.
 fn objectCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -5355,18 +4975,9 @@ fn objectCall(
         return try objectCallForNativeRecord(ctx, output, realm.global, this_value, id, args, caller_function, caller_frame);
     }
 
-    // Synthetic/prebootstrap reuse has no callable carrier. Keep the optional
-    // global only in this arm; without one, stay on the data-plane helpers.
-    const global = host_call.global;
-    const globals = host_call.globals;
-    if (global) |global_object| return try objectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);
-    if (prototypeMethodOrdinal(id)) |method| {
-        return call.objectPrototypeMethodCall(ctx, output, global, globals, method, this_value, args);
-    }
-    return call.callObjectStatic(ctx, output, global, globals, id, args) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
+    // A call without a callable carrier still names its realm's global.
+    const global = host_call.global orelse return error.InvalidBuiltinRegistry;
+    return try objectCallForNativeRecord(ctx, output, global, this_value, id, args, caller_function, caller_frame);
 }
 
 /// Realm-global dispatcher for the `.object` domain methods. The domain module
@@ -5387,102 +4998,49 @@ fn objectCallForNativeRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
     return switch (id) {
-        @intFromEnum(StaticMethod.assign) => (try objectAssignCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.create) => (try objectCreateCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.define_property) => (try definePropertyWithKind(ctx, output, global, args, 1, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.define_properties) => (try call_runtime.definePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_descriptor) => (try getOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_descriptors) => (try getOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_names) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_symbols) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_prototype_of) => (try objectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.has_own) => (try objectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_extensible) => (try objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.keys) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, .message, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.prevent_extensions) => (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.seal) => (try objectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_sealed) => (try objectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_frozen) => (try objectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.set_prototype_of) => (try objectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.values) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, .message, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.entries) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, .message, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.assign) => (try objectAssignCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.create) => (try objectCreateCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.define_property) => (try definePropertyWithKind(ctx, output, global, args, 1, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.define_properties) => (try call_runtime.definePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_descriptor) => (try getOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_descriptors) => (try getOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_names) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_symbols) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_prototype_of) => (try objectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.has_own) => (try objectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.is_extensible) => (try objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.keys) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.prevent_extensions) => (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.seal) => (try objectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.is_sealed) => (try objectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.is_frozen) => (try objectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.set_prototype_of) => (try objectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.values) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.entries) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.is) => {
             const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             return core.JSValue.boolean(lhs.sameValue(rhs));
         },
-        @intFromEnum(StaticMethod.freeze) => (try objectSetIntegrityCall(ctx, output, global, args, .frozen, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.from_entries) => (try objectFromEntriesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.group_by) => (try objectGroupByCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.freeze) => (try objectSetIntegrityCall(ctx, output, global, args, .frozen, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.from_entries) => (try objectFromEntriesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.group_by) => (try objectGroupByCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(PrototypeMethod.to_string) => try string_ops.objectToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
         @intFromEnum(PrototypeMethod.to_locale_string) => try string_ops.objectToLocaleStringCall(ctx, output, global, this_value, caller_function, caller_frame),
         @intFromEnum(PrototypeMethod.value_of) => try objectValueOfCall(ctx.runtime, global, this_value),
-        @intFromEnum(PrototypeMethod.has_own_property) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.has_own_property) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(PrototypeMethod.is_prototype_of) => try objectIsPrototypeOf(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.property_is_enumerable) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.define_getter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.define_setter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.lookup_getter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.lookup_setter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.property_is_enumerable) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(PrototypeMethod.define_getter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(PrototypeMethod.define_setter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(PrototypeMethod.lookup_getter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(PrototypeMethod.lookup_setter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(PrototypeMethod.proto_getter) => try objectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.proto_setter) => try objectProtoSetterCall(ctx, output, global, this_value, if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), caller_function, caller_frame),
         else => error.TypeError,
     };
 }
 
-/// QuickJS source map: narrow object-literal helper used by transitional
-/// `new_object` bytecode.
-pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const core.JSValue) !core.JSValue {
-    if (names.len != values.len) return error.TypeError;
-    const rooted = try RootedValueCopies.init(rt, values);
-    defer rooted.deinit(rt);
-    const root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &rooted.values }};
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-
-    for (names, rooted.values) |name, value| {
-        try object.defineOwnProperty(rt, name, core.Descriptor.data(value, .all));
-    }
-    return object.value();
-}
-
-test "object literal roots direct function bytecode values while creating object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const key = try rt.internAtom("value");
-    const names = [_]core.Atom{key};
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
-
-    const literal_value = core.JSValue.functionBytecode(&fb.header);
-    const values = [_]core.JSValue{literal_value};
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const object_value = try literal(rt, &names, &values);
-    const object = try expectObject(object_value);
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    {
-        const stored = try object.getProperty(key);
-        try std.testing.expect(stored.same(literal_value));
-    }
-
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-// Relocated to engine core (`core/object.zig`) in Phase 6b-3 STEP 2; the pure
-// own-property iteration constructor now lives there. Re-exported unchanged.
-pub const ownEntriesArray = core.object.ownEntriesArray;
 const expectObject = core.value_semantics.expectObject;
 pub fn objectIsPrototypeOf(
     ctx: *core.JSContext,
@@ -5495,16 +5053,22 @@ pub fn objectIsPrototypeOf(
 ) !core.JSValue {
     if (args.len == 0) return core.JSValue.boolean(false);
     var current = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
-    const this_object = objectFromValue(this_value) orelse return error.TypeError;
+    // ToObject(this): null/undefined throw. A primitive's fresh wrapper can
+    // never be on V's prototype chain, but the walk still runs: each
+    // [[GetPrototypeOf]] is observable (and may throw) through a Proxy.
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
+    const this_object = objectFromValue(this_value);
     while (try objectGetPrototypeOfStep(ctx, output, global, current, caller_function, caller_frame)) |prototype| {
         if (prototype == this_object) return core.JSValue.boolean(true);
         current = prototype;
+        // A Proxy can make the chain endless (contract C8).
+        try exception_ops.pollNativeLoop(ctx, global);
     }
     return core.JSValue.boolean(false);
 }
 
 pub fn objectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     if (this_value.is(.object)) return this_value;
     return primitiveObjectForAccess(rt, global, this_value);
 }
@@ -5517,11 +5081,11 @@ pub fn objectCreateCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const prototype: ?*core.Object = if (args[0].is(.null_value))
+    const prototype_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const prototype: ?*core.Object = if (prototype_value.is(.null_value))
         null
     else
-        objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a prototype"));
+        objectFromValue(prototype_value) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a prototype"));
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     if (args.len >= 2 and !args[1].is(.undefined_value)) {
@@ -5538,7 +5102,7 @@ pub fn objectAssignCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
+    if (args.len < 1) return error.NullishToObject;
     const globals = [_]core.JSValue{global.value()};
     var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 2;
     const live: []core.JSValue = &values;
@@ -5556,14 +5120,18 @@ pub fn objectAssignCall(
         const source = objectFromValue(values[1]) orelse return error.TypeError;
         const own_keys = try objectRestOwnKeys(ctx, output, global, source);
         defer core.Object.freeKeys(ctx.runtime, own_keys);
+        // A Proxy ownKeys result lives only in this native list across the
+        // traps and allocations below; keep its atoms alive.
+        var own_keys_roots = core.runtime.rootAtomList(&own_keys);
+        own_keys_roots.activate(ctx.runtime);
+        defer own_keys_roots.deactivate(ctx.runtime);
         if (assignSourceIsOrdinary(objectFromValue(values[1]).?)) {
             // qjs js_object_assign is ONE JS_CopyDataProperties walk with
             // JS_GPN_ENUM_ONLY. For an ordinary
-            // (non-exotic, non-proxy) source the enumerability is filtered
-            // INLINE during the shape walk and no per-key
-            // descriptor is materialized (the ~ENUM_ONLY descriptor branch
-            // at quickjs.c runs only for the exotic fallback). Mirror
-            // that single enumerable-only spec-ordered pass here.
+            // (non-exotic, non-proxy) source no per-key descriptor is
+            // materialized (the ~ENUM_ONLY descriptor branch at quickjs.c runs
+            // only for the exotic fallback). Mirror that single spec-ordered
+            // pass here.
             try objectAssignEnumOnly(ctx, output, global, values[0], values[1], objectFromValue(values[1]).?, own_keys, caller_function, caller_frame);
         } else {
             // Proxy / exotic source: qjs clears JS_GPN_ENUM_ONLY
@@ -5595,19 +5163,10 @@ fn assignSourceIsOrdinary(source: *core.Object) bool {
 
 /// Single ENUM_ONLY CopyDataProperties pass over an ordinary source's own
 /// keys (already in spec order: integer indices ascending, then strings in
-/// insertion order, then symbols). Enumerability is filtered ONCE at walk
-/// time — exactly like qjs's JS_GPN_ENUM_ONLY GPN walk, which materializes
-/// only the enumerable keys BEFORE any user code runs.
-/// The copy loop then does NO per-key enumerable re-check (quickjs.c
-/// skips the descriptor branch for ordinary sources): for each snapshotted
-/// key it runs JS_GetProperty (the source getter fires once, in key order)
-/// then JS_SetProperty on the target (target setters / Proxy traps fire).
-/// Snapshotting up front is load-bearing: a getter on an earlier key may
-/// mutate a later key's enumerability/existence, and qjs copies the key
-/// regardless because it was already in the enumerable list. This is the
-/// deliberate difference from Object.keys/values/entries, which re-check
-/// enumerability per key after getters and which zjs
-/// keeps on its own descriptor path.
+/// insertion order, then symbols). Each key's enumerability is re-read from
+/// the shape right before its Get (step 3.a.iii), then the source getter
+/// fires once, in key order, and the value is set on the target (target
+/// setters / Proxy traps fire).
 fn objectAssignEnumOnly(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5628,16 +5187,14 @@ fn objectAssignEnumOnly(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices, .atoms = &atoms };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    // Snapshot the enumerable bit of every key off the shape now, before
-    // any getter/setter runs — mirroring qjs filling tab_atom[] with only
-    // the enumerable keys during the ENUM_ONLY GPN walk.
-    const enumerable_snapshot = try ctx.runtime.nativeAllocator().alloc(bool, own_keys.len);
-    defer ctx.runtime.nativeAllocator().free(enumerable_snapshot);
-    for (own_keys, enumerable_snapshot) |key, *slot| {
-        slot.* = source.ownPropertyEnumerable(key) orelse false;
-    }
-    for (own_keys, enumerable_snapshot) |key, enumerable| {
-        if (!enumerable) continue;
+    // Object.assign step 3.a.iii: re-read each key's own descriptor right
+    // before its Get, so an earlier getter that deletes or redefines a later
+    // key is observed. An ordinary source has no traps, so the check is a
+    // shape read.
+    for (own_keys) |key| {
+        try exception_ops.pollNativeLoop(ctx, global);
+        const live_source = objectFromValue(operands[3]).?;
+        if (!(live_source.ownPropertyEnumerable(key) orelse false)) continue;
         operands[4] = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
         try setValuePropertyStrict(ctx, output, global, target_value, key, operands[4], caller_function, caller_frame);
     }
@@ -5662,6 +5219,7 @@ pub fn objectAssignKeys(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     for (own_keys) |key| {
+        try exception_ops.pollNativeLoop(ctx, global);
         const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         if (symbol_pass) |pass| {
             if (is_symbol != pass) continue;
@@ -5681,7 +5239,7 @@ pub fn objectHasOwnCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return null;
+    if (args.len < 1) return error.NullishToObject;
     const globals = [_]core.JSValue{global.value()};
     var values = [_]core.JSValue{core.JSValue.undefinedValue()};
     const live: []core.JSValue = &values;
@@ -5689,7 +5247,7 @@ pub fn objectHasOwnCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
     values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -5808,7 +5366,7 @@ pub fn objectPrototypeOwnPropertyCall(
     atom_roots.activate(ctx.runtime);
     defer atom_roots.deactivate(ctx.runtime);
 
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = try property_ops.expectObject(values[0]);
     // `hasOwnProperty` is the desc==NULL existence mode of
@@ -5841,11 +5399,11 @@ pub fn objectPrototypeDefineAccessorCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const accessor_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (!isCallableValue(accessor_value)) return error.TypeError;
+    if (!isCallableValue(accessor_value)) return error.NotAFunction;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     var atom_roots = core.runtime.rootAtoms(.{&key});
@@ -5866,21 +5424,11 @@ pub fn objectPrototypeDefineAccessorCall(
         .enumerable = true,
         .configurable = true,
     };
-    const defined = if (object.proxyTarget() != null)
-        proxyDefineOwnProperty(ctx, output, global, object, key, desc, caller_function, caller_frame) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        }
-    else blk: {
-        object.defineOwnProperty(ctx.runtime, key, desc) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        };
-        break :blk true;
-    };
-    if (!defined) return error.TypeError;
+    // DefinePropertyOrThrow (B.2.2.2 step 5) through the object's own
+    // [[DefineOwnProperty]]: proxies and typed arrays have their own; an
+    // ordinary object's failure throws with its specific message.
+    const defined = try defineOwnPropertyVm(ctx, output, global, object, key, desc, .keep_error, caller_function, caller_frame);
+    if (!defined) return error.CannotDefineProperty;
     return core.JSValue.undefinedValue();
 }
 
@@ -5901,7 +5449,7 @@ pub fn objectPrototypeLookupAccessorCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -5929,46 +5477,49 @@ pub fn objectFromEntriesCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
+    if (args.len < 1) return error.NotIterable;
     const globals = [_]core.JSValue{global.value()};
-    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 5;
+    // [0] result, [1] iterator, [2] entry, [3] key, [4] value, [5] next
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 6;
     const live: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     values[0] = (try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global))).value();
-    values[1] = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const record = try iteratorGetIterator(ctx, output, global, args[0], caller_function, caller_frame);
+    values[1] = record.iterator;
+    values[5] = record.next;
 
     while (true) {
-        const step = try objectAddEntriesStepValue(ctx, output, global, values[1], caller_function, caller_frame);
+        const step = try iteratorStepValue(ctx, output, global, .{ .iterator = values[1], .next = values[5] });
         if (step.done) return values[0];
         values[2] = step.value;
 
-        _ = objectFromValue(values[2]) orelse {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
-            return error.TypeError;
-        };
+        if (!values[2].is(.object)) {
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
+            return try throwTypeErrorMessage(ctx, global, "iterator value is not an entry object");
+        }
         values[3] = getValueProperty(ctx, output, global, values[2], core.Atom.taggedInt(0), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
         values[4] = getValueProperty(ctx, output, global, values[2], core.Atom.taggedInt(1), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
         const key = toPropertyKeyAtom(ctx, output, global, values[3], caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
         var atom_roots = core.runtime.rootAtoms(.{&key});
         atom_roots.activate(ctx.runtime);
         defer atom_roots.deactivate(ctx.runtime);
-        createDataPropertyOrThrow(ctx, output, global, values[0], objectFromValue(values[0]).?, key, values[4], caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+        createDataPropertyOrThrow(ctx, output, global, objectFromValue(values[0]).?, key, values[4], caller_function, caller_frame) catch |err| {
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
-        @memset(values[2..], core.JSValue.undefinedValue());
+        @memset(values[2..5], core.JSValue.undefinedValue());
     }
 }
 
@@ -5980,10 +5531,10 @@ pub fn objectGroupByCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    if (!isCallableValue(args[1])) return error.TypeError;
+    if (args.len < 2 or !isCallableValue(args[1])) return error.NotAFunction;
     const globals = [_]core.JSValue{global.value()};
-    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 4;
+    // [0] result, [1] iterator, [2] value, [3] key, [4] next
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 5;
     const live: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
@@ -5991,7 +5542,9 @@ pub fn objectGroupByCall(
     defer roots.deactivate(ctx.runtime);
     values[0] = (try core.Object.create(ctx.runtime, core.class.ids.object, null)).value();
 
-    values[1] = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const record = try iteratorGetIterator(ctx, output, global, args[0], caller_function, caller_frame);
+    values[1] = record.iterator;
+    values[4] = record.next;
     var callback_call = CallSite.initInternal(
         ctx,
         output,
@@ -6008,69 +5561,26 @@ pub fn objectGroupByCall(
     while (true) {
         const max_safe_integer: usize = 9007199254740991;
         if (index >= max_safe_integer) {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return error.TypeError;
         }
-        const step = try objectAddEntriesStepValue(ctx, output, global, values[1], caller_function, caller_frame);
+        const step = try iteratorStepValue(ctx, output, global, .{ .iterator = values[1], .next = values[4] });
         if (step.done) return values[0];
         values[2] = step.value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
         values[3] = callback_call.call(&.{ values[2], index_value }) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
         const key = toPropertyKeyAtom(ctx, output, global, values[3], caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, values[1]);
             return err;
         };
         try appendObjectGroupByValue(ctx, output, global, values[0], objectFromValue(values[0]).?, key, values[2], caller_function, caller_frame);
-        @memset(values[2..], core.JSValue.undefinedValue());
+        @memset(values[2..4], core.JSValue.undefinedValue());
         index += 1;
     }
-}
-
-const ObjectIteratorStepValue = struct {
-    value: core.JSValue,
-    done: bool,
-};
-fn objectAddEntriesStepValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) !ObjectIteratorStepValue {
-    const globals = [_]core.JSValue{global.value()};
-    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
-    const live: []core.JSValue = &values;
-    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .mutable = &live } };
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-    const iterator = objectFromValue(values[0]) orelse return error.TypeError;
-    values[1] = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
-        const next_key = core.atom.ids.next;
-        break :blk try getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
-    };
-    if (!isCallableValue(values[1])) return error.TypeError;
-
-    values[2] = try callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
-    // No class-based dispatch: IteratorStep reads `done`/`value` off whatever
-    // object `next()` returned (see iterator_ops.iteratorStepValue).
-    _ = objectFromValue(values[2]) orelse return error.TypeError;
-
-    const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try getValueProperty(ctx, output, global, values[2], done_key, caller_function, caller_frame);
-    if (valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
-
-    const value_key = core.atom.predefinedId("value", .string).?;
-    const value = getValueProperty(ctx, output, global, values[2], value_key, caller_function, caller_frame) catch |err| {
-        try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[0]);
-        return err;
-    };
-    return .{ .value = value, .done = false };
 }
 
 pub fn objectSetIntegrityCall(
@@ -6084,11 +5594,15 @@ pub fn objectSetIntegrityCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return target_value;
-    if (level == .frozen and core.object.typedArrayBackedByResizableBuffer(object)) return error.TypeError;
-    if (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) |_| {} else return error.TypeError;
+    _ = try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame);
 
     const own_keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
+    // A Proxy ownKeys result lives only in this native list across the
+    // traps and allocations below; keep its atoms alive.
+    var own_keys_roots = core.runtime.rootAtomList(&own_keys);
+    own_keys_roots.activate(ctx.runtime);
+    defer own_keys_roots.deactivate(ctx.runtime);
     for (own_keys) |key| {
         const desc = if (level == .frozen)
             try objectRestOwnPropertyDescriptor(ctx, output, global, object, key)
@@ -6098,28 +5612,20 @@ pub fn objectSetIntegrityCall(
         const next_desc = switch (level) {
             .sealed => core.Descriptor.generic(null, false),
             .frozen => blk: {
-                if (desc) |item| {
-                    if (item.kind == .data) break :blk core.Descriptor{
-                        .kind = .data,
-                        .value_present = false,
-                        .writable = false,
-                        .configurable = false,
-                    };
-                }
+                // SetIntegrityLevel frozen step 7.b.ii: a key gone by now
+                // (undefined currentDesc) is skipped.
+                const item = desc orelse continue;
+                if (item.kind == .data) break :blk core.Descriptor{
+                    .kind = .data,
+                    .value_present = false,
+                    .writable = false,
+                    .configurable = false,
+                };
                 break :blk core.Descriptor.generic(null, false);
             },
         };
-        const defined = if (object.proxyTarget() != null)
-            try proxyDefineOwnProperty(ctx, output, global, object, key, next_desc, caller_function, caller_frame)
-        else blk: {
-            object.defineOwnProperty(ctx.runtime, key, next_desc) catch |err| switch (err) {
-                error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                error.InvalidLength => return error.RangeError,
-                else => return err,
-            };
-            break :blk true;
-        };
-        if (!defined) return error.TypeError;
+        const defined = try defineOwnPropertyVm(ctx, output, global, object, key, next_desc, .keep_error, caller_function, caller_frame);
+        if (!defined) return error.CannotDefineProperty;
     }
     return target_value;
 }
@@ -6133,38 +5639,22 @@ pub fn objectTestIntegrityCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return core.JSValue.boolean(true);
-    // qjs js_object_isSealed walks ownKeys + per-key gopd
-    // FIRST (short-circuiting false on a configurable/writable prop without
-    // ever consulting extensibility) and calls JS_IsExtensible LAST — the
-    // reverse of the spec's TestIntegrityLevel order.
+    // TestIntegrityLevel (§7.3.16) asks IsExtensible first; QuickJS walks
+    // the keys first and asks last, which is observable through proxy traps.
+    if (try proxyAwareIsExtensible(ctx, output, global, object, null, null)) return core.JSValue.boolean(false);
     const own_keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
+    // A Proxy ownKeys result lives only in this native list across the
+    // traps and allocations below; keep its atoms alive.
+    var own_keys_roots = core.runtime.rootAtomList(&own_keys);
+    own_keys_roots.activate(ctx.runtime);
+    defer own_keys_roots.deactivate(ctx.runtime);
     for (own_keys) |key| {
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
         if (desc.configurable == true) return core.JSValue.boolean(false);
         if (level == .frozen and desc.kind == .data and desc.writable == true) return core.JSValue.boolean(false);
     }
-    return core.JSValue.boolean(!(try objectIsExtensibleForIntegrity(ctx, output, global, object)));
-}
-
-pub fn objectIsExtensibleForIntegrity(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    object: *core.Object,
-) !bool {
-    if (object.proxyTarget() == null) return object.isExtensible();
-    const target_value = object.proxyTarget() orelse return object.isExtensible();
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_key = core.atom.ids.isExtensible;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, null, null);
-    if (trap.is(.undefined_value) or trap.is(.null_value)) return target.isExtensible();
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
-    const extensible = valueTruthy(result);
-    if (extensible != target.isExtensible()) return error.TypeError;
-    return extensible;
+    return core.JSValue.boolean(true);
 }
 
 pub fn appendObjectGroupByValue(
@@ -6191,10 +5681,10 @@ pub fn appendObjectGroupByValue(
     values[1] = getValueProperty(ctx, output, global, out_value, key, caller_function, caller_frame) catch core.JSValue.undefinedValue();
     if (values[1].is(.undefined_value)) {
         values[1] = (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, values[1], caller_function, caller_frame);
+        try createDataPropertyOrThrow(ctx, output, global, out, key, values[1], caller_function, caller_frame);
     }
     const group = objectFromValue(values[1]) orelse return error.TypeError;
-    try createDataPropertyOrThrow(ctx, output, global, values[1], group, core.Atom.taggedInt(group.arrayLength()), values[0], caller_function, caller_frame);
+    try createDataPropertyOrThrow(ctx, output, global, group, core.Atom.taggedInt(group.arrayLength()), values[0], caller_function, caller_frame);
 }
 
 test "Object.groupBy new group define failure releases group once" {
@@ -6210,7 +5700,7 @@ test "Object.groupBy new group define failure releases group once" {
     const key = try rt.internAtom("group");
 
     try std.testing.expectError(
-        error.TypeError,
+        error.NotExtensible,
         appendObjectGroupByValue(ctx, null, global, out.value(), out, key, core.JSValue.int32(1), null, null),
     );
     // The failed append leaves a half-built group object behind; the claim is
@@ -6239,11 +5729,7 @@ pub fn objectPreventExtensionsCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return target_value;
-    if (object.proxyTarget() != null) {
-        if (!try proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame)) return error.TypeError;
-        return target_value;
-    }
-    object.preventExtensions();
+    if (!try proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame)) return error.CannotPreventExtensions;
     return target_value;
 }
 
@@ -6255,7 +5741,7 @@ pub fn getOwnPropertyDescriptorCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return null;
+    if (args.len < 1) return error.NullishToObject;
     const globals = [_]core.JSValue{global.value()};
     var values = [_]core.JSValue{core.JSValue.undefinedValue()};
     const live: []core.JSValue = &values;
@@ -6263,7 +5749,7 @@ pub fn getOwnPropertyDescriptorCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
     values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -6272,7 +5758,7 @@ pub fn getOwnPropertyDescriptorCall(
     atom_roots.activate(ctx.runtime);
     defer atom_roots.deactivate(ctx.runtime);
     var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, objectFromValue(values[0]).?, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
-    try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, objectFromValue(values[0]).?, atom_id, &desc);
+    call.materializeMappedArgumentsDescriptorValue(ctx.runtime, objectFromValue(values[0]).?, atom_id, &desc);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
     return desc_value;
 }
@@ -6285,27 +5771,11 @@ pub fn objectGetPrototypeOfCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return null;
+    if (args.len < 1) return error.NullishToObject;
     if (args[0].is(.null_value) or args[0].is(.undefined_value)) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
     const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
-    if (try objectPrototypeMethodFunctionPrototype(ctx, global, object)) |prototype| return prototype.value();
     return try objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
-}
-
-pub fn objectPrototypeMethodFunctionPrototype(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    object: *core.Object,
-) !?*core.Object {
-    if (object.class_id != core.class.ids.c_function) return null;
-    if (!isObjectPrototypeNativeRecord(object, @intFromEnum(PrototypeMethod.is_prototype_of))) return null;
-    return functionPrototypeFromGlobal(ctx.runtime, global);
-}
-
-pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .object and native_ref.id == id;
 }
 
 pub fn getOwnPropertyDescriptorsCall(
@@ -6316,8 +5786,8 @@ pub fn getOwnPropertyDescriptorsCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return null;
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
+    if (args.len < 1) return error.NullishToObject;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
     // Source, result, and the descriptor being installed all cross getters,
     // proxy traps, and allocations; reload each from its slot afterwards.
     // The result is published once created, so failure leaves it to the GC.
@@ -6329,7 +5799,7 @@ pub fn getOwnPropertyDescriptorsCall(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    _ = objectFromValue(values[0]) orelse return error.TypeError;
+    _ = objectFromValue(values[0]) orelse return error.NotAnObject;
     const own_keys = try objectRestOwnKeys(ctx, output, global, objectFromValue(values[0]).?);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
     const atoms = [_]core.runtime.AtomRootSlot{.{ .borrowed = own_keys }};
@@ -6340,9 +5810,9 @@ pub fn getOwnPropertyDescriptorsCall(
     values[1] = (try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global))).value();
     for (own_keys) |key| {
         var desc = (try objectRestOwnPropertyDescriptor(ctx, output, global, objectFromValue(values[0]).?, key)) orelse continue;
-        try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, objectFromValue(values[0]).?, key, &desc);
+        call.materializeMappedArgumentsDescriptorValue(ctx.runtime, objectFromValue(values[0]).?, key, &desc);
         values[2] = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
-        try createDataPropertyOrThrow(ctx, output, global, values[1], objectFromValue(values[1]).?, key, values[2], caller_function, caller_frame);
+        try createDataPropertyOrThrow(ctx, output, global, objectFromValue(values[1]).?, key, values[2], caller_function, caller_frame);
         values[2] = core.JSValue.undefinedValue();
     }
     return values[1];
@@ -6370,7 +5840,6 @@ pub inline fn objectOwnPropertyKeysCall(
             .string => .own_names,
             .symbol => .own_symbols,
         },
-        .bare,
         caller_function,
         caller_frame,
     );

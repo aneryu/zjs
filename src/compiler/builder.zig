@@ -116,6 +116,7 @@ pub const Snapshot = struct {
     reloc_len: u32,
     source_len: u32,
     last_opcode_pos: ?u32,
+    bind_log_len: u32,
 };
 
 pub const Builder = struct {
@@ -148,13 +149,21 @@ pub const Builder = struct {
     /// qjs fd->last_opcode_pos: temp offset of the last emitted opcode, or
     /// null once a control-flow merge invalidated it.
     last_opcode_pos: ?u32 = null,
+    /// Upper bound on every bound label's `bound_offset`, so trailing-opcode
+    /// rewrites can skip the O(labels) bind scan in the common case.
+    bind_high_water: u32 = 0,
+    /// Label indexes in bind order. A label bound after a snapshot is in the
+    /// log past its `bind_log_len`, so `detachTail` visits only the binds of
+    /// the segment instead of every label of the function (a `for` update
+    /// detaches once per loop). Entries of labels unbound since are dropped
+    /// when a detach or rollback passes them.
+    bind_log: std.ArrayList(u32) = .empty,
 
     pub fn init(memory: std.mem.Allocator, atoms: *core.atom.AtomTable) Builder {
         return .{ .memory = memory, .atoms = atoms };
     }
 
-    /// Item-wise release of the owned atom prefix, then every backing freed
-    /// by full capacity. Idempotent.
+    /// Free every backing buffer by its full capacity.
     pub fn deinit(self: *Builder) void {
         if (self.code_capacity != 0) self.memory.free(self.code);
         if (self.atom_capacity != 0) self.memory.free(self.atom_operands);
@@ -178,6 +187,9 @@ pub const Builder = struct {
         self.source_capacity = 0;
         self.source_len = 0;
         self.last_opcode_pos = null;
+        self.bind_high_water = 0;
+        self.bind_log.deinit(self.memory);
+        self.bind_log = .empty;
     }
 
     pub fn newLabel(self: *Builder) Error!LabelId {
@@ -246,8 +258,22 @@ pub const Builder = struct {
         const slot = &self.label_slots[label.index()];
         if (slot.flags.bound) return error.InvalidBytecode;
 
+        self.bind_log.append(self.memory, label.index()) catch return error.OutOfMemory;
         slot.bound_offset = self.code_len;
         slot.flags.bound = true;
+        self.bind_high_water = @max(self.bind_high_water, self.code_len);
+    }
+
+    /// Keep the log entries past `from` whose labels are still bound (and
+    /// still exist): a detach or rollback has just unbound the others.
+    fn compactBindLog(self: *Builder, from: u32) void {
+        var write: usize = from;
+        for (self.bind_log.items[from..]) |label_index| {
+            if (label_index >= self.label_len or !self.label_slots[label_index].flags.bound) continue;
+            self.bind_log.items[write] = label_index;
+            write += 1;
+        }
+        self.bind_log.shrinkRetainingCapacity(write);
     }
 
     /// Bind an identity-native label while retaining the sequential matcher
@@ -258,19 +284,15 @@ pub const Builder = struct {
         self.label_slots[label.index()].flags.match_barrier = true;
     }
 
-    /// Move every pending reference from `from` onto `to`. This is the
-    /// identity-native form of the legacy parser's `patchJumpTarget`: QuickJS
-    /// resolves a jump whose destination only becomes known later by writing
-    /// the destination PC back into the already-emitted operand
-    /// (`js_parse_switch`'s dispatch patch, quickjs.c ~29365). V2 never
-    /// materializes a PC in the parser, so the operand keeps holding a
-    /// `LabelId` and the reference moves to the identity that already denotes
-    /// that program point.
+    /// Move every pending reference from `from` onto `to`. QuickJS resolves a
+    /// jump whose destination only becomes known later by writing the PC back
+    /// into the emitted operand (`js_parse_switch`'s dispatch patch,
+    /// quickjs.c ~29365). The builder never materializes a PC, so the operand
+    /// keeps its `LabelId` and the reference moves to the label that already
+    /// denotes that program point.
     ///
-    /// This is deliberately NOT `bindLabel`: a bind creates a second identity
-    /// at one boundary and forces the emitter to route through it, and
-    /// `bindLabel` also invalidates the last opcode the way `patchForwardJump`
-    /// does. `patchJumpTarget` does neither, and neither does this.
+    /// This is deliberately NOT `bindLabel`: a bind creates a second label at
+    /// one boundary and invalidates the last opcode; this does neither.
     ///
     /// `from` must still be unbound (retargeting a bound label would abandon a
     /// boundary other code can already reach) and `to` must already be bound
@@ -282,6 +304,7 @@ pub const Builder = struct {
         const from_slot = &self.label_slots[from.index()];
         const to_slot = &self.label_slots[to.index()];
         if (from_slot.flags.bound or !to_slot.flags.bound) return error.InvalidBytecode;
+        self.bind_log.ensureUnusedCapacity(self.memory, 1) catch return error.OutOfMemory;
 
         // Validate the whole chain before mutating anything: a half-moved
         // chain is unrecoverable.
@@ -351,6 +374,17 @@ pub const Builder = struct {
         // Stage 4 and joins `to`'s alias group with `to`'s final address.
         from_slot.bound_offset = to_slot.bound_offset;
         from_slot.flags.bound = true;
+        self.bind_log.appendAssumeCapacity(from.index());
+    }
+
+    /// Whether a referenced label is bound at `offset` (an incoming edge that
+    /// keeps code after a terminator live).
+    pub fn hasReferencedBindAt(self: *const Builder, offset: u32) bool {
+        if (self.bind_high_water < offset) return false;
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (slot.flags.bound and slot.bound_offset == offset and slot.ref_count > 0) return true;
+        }
+        return false;
     }
 
     /// Return the first unbound label in function-local creation order.
@@ -419,17 +453,36 @@ pub const Builder = struct {
         self.code_len += 5;
     }
 
-    /// Emit an atom-bearing opcode; `atom_id` ownership (one retain)
-    /// transfers into the builder ledger.
+    /// Emit an atom-bearing opcode; `atom_id` is recorded in the atom-operand
+    /// ledger.
     pub fn emitAtomOpOwned(self: *Builder, op_id: u8, atom_id: core.atom.Atom) Error!void {
         // W1: the property-site family (`get_field` / `get_field2` /
         // `put_field`) is `atom_cache_u8`, so the phase-1 stream carries a
         // placeholder `cache_idx` byte and every instruction size matches the
         // final form. `resolve_labels` overwrites the placeholder.
-        const cache_bearing = opcode.carriesPropCacheIdxPhase1(op_id);
-        const size: u32 = if (cache_bearing) 6 else 5;
-        // Ownership transfer is unconditional: the sink consumes the caller's
-        // retained atom even when either capacity reservation fails.
+        if (opcode.carriesPropCacheIdxPhase1(op_id)) {
+            (try self.beginAtomOp(op_id, atom_id, 6))[0] = bytecode.PropSiteCache.no_cache_idx;
+        } else {
+            _ = try self.beginAtomOp(op_id, atom_id, 5);
+        }
+    }
+
+    /// Emit an atom-bearing opcode with a trailing u8 immediate (op + atom +
+    /// u8, the define_class/define_method temp encoding).
+    pub fn emitAtomOpU8Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u8) Error!void {
+        (try self.beginAtomOp(op_id, atom_id, 6))[0] = val;
+    }
+
+    /// Emit an atom-bearing opcode with a trailing u16 immediate (op + atom +
+    /// scope operand, the scope_get_var-family temp encoding).
+    pub fn emitAtomOpU16Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u16) Error!void {
+        std.mem.writeInt(u16, (try self.beginAtomOp(op_id, atom_id, 7))[0..2], val, .little);
+    }
+
+    /// Append `op_id` and `atom_id` as a `size`-byte instruction and record
+    /// the atom operand. Returns the bytes after the atom for the caller's
+    /// immediate.
+    fn beginAtomOp(self: *Builder, op_id: u8, atom_id: core.atom.Atom, size: u32) Error![]u8 {
         try self.reserveCode(size);
         try reserve(
             core.atom.Atom,
@@ -446,72 +499,19 @@ pub const Builder = struct {
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
-        if (cache_bearing) self.code[opcode_index + 5] = bytecode.PropSiteCache.no_cache_idx;
 
         self.atom_len += 1;
         self.last_opcode_pos = opcode_offset;
         self.code_len += size;
-    }
-
-    /// Emit an atom-bearing opcode with a trailing u8 immediate (op + atom +
-    /// u8, the define_class/define_method temp encoding). `atom_id` ownership
-    /// (one retain) transfers into the builder ledger.
-    pub fn emitAtomOpU8Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u8) Error!void {
-        try self.reserveCode(6);
-        try reserve(
-            core.atom.Atom,
-            self.memory,
-            &self.atom_operands,
-            &self.atom_capacity,
-            self.atom_len,
-            1,
-            8,
-        );
-
-        const opcode_offset = self.code_len;
-        const opcode_index: usize = @intCast(opcode_offset);
-        self.atom_operands[self.atom_len] = atom_id;
-        self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
-        self.code[opcode_index + 5] = val;
-
-        self.atom_len += 1;
-        self.last_opcode_pos = opcode_offset;
-        self.code_len += 6;
-    }
-
-    /// Emit an atom-bearing opcode with a trailing u16 immediate (op + atom +
-    /// scope operand, the scope_get_var-family temp encoding). Owned-atom sink.
-    pub fn emitAtomOpU16Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u16) Error!void {
-        try self.reserveCode(7);
-        try reserve(
-            core.atom.Atom,
-            self.memory,
-            &self.atom_operands,
-            &self.atom_capacity,
-            self.atom_len,
-            1,
-            8,
-        );
-
-        const opcode_offset = self.code_len;
-        const opcode_index: usize = @intCast(opcode_offset);
-        self.atom_operands[self.atom_len] = atom_id;
-        self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
-        std.mem.writeInt(u16, self.code[opcode_index + 5 ..][0..2], val, .little);
-
-        self.atom_len += 1;
-        self.last_opcode_pos = opcode_offset;
-        self.code_len += 7;
+        return self.code[opcode_index + 5 .. opcode_index + size];
     }
 
     /// Emit a scope-ref opcode carrying an auxiliary label operand:
     /// op + atom(4) + label(4) + scope(2), 11 bytes. The label operand holds the
     /// LabelId until final emission; the RelocEntry is kind .aux32 at
     /// opcode_offset + 5. Bumps ref_count (qjs update_label(fd, label, 1)) and
-    /// marks backward_target when the label is already bound. Owned-atom sink;
-    /// an invalid label fails closed after consuming the atom retain.
+    /// marks backward_target when the label is already bound. An invalid label
+    /// fails closed.
     pub fn emitScopeRefOpOwned(
         self: *Builder,
         op_id: u8,
@@ -601,9 +601,11 @@ pub const Builder = struct {
         {
             return error.InvalidBytecode;
         }
-        for (self.label_slots[0..self.label_len]) |slot| {
-            if (slot.flags.bound and slot.bound_offset > opcode_offset)
-                return error.InvalidBytecode;
+        if (self.bind_high_water > opcode_offset) {
+            for (self.label_slots[0..self.label_len]) |slot| {
+                if (slot.flags.bound and slot.bound_offset > opcode_offset)
+                    return error.InvalidBytecode;
+            }
         }
 
         self.atom_len -= 1;
@@ -653,8 +655,7 @@ pub const Builder = struct {
     /// preserving source events at its start. This is the compact-builder
     /// form of QuickJS truncating `OP_set_name(NULL)` and re-emitting
     /// `OP_set_name_computed`. The existing five-byte capacity makes the
-    /// replacement allocation-free; the removed ledger owner is released
-    /// exactly once.
+    /// replacement allocation-free.
     pub fn rewriteTrailingAtomOpAsPlain(
         self: *Builder,
         expected_opcode: u8,
@@ -673,8 +674,7 @@ pub const Builder = struct {
         }
 
         try self.truncateLastOpcodePreserveSources(opcode_offset);
-        const removed = try self.takeLastAtomOwned();
-        _ = removed;
+        _ = try self.takeLastAtomOwned();
         self.code[offset] = replacement_opcode;
         self.code_len = std.math.add(u32, opcode_offset, 1) catch return error.InvalidBytecode;
         self.last_opcode_pos = opcode_offset;
@@ -712,6 +712,7 @@ pub const Builder = struct {
             .reloc_len = self.reloc_len,
             .source_len = self.source_len,
             .last_opcode_pos = self.last_opcode_pos,
+            .bind_log_len = @intCast(self.bind_log.items.len),
         };
     }
 
@@ -761,11 +762,13 @@ pub const Builder = struct {
             // correctness input, so rollback does not clear it.
         }
 
+        self.bind_high_water = @min(self.bind_high_water, snap.code_len);
         self.code_len = snap.code_len;
         self.label_len = snap.label_len;
         self.reloc_len = snap.reloc_len;
         self.source_len = snap.source_len;
         self.last_opcode_pos = snap.last_opcode_pos;
+        self.compactBindLog(@min(snap.bind_log_len, @as(u32, @intCast(self.bind_log.items.len))));
     }
 
     /// QuickJS `fd->byte_code.size = fd->last_opcode_pos`: remove the trailing
@@ -835,8 +838,11 @@ pub const Builder = struct {
             if (!slot_valid) return error.InvalidBytecode;
         }
 
+        // Only labels bound since the mark can be bound inside the segment.
+        const log_from = @min(mark.bind_log_len, @as(u32, @intCast(self.bind_log.items.len)));
         var bind_count: usize = 0;
-        for (self.label_slots[0..self.label_len]) |slot| {
+        for (self.bind_log.items[log_from..]) |label_index| {
+            const slot = self.label_slots[label_index];
             if (!slot.flags.bound) continue;
             const bind_valid = slot.bound_offset <= self.code_len;
             std.debug.assert(bind_valid);
@@ -886,7 +892,11 @@ pub const Builder = struct {
             detached.temp_offset -= mark.code_len;
         }
 
-        for (self.label_slots[0..self.label_len]) |*slot| {
+        // The relocs past the mark are each label's newest references: pop
+        // them off the chains of exactly the labels they name.
+        for (self.relocs[mark.reloc_len..self.reloc_len]) |entry| {
+            const operand: usize = @intCast(entry.operand_offset);
+            const slot = &self.label_slots[std.mem.readInt(u32, self.code[operand..][0..4], .little)];
             var head = slot.first_reloc;
             while (head != labels.no_reloc and head >= mark.reloc_len) {
                 std.debug.assert(slot.ref_count > 0);
@@ -897,10 +907,11 @@ pub const Builder = struct {
         }
 
         var bind_index: usize = 0;
-        for (self.label_slots[0..self.label_len], 0..) |*slot, label_index| {
+        for (self.bind_log.items[log_from..]) |label_index| {
+            const slot = &self.label_slots[label_index];
             if (!slot.flags.bound or slot.bound_offset <= mark.code_len) continue;
             seg.binds[bind_index] = .{
-                .label_index = @intCast(label_index),
+                .label_index = label_index,
                 .rel_offset = slot.bound_offset - mark.code_len,
             };
             bind_index += 1;
@@ -908,6 +919,7 @@ pub const Builder = struct {
             slot.flags.bound = false;
         }
         std.debug.assert(bind_index == bind_count);
+        self.compactBindLog(log_from);
 
         self.code_len = mark.code_len;
         self.atom_len = mark.atom_len;
@@ -961,6 +973,7 @@ pub const Builder = struct {
         }
 
         try self.reserveCode(seg.code.len);
+        self.bind_log.ensureUnusedCapacity(self.memory, seg.binds.len) catch return error.OutOfMemory;
         try reserve(
             labels.RelocEntry,
             self.memory,
@@ -1001,6 +1014,8 @@ pub const Builder = struct {
             const slot = &self.label_slots[bind.label_index];
             slot.bound_offset = new_base + bind.rel_offset;
             slot.flags.bound = true;
+            self.bind_high_water = @max(self.bind_high_water, slot.bound_offset);
+            self.bind_log.appendAssumeCapacity(bind.label_index);
         }
 
         for (seg.sources) |source| {

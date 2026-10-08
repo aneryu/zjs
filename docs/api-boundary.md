@@ -67,7 +67,7 @@ and dispatch costs that embedders need to control.
 Root aliases are additive only. Do not document names as available until they
 appear in `docs/public-api-contract.md`. JSContext host-reference ownership
 (`create` vs `createRealm`, and the ban on `destroy` via `contextForGlobal` /
-`context_head`) is documented there, not here.
+`contexts`) is documented there, not here.
 
 ## Performance Shape
 
@@ -129,7 +129,8 @@ entry: a plain `fn (*Call) E!Value` is wrapped at comptime into a
 `callconv(.c)` thunk (the call receives the callee realm, `this`, and a view
 of the VM operand window; Zig errors map to JS exceptions at the seam).
 Leaf signatures stay engine-private. Per-registration `FunctionOptions`
-carry `length`, `state`, `finalize`, `with_prototype`, and `realm_global`.
+carry `length`, `state`, `finalize`, `with_prototype`, `constructor`, and
+`realm_global`.
 The reverse direction, native -> JS, is `Context.callFunction`. Host-side
 property access is `Context.getProperty` / `defineDataProperty`. The
 rooting, exception, realm, backtrace, interrupt, entry-lifetime, and thread

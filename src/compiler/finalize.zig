@@ -14,10 +14,6 @@ const context = @import("../core/context.zig");
 const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("root.zig");
-const Bytecode = bytecode.Bytecode;
-const FunctionBytecode = bytecode.FunctionBytecode;
-const FunctionDef = bytecode.FunctionDef;
-const pipeline = bytecode.pipeline;
 const opcode = bytecode.opcode;
 const module = bytecode.module;
 const CompileContext = bytecode.CompileContext;
@@ -47,13 +43,7 @@ pub const FinalizeError = error{
     ClosureVarNotFound,
     Pc2LineTruncated,
     Pc2LineOverflow,
-};
-
-/// JSContext for finalization.
-pub const JSContext = struct {
-    // For the interim Bytecode-based implementation, we just need
-    // the function to process. The full FunctionDef-based version
-    // will include parent/child relationship tracking.
+    Interrupted,
 };
 
 fn isVarInArgumentScope(vd: function_def_mod.VarDef) bool {
@@ -74,12 +64,13 @@ fn captureEvalParentLocal(
     if (local_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
     const source_idx: u16 = @intCast(local_idx);
     if (source_idx >= owner.vars.len) return error.InvalidBytecode;
-    owner.captureLocal(source_idx) catch return error.InvalidBytecode;
+    try owner.captureLocal(source_idx);
     const vd = owner.vars[source_idx];
-    // QuickJS add_eval_variables preserves scoped binding attributes, but
-    // deliberately forwards ancestor unscoped locals as non-const NORMAL
-    // rows. In particular, a named-function self binding loses its
-    // FUNCTION_NAME write protection only along this descendant-eval path.
+    // Ancestor unscoped locals are forwarded as non-const normal rows, except
+    // a named function's own name: InstantiateOrdinaryFunctionExpression makes
+    // it an immutable binding (§15.2.5), and an eval below must not change that
+    // (QuickJS's add_eval_variables drops the protection).
+    const keeps_kind = !normalize_unscoped or vd.var_kind == .function_name;
     _ = binding_rules.threadClosureSource(
         target,
         owner,
@@ -87,8 +78,8 @@ fn captureEvalParentLocal(
         function_def_mod.ClosureVar.init(.{
             .closure_type = .local,
             .is_lexical = vd.is_lexical,
-            .is_const = if (normalize_unscoped) false else vd.is_const,
-            .var_kind = if (normalize_unscoped) .normal else vd.var_kind,
+            .is_const = if (keeps_kind) vd.is_const else false,
+            .var_kind = if (keeps_kind) vd.var_kind else .normal,
             .var_idx = source_idx,
             .var_name = vd.var_name,
         }),
@@ -108,7 +99,7 @@ fn captureEvalParentArg(
     if (arg_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
     const source_idx: u16 = @intCast(arg_idx);
     if (source_idx >= owner.args.len) return error.InvalidBytecode;
-    owner.captureArg(source_idx) catch return error.InvalidBytecode;
+    try owner.captureArg(source_idx);
     const arg = owner.args[source_idx];
     // Ancestor arguments use the same add_eval_variables normalization:
     // lexical provenance is retained, while const/kind are ordinary.
@@ -132,48 +123,61 @@ fn captureEvalParentArg(
     };
 }
 
+/// Whether scope `level` of `fd` lies in its parameter scope (scope 1 when
+/// the function has parameter expressions).
+fn inParameterScope(fd: *const function_def_mod.FunctionDef, level: i32) bool {
+    var scope = level;
+    var steps: usize = 0;
+    while (scope > 1 and steps < fd.scopes.len) : (steps += 1) {
+        if (@as(usize, @intCast(scope)) >= fd.scopes.len) return false;
+        scope = fd.scopes[@intCast(scope)].parent;
+    }
+    return scope == 1;
+}
+
 fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
     if (!fd.has_eval_call) return;
 
     if (!fd.is_eval and !fd.is_strict_mode) {
         if (fd.var_object_idx == null) {
-            fd.var_object_idx = @intCast(fd.appendVar(.{
+            fd.var_object_idx = @intCast(try fd.appendVar(.{
                 .var_name = atom.ids.var_object,
                 .scope_level = 0,
                 .scope_next = 0,
                 .var_kind = .normal,
-            }) catch return error.OutOfMemory);
+            }));
         }
         if (fd.has_parameter_expressions and fd.arg_var_object_idx == null) {
-            fd.arg_var_object_idx = @intCast(fd.appendVar(.{
+            fd.arg_var_object_idx = @intCast(try fd.appendVar(.{
                 .var_name = atom.ids.arg_var_object,
                 .scope_level = 0,
                 .scope_next = 0,
                 .var_kind = .normal,
-            }) catch return error.OutOfMemory);
+            }));
         }
     }
 
     var has_this_binding = fd.has_this_binding;
     if (has_this_binding) {
-        _ = fd.ensureThisBinding() catch return error.OutOfMemory;
-        _ = fd.ensureNewTargetBinding() catch return error.OutOfMemory;
+        _ = try fd.ensureThisBinding();
+        _ = try fd.ensureNewTargetBinding();
         if (fd.is_derived_class_constructor) {
-            _ = fd.ensureThisActiveFunctionBinding() catch return error.OutOfMemory;
+            _ = try fd.ensureThisActiveFunctionBinding();
         }
-        if (fd.has_home_object) _ = fd.ensureHomeObjectBinding() catch return error.OutOfMemory;
+        if (fd.has_home_object) _ = try fd.ensureHomeObjectBinding();
     }
     var has_arguments_binding = fd.has_arguments_binding;
     if (has_arguments_binding) {
-        _ = fd.ensureArgumentsBinding() catch return error.OutOfMemory;
-        if (fd.has_parameter_expressions and !fd.is_strict_mode) {
+        _ = try fd.ensureArgumentsBinding();
+        if (fd.has_parameter_expressions) {
             fd.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
+                error.BytecodeOverflow => error.BytecodeOverflow,
                 error.InvalidScope => error.InvalidBytecode,
             };
         }
     }
-    if (fd.is_named_func_expr) _ = fd.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
+    if (fd.is_named_func_expr) _ = try fd.ensureFuncExprSelfBinding();
 
     for (fd.args, 0..) |_, arg_idx| try fd.captureArg(arg_idx);
     for (fd.vars, 0..) |vd, local_idx| {
@@ -186,19 +190,29 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
     while (maybe_parent) |parent| {
         if (parent.finalization_state != .prepared) return error.InvalidBytecode;
         if (!has_this_binding and parent.has_this_binding) {
-            _ = parent.ensureThisBinding() catch return error.OutOfMemory;
-            _ = parent.ensureNewTargetBinding() catch return error.OutOfMemory;
+            _ = try parent.ensureThisBinding();
+            _ = try parent.ensureNewTargetBinding();
             if (parent.is_derived_class_constructor) {
-                _ = parent.ensureThisActiveFunctionBinding() catch return error.OutOfMemory;
+                _ = try parent.ensureThisActiveFunctionBinding();
             }
-            if (parent.has_home_object) _ = parent.ensureHomeObjectBinding() catch return error.OutOfMemory;
+            if (parent.has_home_object) _ = try parent.ensureHomeObjectBinding();
             has_this_binding = true;
         }
         if (!has_arguments_binding and parent.has_arguments_binding) {
-            _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
+            _ = try parent.ensureArgumentsBinding();
+            // Eval code in a parameter initializer resolves `arguments` in the
+            // parameter scope (FunctionDeclarationInstantiation step 22.f),
+            // where only the argument-scope alias is visible.
+            if (parent.has_parameter_expressions and inParameterScope(parent, visible_scope)) {
+                parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.BytecodeOverflow => error.BytecodeOverflow,
+                    error.InvalidScope => error.InvalidBytecode,
+                };
+            }
             has_arguments_binding = true;
         }
-        if (parent.is_named_func_expr) _ = parent.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
+        if (parent.is_named_func_expr) _ = try parent.ensureFuncExprSelfBinding();
 
         if (visible_scope < 0 or @as(usize, @intCast(visible_scope)) >= parent.scopes.len) {
             return error.InvalidBytecode;
@@ -216,8 +230,12 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
 
         if (scope_idx != function_bytecode.arg_scope_end) {
             if (scope_idx != -1) return error.InvalidBytecode;
-            for (parent.args, 0..) |arg, arg_idx| {
-                if (arg.var_name == atom.null_atom) continue;
+            // Last first: of duplicate parameter names the last one is the
+            // binding, and eval code takes the first matching capture.
+            var arg_idx = parent.args.len;
+            while (arg_idx > 0) {
+                arg_idx -= 1;
+                if (parent.args[arg_idx].var_name == atom.null_atom) continue;
                 try captureEvalParentArg(fd, parent, arg_idx);
             }
             for (parent.vars, 0..) |vd, local_idx| {
@@ -298,7 +316,7 @@ fn prepareCurrentBeforeChildren(
         if (parent.finalization_state != .prepared) return error.InvalidBytecode;
     }
 
-    // QCP-1 v2: resolve_variables_v2 validates its own compact input
+    // QCP-1 v2: resolve_variables validates its own compact input
     // (validateInput + fail-closed walk) when compileFunction consumes
     // the attached builder. There is no phase-1 code array to validate:
     // the compact Builder is the only lowering input the compiler accepts.
@@ -433,7 +451,7 @@ fn validatePreLoweringArtifactShape(fd: *const function_def_mod.FunctionDef) Fin
 fn validateFinalArtifactShape(
     fd: *const function_def_mod.FunctionDef,
     lowered: *const bytecode_function.Bytecode,
-) FinalizeError!usize {
+) FinalizeError!void {
     if (fd.arg_count < 0 or @as(usize, @intCast(fd.arg_count)) != fd.args.len) return error.InvalidBytecode;
     if (fd.var_count < 0 or @as(usize, @intCast(fd.var_count)) != fd.vars.len) return error.InvalidBytecode;
     if (fd.defined_arg_count < 0 or fd.defined_arg_count > fd.arg_count) return error.InvalidBytecode;
@@ -454,7 +472,7 @@ fn validateFinalArtifactShape(
         if (source.len > std.math.maxInt(i32)) return error.BytecodeOverflow;
         _ = std.math.add(usize, source.len, 1) catch return error.BytecodeOverflow;
     }
-    return std.math.add(usize, fd.args.len, fd.vars.len) catch return error.BytecodeOverflow;
+    _ = std.math.add(usize, fd.args.len, fd.vars.len) catch return error.BytecodeOverflow;
 }
 
 fn createFunctionBytecodeAfterChildren(
@@ -472,6 +490,7 @@ fn createFunctionBytecodeAfterChildren(
     defer lowered.deinit();
     lowered.line_num = fd.line_num;
     lowered.col_num = fd.col_num;
+    lowered.interrupt_runtime = rt;
     // Finalization policy is fixed on FunctionDef before parsing and is
     // visible to every lowering phase, not patched onto the published FB
     // afterwards. This matters for strict-only frame geometry such as
@@ -487,6 +506,7 @@ fn createFunctionBytecodeAfterChildren(
         error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
         error.BytecodeOverflow => return error.BytecodeOverflow,
         error.ClosureVarNotFound => return error.ClosureVarNotFound,
+        error.Interrupted => return error.Interrupted,
     };
     std.debug.assert(fd.builder == null);
     fd.consumeGlobalVars();
@@ -494,7 +514,7 @@ fn createFunctionBytecodeAfterChildren(
     fd.use_short_opcodes = true;
     try publishLoweredMetadata(&lowered, fd);
 
-    _ = try validateFinalArtifactShape(fd, &lowered);
+    try validateFinalArtifactShape(fd, &lowered);
 
     // Preflight the exact packed FunctionBytecode layout before the first
     // artifact allocation. Source and pc2line remain independent moved
@@ -611,7 +631,6 @@ fn createFunctionBytecodeAfterChildren(
 
     bytecode_function.publishExecutionFlags(fb, .{
         .materializes_arguments_object = lowered.flags.materializes_arguments_object,
-        .has_mapped_arguments = lowered.flags.has_mapped_arguments,
         .leaf_returns_balanced = lowered.leaf_returns_balanced,
         .contains_direct_eval = fd.has_eval_call,
         .class_syntax_excludes_inline = fd.is_derived_class_constructor or
@@ -627,13 +646,17 @@ fn createFunctionBytecodeAfterChildren(
     shell_owned = false;
     rt.gc.addInitializedWithSizeNoFail(&fb.header, fb.heapByteSizeWithLayout(layout));
 
-    if (disasm_enabled) {
-        var disbuf: [65536]u8 = undefined;
-        var diswriter = std.Io.Writer.fixed(&disbuf);
-        dump.dumpFunctionBytecode(&diswriter, fb, rt.atoms, .{ .show_raw_bytes = true }) catch {};
-        std.debug.print("{s}\n", .{diswriter.buffered()});
-    }
+    if (disasm_enabled) printDisassembly(fb, rt.atoms);
     return slice;
+}
+
+/// `ZJS_DISASM` output, outlined so its 64 KiB buffer is not part of every
+/// finalization frame (a direct eval deep in recursion runs one).
+noinline fn printDisassembly(fb: *const fb_mod.FunctionBytecode, atoms: *atom.AtomTable) void {
+    var disbuf: [65536]u8 = undefined;
+    var diswriter = std.Io.Writer.fixed(&disbuf);
+    dump.dumpFunctionBytecode(&diswriter, fb, atoms, .{ .show_raw_bytes = true }) catch {};
+    std.debug.print("{s}\n", .{diswriter.buffered()});
 }
 
 fn publishLoweredMetadata(
@@ -654,7 +677,6 @@ fn publishLoweredMetadata(
         !function.flags.runtime_strict and
         def.has_simple_parameter_list and
         materializes_arguments_object;
-    function.flags.has_mapped_arguments = mapped_arguments;
     if (mapped_arguments) {
         for (def.args, 0..) |_, arg_idx| try def.captureArg(arg_idx);
     }
@@ -700,7 +722,7 @@ fn publishLoweredMetadata(
 // Keep the final bytecode verification walk as its own compiler stage.
 // Whole-program source deletion otherwise let Zig/LLVM fold this into the
 // packed finalizer; the resulting backend-stall regression was the carrier
-// behind QCP-1B's crypto/code-load shift. See the decision record §9.3.
+// behind QCP-1B's crypto/code-load shift.
 noinline fn computeStackSizeForCurrentBytecode(
     function: *bytecode_function.Bytecode,
     leaf_returns_balanced: *bool,
@@ -710,6 +732,7 @@ noinline fn computeStackSizeForCurrentBytecode(
     // allocator; published artifacts retain their explicit Runtime owner.
     return stack_size.compute(function.code, .{
         .scratch_allocator = function.scratch,
+        .interrupt_runtime = function.interrupt_runtime,
         .returns_balanced_out = leaf_returns_balanced,
         .final_artifact = final_artifact,
     }) catch |err| switch (err) {
@@ -781,7 +804,7 @@ fn installChildFunctionBytecodes(
         const value = JSValue.functionBytecode(&fb.header);
         const old_value = parent.cpool[idx];
         parent.cpool[idx] = value;
-        if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {}
+        _ = bigint_mod.BigInt.destroyIfReservedValue(rt, old_value);
     }
 }
 

@@ -9,13 +9,9 @@ const lookahead = @import("lookahead.zig");
 const emitter = @import("emitter.zig");
 const expressions = @import("expressions.zig");
 const statements = @import("statements.zig");
-const functions = @import("functions.zig");
-const classes = @import("classes.zig");
-const modules = @import("modules.zig");
 const typescript = @import("typescript.zig");
 const Emitter = emitter.Emitter;
 const declarations = @import("declarations.zig");
-const closure = @import("closure.zig");
 
 pub const std = @import("std");
 
@@ -41,11 +37,7 @@ pub const JSValue = @import("../core/value.zig").JSValue;
 
 pub const compiler = @import("../compiler/root.zig");
 
-pub const bytecode_function = bytecode;
-
 pub const function_def_mod = bytecode.function_def;
-
-pub const bytecode_module = bytecode.module;
 
 pub const opcode = bytecode.opcode;
 
@@ -104,6 +96,9 @@ pub const Error = lexer_mod.Error || error{
     // `js_check_stack_overflow` -> js_parse_error "stack overflow",
     // quickjs.c). Surfaced by `compile` as a catchable SyntaxError.
     StackOverflow,
+    /// The interrupt handler asked to stop (contract C8); `compile`
+    /// returns it as is, never as a source-program verdict.
+    Interrupted,
 };
 
 pub const PendingDiagnostic = struct {
@@ -151,6 +146,9 @@ pub const BlockEnv = struct {
     /// cleanup unwinds catch markers down to it.
     catch_marker_depth: u32,
     has_iterator: bool,
+    /// `has_iterator` for a `for await` loop: an async generator's return
+    /// cleanup awaits only an async iterator's `return()` result.
+    is_async_iterator: bool = false,
     is_regular_stmt: bool,
 };
 
@@ -172,6 +170,89 @@ pub const LabelFrame = struct {
     }
 };
 
+/// `a: b: stmt`: every label of a chain names the same statement
+/// (LabelledEvaluation's labelSet). The outer labels resolve to the
+/// innermost one, the only label the statement itself registers.
+pub const LabelAlias = struct {
+    alias: Atom,
+    target: Atom,
+};
+
+/// The private names of the enclosing class bodies, innermost last. A name
+/// resolves to its newest entry, which shadows the older ones; `latest`
+/// indexes the newest entry of each name and `shadowed` links an entry to
+/// the one it shadows, so lookups and truncation stay O(1) for classes with
+/// thousands of private names. Names compare without their leading `#`.
+pub const PrivateBoundNames = struct {
+    entries: std.ArrayList(Atom) = .empty,
+    shadowed: std.ArrayList(?u32) = .empty,
+    latest: std.HashMapUnmanaged(Atom, u32, NameContext, std.hash_map.default_max_load_percentage) = .empty,
+
+    const NameContext = struct {
+        atoms: *const atom_module.AtomTable,
+
+        pub fn hash(ctx: NameContext, key: Atom) u64 {
+            return std.hash.Wyhash.hash(0, bareName(ctx.atoms, key));
+        }
+
+        pub fn eql(ctx: NameContext, a: Atom, b: Atom) bool {
+            return std.mem.eql(u8, bareName(ctx.atoms, a), bareName(ctx.atoms, b));
+        }
+    };
+
+    fn bareName(atoms: *const atom_module.AtomTable, key: Atom) []const u8 {
+        const name = atoms.name(key) orelse return "";
+        return if (name.len > 0 and name[0] == '#') name[1..] else name;
+    }
+
+    pub fn deinit(self: *PrivateBoundNames, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+        self.shadowed.deinit(allocator);
+        self.latest.deinit(allocator);
+    }
+
+    pub fn len(self: *const PrivateBoundNames) usize {
+        return self.entries.items.len;
+    }
+
+    /// The newest entry spelled like `name` (with or without its `#`) at
+    /// index `bound_start` or later.
+    pub fn find(self: *const PrivateBoundNames, atoms: *const atom_module.AtomTable, name: Atom, bound_start: usize) ?Atom {
+        const index = self.latest.getContext(name, .{ .atoms = atoms }) orelse return null;
+        return if (index >= bound_start) self.entries.items[index] else null;
+    }
+
+    /// Whether `private_atom` is the entry its name resolves to.
+    pub fn isBound(self: *const PrivateBoundNames, atoms: *const atom_module.AtomTable, private_atom: Atom) bool {
+        return self.find(atoms, private_atom, 0) == private_atom;
+    }
+
+    pub fn push(self: *PrivateBoundNames, allocator: std.mem.Allocator, atoms: *const atom_module.AtomTable, private_atom: Atom) !void {
+        const index: u32 = @intCast(self.entries.items.len);
+        try self.entries.ensureUnusedCapacity(allocator, 1);
+        try self.shadowed.ensureUnusedCapacity(allocator, 1);
+        const entry = try self.latest.getOrPutContext(allocator, private_atom, .{ .atoms = atoms });
+        self.shadowed.appendAssumeCapacity(if (entry.found_existing) entry.value_ptr.* else null);
+        entry.key_ptr.* = private_atom;
+        entry.value_ptr.* = index;
+        self.entries.appendAssumeCapacity(private_atom);
+    }
+
+    pub fn truncate(self: *PrivateBoundNames, atoms: *const atom_module.AtomTable, new_len: usize) void {
+        const ctx: NameContext = .{ .atoms = atoms };
+        while (self.entries.items.len > new_len) {
+            const private_atom = self.entries.pop().?;
+            if (self.shadowed.pop().?) |older| {
+                const entry = self.latest.getEntryContext(private_atom, ctx).?;
+                entry.key_ptr.* = self.entries.items[older];
+                entry.value_ptr.* = older;
+            } else {
+                _ = self.latest.removeContext(private_atom, ctx);
+            }
+        }
+    }
+};
+
 pub const ControlFrames = struct {
     top_break: ?*BlockEnv,
     break_fixups: std.ArrayList(usize),
@@ -188,6 +269,8 @@ pub const ControlFrames = struct {
     continue_frame_cleanup_drops: std.ArrayList(u8),
     label_frames: std.ArrayList(LabelFrame),
     pending_label_atom: ?Atom,
+    pending_label_chain: std.ArrayList(Atom),
+    label_aliases: std.ArrayList(LabelAlias),
     active_catch_marker_depth: u32,
     using_block_frames: std.ArrayList(UsingBlockFrame),
     /// Set by `leaveControlBoundary`; a second leave is a no-op.
@@ -383,13 +466,15 @@ pub const FunctionContext = struct {
     in_parameter_initializer: bool = false,
     /// Parameter default initializers must reject `await`.
     reject_await_in_parameter_initializer: bool = false,
-    /// Name a named function expression binds inside its own body.
-    function_expr_name_binding: ?Atom = null,
     /// TypeScript namespace body: `var` becomes `let` and `export` attaches
     /// the declaration to the namespace object.
     in_namespace: bool = false,
     namespace_export: bool = false,
     current_namespace_atom: ?Atom = null,
+    /// The `<class_fields_init>` binding of the class whose constructor a
+    /// `super()` here belongs to (arrows inherit it): `super()` initializes
+    /// that class's fields even inside a nested class's computed key.
+    super_fields_init: Atom = atom_class_fields_init,
 };
 
 /// A lexical scope entered with `State.openScope`. `close` emits the
@@ -430,6 +515,9 @@ pub const ClassContext = struct {
     static_init_child_index: ?u16 = null,
     instance_private_brand_needed: bool = false,
     static_private_brand_needed: bool = false,
+    /// This class's `<class_fields_init>` binding: a fresh symbol per class,
+    /// so a nested class's binding never shadows an enclosing one.
+    fields_init: Atom = atom_class_fields_init,
 };
 
 pub const State = struct {
@@ -455,6 +543,10 @@ pub const State = struct {
     /// `takeModuleRecord` hands it to the module artifact after finalize.
     module_record: ?bytecode.module.Record = null,
     runtime: ?*core.JSRuntime = null,
+    /// The realm the code is compiled for. Parse-time constants that carry a
+    /// realm intrinsic (tagged template objects) take it from here. Null only
+    /// in realm-less parser/compiler harnesses.
+    realm: ?*core.JSContext = null,
     /// Owner for unpublished constants, independent of atom-table tracing.
     allocation_runtime: *core.JSRuntime,
     /// One-token lookahead. The lexer is the source of truth; we cache
@@ -465,16 +557,6 @@ pub const State = struct {
     last_token_line_num: u32 = 1,
     last_token_col_num: u32 = 1,
     last_opcode_source_offset: ?u32 = null,
-    /// Lazily-built line-start byte offsets for O(1) (line,col)->offset
-    /// conversion in `emitSourcePos`. This replaces an O(n) rescan of the
-    /// whole source from byte 0 on EVERY opcode source-position emit, which
-    /// made a full compile O(n^2) and dominated real-world parse time
-    /// (mandreel/typescript/pdfjs Octane cases timed out; code-load 43x
-    /// behind qjs). `source_line_starts[k]` is the byte offset where line
-    /// (k+1) begins (line 1 -> 0). Rebuilt if the lexer source changes
-    /// (direct eval / sub-parse); freed in `deinit`.
-    source_line_starts: []u32 = &.{},
-    source_line_starts_src: []const u8 = &.{},
     /// Scoped attribution for statement opcodes emitted after their
     /// operand expression has advanced the lexer. QuickJS emits one
     /// OP_line_num at the statement keyword before lowering the complete
@@ -486,22 +568,32 @@ pub const State = struct {
     scope_level: i32 = 0,
     /// Whether we're in strict mode.
     is_strict: bool = false,
+    /// TypeScript source (`.ts`, `.mts`, `.cts`). Token sequences that are
+    /// valid JavaScript with another meaning -- `f<T>(x)` (two comparisons)
+    /// and a postfix `x!` -- take their TypeScript meaning only here.
+    typescript: bool = false,
     /// Whether we're in an eval context.
     is_eval: bool = false,
-    /// Whether non-strict `delete name` may target bindings introduced by
-    /// enclosing eval code. This intentionally crosses nested function
-    /// boundaries, unlike `is_eval`, because functions created by eval can
-    /// delete eval-created var bindings captured in their environment.
-    eval_delete_bindings: bool = false,
     /// The class whose ClassTail is being parsed; see `ClassContext`.
     class: ClassContext = .{},
     /// Whether declarations are currently being parsed inside the synthetic
     /// CaseBlock lexical environment for a switch statement.
     in_switch_case_block_scope: bool = false,
+    /// The "use strict" directive of the function body being parsed; strict
+    /// checks that can only run after the body report it.
+    use_strict_position: ?diagnostics.Position = null,
+    /// Source range of the last `rhsContainsDirectEval` scan that found no
+    /// direct eval (see there).
+    direct_eval_free_start: usize = 0,
+    direct_eval_free_end: usize = 0,
     /// Whether `return` is syntactically allowed in the current statement body.
     return_depth: u32 = 0,
     /// Whether the last primary expression was super.
     last_was_super: bool = false,
+    /// Code length right after an optional chain that ended in a private
+    /// member (`a?.#x`). The chain close drops the reference, so `delete`
+    /// uses this to still report the early error.
+    private_opt_chain_end: ?u32 = null,
     /// Grammar context of the function being parsed; a function boundary
     /// replaces and restores it as a whole.
     ctx: FunctionContext = .{},
@@ -519,15 +611,27 @@ pub const State = struct {
     top_level_lexical_as_global_ref: bool = false,
     eval_global_var_bindings: bool = false,
     eval_in_parameter_initializer: bool = false,
-    eval_annex_b_blocked_function_names: []const Atom = &.{},
     features: std.EnumSet(FeatureImpl) = .initEmpty(),
     last_declared_atom: ?Atom = null,
+    /// TypeScript `interface`/`type` names: type-only, so `export { T }` of
+    /// one is elided rather than an unbound export.
+    ts_type_names: std.ArrayList(Atom) = .empty,
+    /// TypeScript namespace/enum members, one set per namespace (merged
+    /// across its blocks) or enum, and the frames of the bodies being
+    /// parsed. A free name that is a member resolves to `Object.member`,
+    /// as tsc rewrites it.
+    ts_member_sets: std.ArrayList(TsMemberSet) = .empty,
+    ts_member_frames: std.ArrayList(TsMemberFrame) = .empty,
     /// TypeScript parameter properties of the constructor being parsed.
     current_parameter_properties: ?std.ArrayList(Atom) = null,
     /// TypeScript: inside the check type of `A extends B ? C : D`, a
     /// nested conditional type needs parentheses (tsc
     /// `inDisallowConditionalTypesContext`).
     ts_disallow_conditional: bool = false,
+    /// Lexer strictness of the code around the function body being parsed:
+    /// the token after its closing `}` is lexed with it (a strict body must
+    /// not reject a sloppy `010` that follows).
+    enclosing_lex_strict: bool = false,
     /// TypeScript: the last `parseFunctionDecl` consumed a body-less
     /// overload signature and declared nothing.
     ts_last_decl_was_signature: bool = false,
@@ -548,13 +652,13 @@ pub const State = struct {
     /// TDZ, and local-slot assignment.
     ///
     /// The parser still emits to `function.code` as before; this is a
-    /// parallel structure that mirrors `JSParseState.curFunc`
-    ///. Tests in `qjs_parser_test.zig` assert the
+    /// parallel structure that mirrors `JSParseState.curFunc`.
+    /// Tests in `qjs_parser_test.zig` assert the
     /// `vars` / `scopes` layout is populated correctly.
     function_def: function_def_mod.FunctionDef,
 
     /// TGC S3-b §2.2: interval root for every atom this parse obtains.
-    /// Detached at construction because `initRootEmitter` returns the
+    /// Detached at construction because `init` returns the
     /// `State` by value -- the provider stores `&self`, so registration
     /// waits for `activateCompileRoots`, which the owner calls once the
     /// state sits at its final address (the `ReplaceMatchRoots.activate`
@@ -582,6 +686,10 @@ pub const State = struct {
     discarded_func_head: ?*function_def_mod.FunctionDef = null,
 
     annex_b_if_function_decl_clause: bool = false,
+    /// Last opcode of the most recently parsed LeftHandSideExpression when it
+    /// is a bare template literal, so `getLValue` can tell the template's
+    /// `concat` call from a CallExpression.
+    template_concat_call_pos: ?u32 = null,
     last_function_child_index: ?u16 = null,
     last_class_name_patch: ?ClassNamePatch = null,
     assign_expr_depth: u32 = 0,
@@ -605,12 +713,15 @@ pub const State = struct {
     continue_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
     continue_frame_cleanup_drops: std.ArrayList(u8) = .empty,
     label_frames: std.ArrayList(LabelFrame) = .empty,
+    /// Labels of a chain still waiting for its innermost label.
+    pending_label_chain: std.ArrayList(Atom) = .empty,
+    label_aliases: std.ArrayList(LabelAlias) = .empty,
     pending_label_atom: ?Atom = null,
     return_finally_frames: std.ArrayList(ReturnFinallyFrame) = .empty,
     finally_body_control_frames: std.ArrayList(FinallyBodyControlFrame) = .empty,
     using_block_frames: std.ArrayList(UsingBlockFrame) = .empty,
     class_private_elements: std.ArrayList(ClassPrivateElement) = .empty,
-    class_private_bound_names: std.ArrayList(Atom) = .empty,
+    class_private_bound_names: PrivateBoundNames = .{},
 
     /// A parse root: `name` is the root FunctionDef's name (the filename in
     /// production) and doubles as the default name of a nameless
@@ -708,11 +819,10 @@ pub const State = struct {
         if (self.last_declared_atom) |_| {
             self.last_declared_atom = null;
         }
-        if (self.source_line_starts.len != 0) {
-            self.scratch.free(self.source_line_starts);
-            self.source_line_starts = &.{};
-            self.source_line_starts_src = &.{};
-        }
+        self.ts_type_names.deinit(self.scratch);
+        for (self.ts_member_sets.items) |*set| set.deinit(self.scratch);
+        self.ts_member_sets.deinit(self.scratch);
+        self.ts_member_frames.deinit(self.scratch);
         self.lex.freeToken(&self.token);
         // Free any nested function definitions on the stack
         const cur_func_stack = self.cur_func_stack;
@@ -751,6 +861,8 @@ pub const State = struct {
             frame.deinit(self.scratch);
         }
         self.label_frames.deinit(self.scratch);
+        self.pending_label_chain.deinit(self.scratch);
+        self.label_aliases.deinit(self.scratch);
         self.return_finally_frames.deinit(self.scratch);
         self.finally_body_control_frames.deinit(self.scratch);
         self.using_block_frames.deinit(self.scratch);
@@ -815,10 +927,8 @@ pub const State = struct {
     pub fn activateCompileRoots(self: *State) Error!void {
         try self.atom_scope.activate();
         if (self.runtime) |rt| {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                try rt.registerRootProvider(self.compileValueRootProvider());
-                self.compile_value_roots_registered = true;
-            }
+            try rt.registerRootProvider(self.compileValueRootProvider());
+            self.compile_value_roots_registered = true;
         }
     }
 
@@ -1000,10 +1110,7 @@ pub const State = struct {
     }
 
     pub fn firstGlobalVarIndex(self: *State, name: Atom) ?usize {
-        for (self.curFunc().global_vars, 0..) |gv, idx| {
-            if (gv.var_name == name) return idx;
-        }
-        return null;
+        return (self.curFunc().findGlobalVarName(name) orelse return null).first;
     }
 
     pub fn emitGlobalScopePutVar(self: *State, atom_id: Atom) Error!void {
@@ -1018,7 +1125,10 @@ pub const State = struct {
         // but must still traverse the eval declaration environment. Scope
         // zero excludes the block-local function while retaining the
         // compiler-seeded _var_/_arg_var_ and exact caller closure targets.
-        try Emitter.opAtomU16(self, opcode.op.scope_put_var, atom_id, 0);
+        // The store targets the variable environment itself (B.3.2.3
+        // `genv.SetMutableBinding`), so it skips `with` objects and a
+        // same-named catch parameter the eval runs inside.
+        try Emitter.opAtomU16(self, opcode.op.scope_put_var, atom_id, opcode.scope_no_dynamic_env_flag);
     }
 
     /// Atom id reserved for the eval-return slot, mirroring
@@ -1035,7 +1145,7 @@ pub const State = struct {
     /// before parsing any statements.
     ///
     /// Effect:
-    /// 1. `is_eval` is set so `parseExprStatement` emits
+    /// 1. `is_eval` is set so `parseExpressionStatement` emits
     ///    `scope_put_var <ret>` (lowered to `put_loc <idx>`)
     ///    instead of `drop`.
     /// 2. The `<ret>` slot is registered in `function_def.vars`
@@ -1045,7 +1155,6 @@ pub const State = struct {
     pub fn enableEvalReturn(self: *State) Error!void {
         self.is_eval = true;
         self.curFunc().is_eval = true;
-        self.eval_delete_bindings = true;
         try self.enableReturnCompletion();
     }
 
@@ -1108,6 +1217,8 @@ pub const State = struct {
         // a catchable SyntaxError instead of a native stack overflow.
         if (self.runtime) |rt| {
             if (rt.checkNativeStackOverflow(0)) return self.failHere(error.StackOverflow);
+            // A huge source parses for seconds; poll per token (C8).
+            try rt.pollNativeWork();
         }
         // `lex.pos` is the end of the current token until nextInto starts
         // skipping trivia, matching QuickJS's `last_ptr = buf_ptr`.
@@ -1124,7 +1235,7 @@ pub const State = struct {
                         .line = self.lex.mark_line,
                         .column = self.lex.mark_col,
                     },
-                    decoratorDiagnosticMessage(self.lex.source, err, self.lex.mark_pos) orelse @errorName(err),
+                    decoratorDiagnosticMessage(self.lex.source, err, self.lex.mark_pos) orelse failureMessage(err),
                 );
             }
             return err;
@@ -1165,9 +1276,45 @@ pub const State = struct {
 
     pub fn recordFailureHere(self: *State, err: Error) void {
         switch (err) {
-            error.OutOfMemory, error.BytecodeOverflow => {},
-            else => self.setPendingDiagnostic(err, self.currentDiagnosticPosition(), @errorName(err)),
+            error.OutOfMemory, error.Interrupted => {},
+            // A limit hit while parsing points at the construct that hit it,
+            // unless an earlier grammar error is already the diagnostic.
+            error.BytecodeOverflow => if (self.pending_diagnostic == null) {
+                self.setPendingDiagnostic(err, self.currentDiagnosticPosition(), "implementation limit exceeded: function too large");
+            },
+            else => self.setPendingDiagnostic(err, self.currentDiagnosticPosition(), failureMessage(err)),
         }
+    }
+
+    /// Reader-facing text for grammar errors raised without their own
+    /// diagnostic; any other error keeps its name.
+    /// User-facing text for a lexer/parser failure.
+    pub fn failureMessage(err: anyerror) []const u8 {
+        return switch (err) {
+            error.YieldOutsideGenerator => "'yield' is not allowed here",
+            error.AwaitOutsideAsyncFunction => "'await' is only valid in async functions and the top level of modules",
+            error.InvalidAssignmentTarget => "invalid assignment target",
+            error.InvalidLhs => "invalid left-hand side in assignment",
+            error.StackOverflow => "stack overflow",
+            error.InvalidIdentifier => "invalid identifier",
+            error.InvalidCharacter => "unexpected character",
+            error.CodepointTooLarge => "code point out of range",
+            error.InvalidEscape => "invalid escape sequence",
+            error.InvalidUnicodeEscape => "invalid Unicode escape sequence",
+            error.InvalidNumber, error.InvalidNumberLiteral => "invalid number literal",
+            error.InvalidUtf8 => "invalid UTF-8 in source",
+            error.InvalidRegExp => "invalid regular expression",
+            error.InvalidPrivateName => "invalid private name",
+            error.LegacyOctalInStrictMode => "octal literals are not allowed in strict mode",
+            error.HtmlCommentInModule => "HTML-like comments are not allowed in modules",
+            error.UnterminatedString => "unterminated string literal",
+            error.UnterminatedTemplate => "unterminated template literal",
+            error.UnterminatedRegExp => "unterminated regular expression literal",
+            error.UnterminatedComment => "unterminated comment",
+            error.UnexpectedEof => "unexpected end of input",
+            // Internal invariants keep their name for diagnosis.
+            else => @errorName(err),
+        };
     }
 
     fn failHere(self: *State, err: Error) Error {
@@ -1281,13 +1428,15 @@ pub const State = struct {
     }
 
     pub fn failUndefinedLabel(self: *State, atom_id: Atom) Error {
-        const label_name = self.atoms.name(atom_id) orelse return error.ParserInvariant;
+        return self.failNamed("undefined label '{s}'", "undefined label", atom_id);
+    }
+
+    /// A diagnostic naming `atom_id`; `fallback` covers an unnamed atom or
+    /// a name too long for the message buffer.
+    pub fn failNamed(self: *State, comptime format: []const u8, fallback: []const u8, atom_id: Atom) Error {
+        const name = self.atoms.name(atom_id) orelse return self.failWithMessage(null, fallback);
         var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
-        const message = std.fmt.bufPrint(
-            &message_buffer,
-            "undefined label '{s}'",
-            .{label_name},
-        ) catch "undefined label";
+        const message = std.fmt.bufPrint(&message_buffer, format, .{name}) catch fallback;
         return self.failWithMessage(null, message);
     }
 
@@ -1353,7 +1502,21 @@ pub const State = struct {
         for (s.label_frames.items) |frame| {
             if (frame.atom == atom_id) return true;
         }
-        return false;
+        for (s.label_aliases.items) |alias| {
+            if (alias.alias == atom_id) return true;
+        }
+        return std.mem.indexOfScalar(Atom, s.pending_label_chain.items, atom_id) != null;
+    }
+
+    /// The label a `break`/`continue` target names: an outer label of a
+    /// chain stands for the chain's innermost label.
+    fn resolveLabelAlias(s: *const State, atom_id: Atom) Atom {
+        var i = s.label_aliases.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (s.label_aliases.items[i].alias == atom_id) return s.label_aliases.items[i].target;
+        }
+        return atom_id;
     }
 
     pub fn pushLabelFrame(s: *State, atom_id: Atom, allow_continue: bool) Error!usize {
@@ -1395,6 +1558,15 @@ pub const State = struct {
         _ = s.label_frames.pop().?;
     }
 
+    /// Error unwinding: drop `frame_index` and every frame pushed above it.
+    /// Inner loop and switch frames are not popped on their own error paths.
+    pub fn unwindLabelFrames(s: *State, frame_index: usize) void {
+        while (s.label_frames.items.len > frame_index) {
+            s.label_frames.items[s.label_frames.items.len - 1].deinit(s.scratch);
+            _ = s.label_frames.pop().?;
+        }
+    }
+
     pub fn findLabelFrame(s: *State, atom_id: Atom) ?usize {
         var i = s.label_frames.items.len;
         while (i != 0) {
@@ -1405,11 +1577,11 @@ pub const State = struct {
     }
 
     pub fn emitLabelledBreak(s: *State, atom_id: Atom) Error!void {
-        try emitter.emitControlThroughFinally(s, .{ .kind = .@"break", .label_atom = atom_id });
+        try emitter.emitControlThroughFinally(s, .{ .kind = .@"break", .label_atom = s.resolveLabelAlias(atom_id) });
     }
 
     pub fn emitLabelledContinue(s: *State, atom_id: Atom) Error!void {
-        try emitter.emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = atom_id });
+        try emitter.emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = s.resolveLabelAlias(atom_id) });
     }
 
     pub fn labelStartAtom(s: *State) ?Atom {
@@ -1447,6 +1619,8 @@ pub const State = struct {
             frame.deinit(allocator);
         }
         s.label_frames.deinit(allocator);
+        s.pending_label_chain.deinit(allocator);
+        s.label_aliases.deinit(allocator);
         s.using_block_frames.deinit(allocator);
     }
 
@@ -1467,6 +1641,8 @@ pub const State = struct {
             .continue_frame_cleanup_drops = s.continue_frame_cleanup_drops,
             .label_frames = s.label_frames,
             .pending_label_atom = s.pending_label_atom,
+            .pending_label_chain = s.pending_label_chain,
+            .label_aliases = s.label_aliases,
             .active_catch_marker_depth = s.active_catch_marker_depth,
             .using_block_frames = s.using_block_frames,
         };
@@ -1485,6 +1661,8 @@ pub const State = struct {
         s.continue_frame_cleanup_drops = .empty;
         s.label_frames = .empty;
         s.pending_label_atom = null;
+        s.pending_label_chain = .empty;
+        s.label_aliases = .empty;
         s.active_catch_marker_depth = 0;
         s.using_block_frames = .empty;
         return saved;
@@ -1513,6 +1691,8 @@ pub const State = struct {
         s.continue_frame_cleanup_drops = saved.continue_frame_cleanup_drops;
         s.label_frames = saved.label_frames;
         s.pending_label_atom = saved.pending_label_atom;
+        s.pending_label_chain = saved.pending_label_chain;
+        s.label_aliases = saved.label_aliases;
         s.active_catch_marker_depth = saved.active_catch_marker_depth;
         s.using_block_frames = saved.using_block_frames;
     }
@@ -1522,7 +1702,7 @@ pub const State = struct {
     }
 
     pub fn truncateClassPrivateBoundNames(self: *State, len: usize) void {
-        self.class_private_bound_names.shrinkRetainingCapacity(len);
+        self.class_private_bound_names.truncate(self.atoms, len);
     }
 
     /// Expect a semicolon, applying ASI rules. Returns true if a semicolon
@@ -1665,6 +1845,11 @@ pub const State = struct {
     /// top-level boundary. Nested function bodies are not part of the
     /// current function's direct-eval environment.
     pub fn rhsContainsDirectEval(s: *State) bool {
+        // A scan that found no direct eval covers every scan starting inside
+        // its range: such a scan stops at or before the same boundary. This
+        // keeps `x = a = a = ... = 1` chains linear.
+        const start = s.token.start;
+        if (start >= s.direct_eval_free_start and start < s.direct_eval_free_end) return false;
         const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
         // The scan advances past the current token and releases its atom.
         // Keep an independent owner for the token restored at the end;
@@ -1675,7 +1860,15 @@ pub const State = struct {
             lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
             s.token = saved_token;
         }
+        const found = scanRhsForDirectEval(s);
+        if (!found) {
+            s.direct_eval_free_start = start;
+            s.direct_eval_free_end = s.token.start;
+        }
+        return found;
+    }
 
+    fn scanRhsForDirectEval(s: *State) bool {
         const advanceLocal = struct {
             fn call(state: *State) bool {
                 state.lex.nextIntoReplacing(&state.token) catch return false;
@@ -1706,7 +1899,7 @@ pub const State = struct {
                 continue;
             }
             if (kind == .kw_function) {
-                lookahead.skipFunctionInPredeclareScan(s) catch return false;
+                lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch return false;
                 eval_candidate = false;
                 previous_token_kind = .kw_function;
                 if (!advanceLocal(s)) return false;
@@ -1769,6 +1962,11 @@ pub const State = struct {
     }
 
     fn templateContainsDirectEval(s: *State, first: tok.Token) bool {
+        // Nested substitutions recurse. Out of native stack, answer the
+        // conservative "may contain eval" (the reference form stays correct).
+        if (s.runtime) |rt| {
+            if (rt.checkNativeStackOverflow(0)) return true;
+        }
         const first_part = first.payload.str.template orelse return false;
         switch (first_part) {
             .no_substitution, .tail => return false,
@@ -1785,7 +1983,7 @@ pub const State = struct {
                 const kind = scan_token.kind;
                 if (kind == .eof) return false;
                 if (kind == .kw_function) {
-                    lookahead.skipFunctionInPredeclareScan(s) catch return false;
+                    lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch return false;
                     eval_candidate = false;
                     previous_token_kind = .kw_function;
                     continue;
@@ -1906,8 +2104,8 @@ pub const State = struct {
         try Emitter.opU16NoSource(self, opcode.op.close_loc, idx);
     }
 
-    /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`
-    ///. `resolve_variables` lowers this temp opcode
+    /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`.
+    /// `resolve_variables` lowers this temp opcode
     /// to a per-scope binding refresh (TDZ re-arm + captured-slot
     /// detach, see `enterScopeRefreshSize`) so block-scoped bindings
     /// are fresh on every scope entry — the per-iteration semantics of
@@ -1940,9 +2138,8 @@ pub const State = struct {
 
     // ---- Temporary scope opcode helpers ----
     // These emit scope_* opcodes that will be lowered by resolve_variables.
-    // One outlined walk: leftover candidate35 still had five ~294 B
-    // emitScope* copies (extra 1176). Opcode pair and source flag stay
-    // runtime so LLVM cannot reconstruct the typed twins.
+    // One outlined emitter; the opcode and source flag stay runtime
+    // arguments so LLVM does not re-specialize per-opcode copies.
 
     noinline fn emitScopeVar(
         self: *State,
@@ -2019,7 +2216,10 @@ pub const State = struct {
         } else text;
         defer if (parse_text.ptr != text.ptr) self.scratch.free(parse_text);
 
-        var parsed = libs_bignum.parseAutoAlloc(self.persistent, parse_text) catch return Error.InvalidNumberLiteral;
+        var parsed = libs_bignum.parseAutoAlloc(self.persistent, parse_text, self.allocation_runtime) catch |err| return switch (err) {
+            error.Interrupted => error.Interrupted,
+            else => Error.InvalidNumberLiteral,
+        };
         errdefer parsed.deinit();
         if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
@@ -2065,7 +2265,7 @@ pub const State = struct {
         try self.ensureBuilderForFd(self.curFunc());
     }
 
-    /// Start a production program root. `initRootEmitter` established the
+    /// Start a production program root. `init` established the
     /// body-scope identity before any Builder existed, so emit that one
     /// enter event into the freshly attached builder.
     pub fn beginProgramEmission(self: *State) compiler.builder.Error!void {
@@ -2097,3 +2297,33 @@ pub const atom_star: Atom = Atom.fromRaw(128); // "*"
 pub const ParseState = State;
 
 pub const Feature = FeatureImpl;
+
+/// Members of one TypeScript namespace (all its blocks) or enum.
+pub const TsMemberSet = struct {
+    /// Key: the declaring function, the enclosing set, the declaration kind
+    /// and the name. Blocks of one kind merge; an enum and a namespace of the
+    /// same name do not see each other's members (tsc).
+    pub const Kind = enum { namespace, @"enum" };
+
+    fd: *const function_def_mod.FunctionDef,
+    parent: ?u32,
+    kind: Kind,
+    name: Atom,
+    members: std.AutoHashMapUnmanaged(Atom, void) = .empty,
+
+    pub fn deinit(self: *TsMemberSet, allocator: std.mem.Allocator) void {
+        self.members.deinit(allocator);
+    }
+};
+
+/// A namespace or enum body being parsed.
+pub const TsMemberFrame = struct {
+    object: Atom,
+    fd: *const function_def_mod.FunctionDef,
+    scope_level: i32,
+    set: u32,
+    /// Body-local bindings this block's exported `var`/`let`/`const`
+    /// declarations created: each is only the member's temporary, never a
+    /// shadowing local.
+    member_temporaries: std.ArrayList(u16) = .empty,
+};

@@ -11,8 +11,7 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
-pub fn getProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !core.JSValue {
-    _ = rt;
+pub fn getProperty(object: *core.Object, atom_id: core.Atom) !core.JSValue {
     return try object.getProperty(atom_id);
 }
 
@@ -24,18 +23,12 @@ pub fn defineDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: co
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
-pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
-    return object.deleteProperty(rt, atom_id);
-}
-
-pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
+pub fn getPropertyValue(value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
-    if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value();
     return try object_value.getProperty(atom_id);
 }
 
-pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
-    _ = rt;
+pub fn optionalGetPropertyValue(value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     if (value.is(.null_value) or value.is(.undefined_value)) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
     return try object_value.getProperty(atom_id);
@@ -51,9 +44,7 @@ pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: co
     _ = try expectObject(values[0]);
     const key = try propertyKeyAtom(rt, values[1]);
     const object = try expectObject(values[0]);
-    var found = object.hasProperty(key);
-    if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
-    return core.JSValue.boolean(found);
+    return core.JSValue.boolean(object.hasProperty(key));
 }
 
 /// Allocation-free prefix of `propertyKeyAtom`: the atom when `value` is
@@ -102,14 +93,14 @@ fn stringPropertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
 
 pub const expectObject = core.value_semantics.expectObject;
 
-// ----- merged from property_direct.zig -----
+// ----- Guarded property and global fast probes -----
 // Guarded property and global fast probes that cannot invoke user code.
 //
 // Result types state whether a returned JSValue is borrowed; helpers named
 // `Owned` consume their input only after the guarded slot write commits. The
 // probes validate class, shape, flags, atom kind, and exotic/proxy exclusions
 // before raw storage access. Observable getters, proxies, coercion, and generic
-// property semantics remain in `property_ops.zig` and `vm_property.zig`.
+// property semantics remain in `vm_property.zig` and `object_ops.zig`.
 const bytecode = @import("../bytecode.zig");
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 const FastOwnDataLookup = union(enum) {
@@ -130,16 +121,12 @@ const BorrowedGlobalDataLookup = struct {
     index: usize,
     value: core.JSValue,
 };
-const WritableGlobalDataStore = struct {
-    index: usize,
-    value: core.JSValue,
-};
 const FastProtoDataLookup = union(enum) {
     value: BorrowedProtoDataLookup,
     missing,
     slow,
 };
-pub const OrdinaryComputedPropertyLookup = union(enum) {
+const OrdinaryComputedPropertyLookup = union(enum) {
     value: core.JSValue,
     getter: core.JSValue,
     proxy: *core.Object,
@@ -178,17 +165,9 @@ pub fn functionOwnDataPropertyValueForFastPath(value: core.JSValue, atom_id: cor
 
 fn functionOwnDataPropertyObject(value: core.JSValue, atom_id: core.Atom) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
-    if (!isFunctionLikeClassId(object.class_id)) return null;
+    if (!core.class.isFunctionClass(object.class_id)) return null;
     if (atom_id == core.atom.ids.arguments or atom_id == core.atom.ids.caller) return null;
     return object;
-}
-
-fn isFunctionLikeClassId(class_id: core.ClassId) bool {
-    return class_id == core.class.ids.c_function or
-        core.class.isBytecodeFunctionClass(class_id) or
-        class_id == core.class.ids.bound_function or
-        class_id == core.class.ids.c_function_data or
-        core.class.isAsyncFunctionResumeClass(class_id);
 }
 
 test "function-like class predicate recognizes every bytecode function class" {
@@ -199,9 +178,9 @@ test "function-like class predicate recognizes every bytecode function class" {
         core.class.ids.async_generator_function,
     };
     for (class_ids) |class_id| {
-        try std.testing.expect(isFunctionLikeClassId(class_id));
+        try std.testing.expect(core.class.isFunctionClass(class_id));
     }
-    try std.testing.expect(!isFunctionLikeClassId(core.class.ids.object));
+    try std.testing.expect(!core.class.isFunctionClass(core.class.ids.object));
 }
 
 inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
@@ -241,25 +220,6 @@ fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: cor
     };
 }
 
-fn writableOwnDataPropertyLookup(object: *core.Object, lookup: BorrowedOwnDataLookup, atom_id: core.Atom) ?BorrowedOwnDataLookup {
-    const slot = writableDataSlotAt(object, lookup.index, atom_id) orelse return null;
-    return .{ .index = lookup.index, .value = slot.value.* };
-}
-
-fn setOwnDataPropertyLookup(rt: *core.JSRuntime, object: *core.Object, lookup: BorrowedOwnDataLookup, atom_id: core.Atom, value: core.JSValue) !bool {
-    return setOwnDataPropertyAt(rt, object, lookup.index, atom_id, value);
-}
-
-fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
-    // `rt` is unused: under the tracing GC an in-place slot overwrite on an
-    // already-published object needs no runtime hook. Kept so this stays
-    // signature-compatible with the other `set*At` writers in this file.
-    _ = rt;
-    const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
-    slot.value.* = value;
-    return true;
-}
-
 pub fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
     if (rt.atoms.kind(atom_id) == .private) return .slow;
     var cursor = objectFromValue(value) orelse return .slow;
@@ -292,155 +252,37 @@ pub fn ordinaryDataPropertyValueOrUndefinedForFastPath(rt: *core.JSRuntime, valu
     };
 }
 
-fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.FunctionBytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
-    for (function.closureVar()) |cv| {
-        if (cv.closureType() != .global_decl or cv.var_name != atom_id) continue;
-        return globalOwnDataPropertyBorrowedLookup(global, atom_id);
-    }
-    return null;
-}
-
 fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
     if (global.hasExoticMethods()) return null;
     for (global.shapeProps(), 0..) |prop, index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.isAccessor()) return null;
         if (prop_flags.kind != .data) return null;
         return .{ .index = index, .value = global.propertyEntry(index).*.slot.data };
     }
     return null;
 }
 
+/// get_var fast path: the global's own data property value, if it has one.
 pub fn globalOwnDataPropertyValue(global: *core.Object, atom_id: core.Atom) ?core.JSValue {
     const lookup = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return null;
     return lookup.value;
 }
 
-fn globalOwnDataPropertyBorrowedAt(global: *core.Object, index: usize, atom_id: core.Atom) ?core.JSValue {
-    const slot = dataSlotAt(global, index, atom_id) orelse return null;
-    return slot.value.*;
-}
-
-fn globalOwnWritableDataPropertyLookup(global: *core.Object, atom_id: core.Atom) ?WritableGlobalDataStore {
-    const lookup = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return null;
-    return globalWritableDataPropertyLookupAt(global, lookup.index, atom_id);
-}
-
-fn globalDataPropertyLookupForFastPath(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?BorrowedGlobalDataLookup {
-    return installableGlobalDataPropertyLookup(rt, global, function, site_pc, atom_id);
-}
-
-pub fn globalDataPropertyValueForFastPath(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const lookup = globalDataPropertyLookupForFastPath(rt, global, function, site_pc, atom_id) orelse return null;
-    return lookup.value;
-}
-
-/// The profiled and unprofiled global lookups became the same call once the
-/// site profile moved out of this file; keep the second name as an alias so
-/// the two `globalDataPropertyValueForFastPath*` entry points stay distinct.
-const globalDataPropertyLookupForFastPathNoProfile = globalDataPropertyLookupForFastPath;
-pub fn globalDataPropertyValueForFastPathNoProfile(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const lookup = globalDataPropertyLookupForFastPathNoProfile(rt, global, function, site_pc, atom_id) orelse return null;
-    return lookup.value;
-}
-
-fn globalWritableDataStoreIndexForFastPath(
+/// put_var fast path: store into the global's own writable data property
+/// unless a global lexical binding shadows it. False leaves the slow path.
+pub fn setGlobalWritableDataProperty(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
     atom_id: core.Atom,
-) ?usize {
-    const lookup = globalWritableDataStoreLookupForFastPath(rt, lexicals, global, function, site_pc, atom_id) orelse return null;
-    return lookup.index;
-}
-
-fn globalWritableDataStoreLookupForFastPath(
-    rt: *core.JSRuntime,
-    lexicals: ?*core.Object,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?WritableGlobalDataStore {
-    _ = rt;
-    _ = site_pc;
+    new_value: core.JSValue,
+) bool {
     if (lexicals) |env| {
-        if (env.hasOwnProperty(atom_id)) return null;
+        if (env.hasOwnProperty(atom_id)) return false;
     }
-    if (declaredGlobalVarDataBorrowedLookup(global, function, atom_id)) |lookup| {
-        return globalWritableDataPropertyLookupAt(global, lookup.index, atom_id);
-    }
-    const lookup = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return null;
-    return globalWritableDataPropertyLookupAt(global, lookup.index, atom_id);
-}
-
-pub fn setGlobalWritableDataStoreForFastPathOwned(
-    rt: *core.JSRuntime,
-    lexicals: ?*core.Object,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-    new_value: core.JSValue,
-) bool {
-    const lookup = globalWritableDataStoreLookupForFastPath(rt, lexicals, global, function, site_pc, atom_id) orelse return false;
-    return setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, atom_id, new_value);
-}
-
-fn setGlobalWritableDataStoreLookupOwned(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    lookup: WritableGlobalDataStore,
-    atom_id: core.Atom,
-    new_value: core.JSValue,
-) bool {
-    return setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, atom_id, new_value);
-}
-
-fn setGlobalDataPropertyLookup(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    lookup: BorrowedGlobalDataLookup,
-    atom_id: core.Atom,
-    new_value: core.JSValue,
-) bool {
+    const lookup = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return false;
     return setGlobalOwnWritableDataPropertyAt(rt, global, lookup.index, atom_id, new_value);
-}
-
-fn installableGlobalDataPropertyLookup(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?BorrowedGlobalDataLookup {
-    _ = rt;
-    _ = site_pc;
-    if (declaredGlobalVarDataBorrowedLookup(global, function, atom_id)) |lookup| {
-        return lookup;
-    }
-    return globalOwnDataPropertyBorrowedLookup(global, atom_id);
 }
 
 fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
@@ -453,18 +295,10 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object,
     return true;
 }
 
-/// `Owned` is historical: under the tracing GC the caller hands over no
-/// reference, so this is literally the borrowed writer.
-const setGlobalOwnWritableDataPropertyAtOwned = setGlobalOwnWritableDataPropertyAt;
 fn writableDataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot {
     const slot = dataSlotAt(object, index, atom_id) orelse return null;
     if (!object.propFlagsAt(index).writable) return null;
     return slot;
-}
-
-fn globalWritableDataPropertyLookupAt(global: *core.Object, index: usize, atom_id: core.Atom) ?WritableGlobalDataStore {
-    const slot = writableDataSlotAt(global, index, atom_id) orelse return null;
-    return .{ .index = index, .value = slot.value.* };
 }
 
 fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot {
@@ -476,114 +310,31 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     return .{ .entry = entry, .value = &entry.slot.data };
 }
 
-test "fast own data property replacement retains private brand atom" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const object = try core.Object.create(rt, core.class.ids.object, null);
-
-    const brand = try rt.atoms.newSymbol("fastPrivateBrandReplacement", .private);
-    {
-        const initial = try rt.symbolValue(brand);
-        try object.defineOwnProperty(
-            rt,
-            core.atom.ids.Private_brand,
-            core.Descriptor.data(initial, .all),
-        );
-    }
-    try std.testing.expect(rt.atoms.name(brand) != null);
-
-    const lookup_value = try rt.symbolValue(brand);
-    const lookup = writableOwnDataPropertyLookup(
-        object,
-        .{ .index = 0, .value = lookup_value },
-        core.atom.ids.Private_brand,
-    ).?;
-    const replacement = try rt.symbolValue(brand);
-    try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, replacement));
-    try std.testing.expect(rt.atoms.name(brand) != null);
-    const stored = try object.getProperty(core.atom.ids.Private_brand);
-    try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
-}
-
-test "global own data slot helpers preserve lookup and write ownership" {
+test "global own data slot helpers read and write through the global's own data property" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
-    const name = try rt.internAtom("globalSlotFunction");
     const key = try rt.internAtom("globalSlotAdapter");
     const other_key = try rt.internAtom("globalSlotOther");
 
     const initial = try core.string.String.createAscii(rt, "initial");
     try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), .all));
 
-    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .closure_var_count = 1 });
-    defer execution_function.destroyUnpublishedFixture(rt);
-    execution_function.closureVar()[0] = bytecode.function_bytecode.BytecodeClosureVar.init(.{
-        .closure_type = .global_decl,
-        .var_idx = 0,
-        .var_name = key,
-    });
-
-    const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
-    try std.testing.expectEqual(@as(usize, 0), lookup.index);
-    try std.testing.expectEqual(initial.header(), lookup.value.stringHeader().?);
     try std.testing.expectEqual(initial.header(), globalOwnDataPropertyValue(global, key).?.stringHeader().?);
     try std.testing.expect(globalOwnDataPropertyValue(global, other_key) == null);
-    try std.testing.expectEqual(initial.header(), globalOwnWritableDataPropertyLookup(global, key).?.value.stringHeader().?);
-    const writable_lookup = globalWritableDataPropertyLookupAt(global, lookup.index, key).?;
-    try std.testing.expectEqual(lookup.index, writable_lookup.index);
-    try std.testing.expectEqual(initial.header(), writable_lookup.value.stringHeader().?);
-    try std.testing.expectEqual(@as(?usize, lookup.index), globalWritableDataStoreIndexForFastPath(rt, null, global, execution_function, 0, key));
-    const store_lookup = globalWritableDataStoreLookupForFastPath(rt, null, global, execution_function, 0, key).?;
-    try std.testing.expectEqual(lookup.index, store_lookup.index);
-    try std.testing.expectEqual(initial.header(), store_lookup.value.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), declaredGlobalVarDataBorrowedLookup(global, execution_function, key).?.value.stringHeader().?);
-    try std.testing.expect(declaredGlobalVarDataBorrowedLookup(global, execution_function, other_key) == null);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPath(rt, global, execution_function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPath(rt, global, execution_function, 0, key).?.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPathNoProfile(rt, global, execution_function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPathNoProfile(rt, global, execution_function, 0, key).?.stringHeader().?);
-    try std.testing.expect(globalDataPropertyLookupForFastPath(rt, global, execution_function, 0, other_key) == null);
-    try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, execution_function, 0, other_key) == null);
+    try std.testing.expect(!setGlobalWritableDataProperty(rt, null, global, other_key, core.JSValue.int32(1)));
 
+    // A global lexical binding of the same name shadows the property.
     const lexicals = try core.Object.create(rt, core.class.ids.object, null);
     try lexicals.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), .all));
-    try std.testing.expect(globalWritableDataStoreIndexForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
-    try std.testing.expect(globalWritableDataStoreLookupForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
-    const shadowed_owned = try core.string.String.createAscii(rt, "shadowed-owned");
-    var shadowed_transferred = false;
-    const shadowed_store = setGlobalWritableDataStoreForFastPathOwned(rt, lexicals, global, execution_function, 0, key, shadowed_owned.value());
-    if (shadowed_store) shadowed_transferred = true;
-    try std.testing.expect(!shadowed_store);
-    shadowed_transferred = true;
+    const shadowed = try core.string.String.createAscii(rt, "shadowed");
+    try std.testing.expect(!setGlobalWritableDataProperty(rt, lexicals, global, key, shadowed.value()));
+    try std.testing.expectEqual(initial.header(), globalOwnDataPropertyValue(global, key).?.stringHeader().?);
 
-    const copied = copied: {
-        const value = try core.string.String.createAscii(rt, "copied");
-        try std.testing.expect(setGlobalDataPropertyLookup(rt, global, lookup, key, value.value()));
-        break :copied value;
-    };
-    try std.testing.expectEqual(copied.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-
-    const owned = try core.string.String.createAscii(rt, "owned");
-    var owned_transferred = false;
-    try std.testing.expect(setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, key, owned.value()));
-    owned_transferred = true;
-    try std.testing.expectEqual(owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-
-    const lookup_owned = try core.string.String.createAscii(rt, "lookup-owned");
-    var lookup_transferred = false;
-    const writable_store = globalWritableDataStoreLookupForFastPath(rt, null, global, execution_function, 0, key).?;
-    try std.testing.expect(setGlobalWritableDataStoreLookupOwned(rt, global, writable_store, key, lookup_owned.value()));
-    lookup_transferred = true;
-    try std.testing.expectEqual(lookup_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-
-    const fast_path_owned = try core.string.String.createAscii(rt, "fast-path-owned");
-    var fast_path_transferred = false;
-    try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, execution_function, 0, key, fast_path_owned.value()));
-    fast_path_transferred = true;
-    try std.testing.expectEqual(fast_path_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    const stored = try core.string.String.createAscii(rt, "stored");
+    try std.testing.expect(setGlobalWritableDataProperty(rt, null, global, key, stored.value()));
+    try std.testing.expectEqual(stored.header(), globalOwnDataPropertyValue(global, key).?.stringHeader().?);
 }
 
 test "global own data slot helpers reject readonly and accessor writes" {
@@ -595,37 +346,17 @@ test "global own data slot helpers reject readonly and accessor writes" {
     const accessor_key = try rt.internAtom("accessorGlobalSlot");
 
     try global.defineOwnProperty(rt, readonly_key, core.Descriptor.data(core.JSValue.int32(1), .{ .enumerable = true, .configurable = true }));
-    const readonly_lookup = globalOwnDataPropertyBorrowedLookup(global, readonly_key).?;
-    try std.testing.expectEqual(@as(?i32, 1), readonly_lookup.value.as(.int));
-    try std.testing.expect(globalOwnWritableDataPropertyLookup(global, readonly_key) == null);
-    try std.testing.expect(globalWritableDataPropertyLookupAt(global, readonly_lookup.index, readonly_key) == null);
-    try std.testing.expect(!setGlobalDataPropertyLookup(rt, global, readonly_lookup, readonly_key, core.JSValue.int32(2)));
-    try std.testing.expect(!setGlobalOwnWritableDataPropertyAtOwned(rt, global, readonly_lookup.index, readonly_key, core.JSValue.int32(2)));
-    try std.testing.expectEqual(@as(?i32, 1), globalOwnDataPropertyBorrowedAt(global, readonly_lookup.index, readonly_key).?.as(.int));
+    try std.testing.expect(!setGlobalWritableDataProperty(rt, null, global, readonly_key, core.JSValue.int32(2)));
+    try std.testing.expectEqual(@as(?i32, 1), globalOwnDataPropertyValue(global, readonly_key).?.as(.int));
 
-    // Accessor get/set are stored as object headers (qjs `JSObject*`); use
-    // object values (the old loose JSValue accessor cell that allowed string
-    // placeholders was replaced by L2's object-header pointers).
     const getter = try core.Object.create(rt, core.class.ids.object, null);
     const setter = try core.Object.create(rt, core.class.ids.object, null);
     try global.defineOwnProperty(rt, accessor_key, core.Descriptor.accessor(getter.value(), setter.value(), .{ .enumerable = true, .configurable = true }));
-
-    const accessor_index = accessor_index: {
-        for (global.shapeProps(), 0..) |prop, index| {
-            if (!core.property.Flags.fromBits(prop.flags).deleted and prop.atom_id == accessor_key) break :accessor_index index;
-        }
-        unreachable;
-    };
-    try std.testing.expect(globalOwnDataPropertyBorrowedLookup(global, accessor_key) == null);
-    try std.testing.expect(globalOwnWritableDataPropertyLookup(global, accessor_key) == null);
-    try std.testing.expect(globalOwnDataPropertyBorrowedAt(global, accessor_index, accessor_key) == null);
-    try std.testing.expect(globalWritableDataPropertyLookupAt(global, accessor_index, accessor_key) == null);
-    const accessor_lookup: BorrowedGlobalDataLookup = .{ .index = accessor_index, .value = core.JSValue.undefinedValue() };
-    try std.testing.expect(!setGlobalDataPropertyLookup(rt, global, accessor_lookup, accessor_key, core.JSValue.int32(3)));
-    try std.testing.expect(!setGlobalOwnWritableDataPropertyAtOwned(rt, global, accessor_index, accessor_key, core.JSValue.int32(3)));
+    try std.testing.expect(globalOwnDataPropertyValue(global, accessor_key) == null);
+    try std.testing.expect(!setGlobalWritableDataProperty(rt, null, global, accessor_key, core.JSValue.int32(3)));
 }
 
-// ----- merged from slot_ops.zig -----
+// ----- Local, argument, var-ref and global-lexical slots -----
 // Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.
 const builtin = @import("builtin");
 const frame_mod = @import("frame.zig");
@@ -650,7 +381,7 @@ pub fn execGetLoc(
     _ = opc;
     // No runtime bounds check: `resolve_variables` only emits get_loc with
     // idx < var_count, and `frame.locals` is sized to exactly var_count
-    // (vm_call.initFrameLocals). idx < var_count == frame.locals.len holds for
+    // (vm_opcodes.initFrameLocals). idx < var_count == frame.locals.len holds for
     // every dispatched frame — the same trusted-compiler model as QuickJS's
     // bare `var_buf[idx]`. The stack is pre-sized (reserveEntryFrameCapacity),
     // so the push skips reserveAdditional, mirroring qjs's `*sp++`.
@@ -758,7 +489,7 @@ pub fn execGetVarRefMaybeTdz(
         if (is_global_decl_ref) {
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
                 if (lexical_value.is(.uninitialized)) {
-                    const err = throwTdzReferenceError(ctx);
+                    const err = throwTdzReferenceError(ctx, atom_id);
                     if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
                     }
@@ -783,10 +514,12 @@ pub fn execGetVarRefMaybeTdz(
         // eval-created binding (qjs remove_global_object_property):
         // plain ReferenceError, not the TDZ message.
         if (cell.varRefIsDeletableSlot().*) {
-            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
+            const name = if (idx < function.varRefNamesLen()) function.varRefName(idx) else core.atom.null_atom;
+            const err = if (exception_ops.throwReferenceErrorNotDefined(ctx, global, name)) |_| unreachable else |e| e;
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return true;
             }
-            return error.ReferenceError;
+            return err;
         }
         // Captured derived `this` uses ordinary get_var_ref_check in QuickJS,
         // so it remains catchable in the current (callee) realm while keeping
@@ -794,7 +527,7 @@ pub fn execGetVarRefMaybeTdz(
         const err = if (idx < function.varRefNamesLen() and function.varRefName(idx) == core.atom.ids.this_) blk: {
             _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
             unreachable;
-        } else throwTdzReferenceError(ctx);
+        } else throwTdzReferenceError(ctx, if (idx < function.varRefNamesLen()) function.varRefName(idx) else core.atom.null_atom);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return true;
         }
@@ -825,14 +558,17 @@ pub fn execPutVarRef(
     if (opc == op.put_var_ref_check_init) {
         const current = cell.varRefValue();
         if (!current.is(.uninitialized)) {
-            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| return err;
+            // Derived `this` captured by an arrow: a second super() call.
+            const name = if (idx < function.varRefNamesLen()) function.varRefName(idx) else core.atom.null_atom;
+            const message = if (name == core.atom.ids.this_) "'this' can be initialized only once" else "binding is already initialized";
+            _ = try exception_ops.throwReferenceErrorMessage(ctx, global, message);
             unreachable;
         }
     }
     if (opc == op.put_var_ref_check) {
         const current = cell.varRefValue();
         if (current.is(.uninitialized)) {
-            return throwTdzReferenceError(ctx);
+            return throwTdzReferenceError(ctx, if (idx < function.varRefNamesLen()) function.varRefName(idx) else core.atom.null_atom);
         }
     }
     const capture_is_function_name = idx < function.closureVar().len and
@@ -840,32 +576,27 @@ pub fn execPutVarRef(
     const capture_is_const = idx < function.closureVar().len and
         function.closureVar()[idx].isConst();
     if (cell.varRefIsFunctionNameSlot().* or capture_is_function_name) {
-        if (function.isStrictMode()) return error.TypeError;
+        if (function.isStrictMode()) {
+            _ = try throwTypeErrorMessage(ctx, global, "invalid assignment to function name");
+            unreachable;
+        }
         return;
     }
-    if ((cell.varRefIsConstSlot().* or capture_is_const) and !constVarRefWriteAllowed(cell, opc)) {
-        _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
-        return error.TypeError;
+    if ((cell.varRefIsConstSlot().* or capture_is_const) and !isVarRefInitOpcode(opc)) {
+        _ = try throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
+        unreachable;
     }
-    var assigned = value;
-    if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueBorrow(value);
-    }
+    const assigned = adapterValueBorrow(value);
     cell.setVarRefValue(ctx.runtime, assigned);
 }
 
-pub fn isVarRefInitOpcode(opc: u8) bool {
+fn isVarRefInitOpcode(opc: u8) bool {
     return opc == op.put_var_ref or
         opc == op.put_var_ref_check_init or
         opc == op.put_var_ref0 or
         opc == op.put_var_ref1 or
         opc == op.put_var_ref2 or
         opc == op.put_var_ref3;
-}
-
-pub fn constVarRefWriteAllowed(cell: *core.VarRef, opc: u8) bool {
-    _ = cell;
-    return isVarRefInitOpcode(opc);
 }
 
 pub fn execSetVarRef(
@@ -886,7 +617,7 @@ pub fn execSetVarRef(
 pub fn adapterValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
     // Terminal-state invariant: a cell's VALUE is never itself a cell — the
     // last nesting producer (the direct-eval const view) now pvalue-aliases
-    // its target (eval_ops.directEvalOuterVarRefView) — so ONE unwrap reaches
+    // its target (eval_entry.directEvalOuterVarRefView) — so ONE unwrap reaches
     // the plain value (qjs bare `*var_ref->pvalue`, quickjs.c).
     const cell = varRefCellFromValue(slot) orelse return slot;
     const value = cell.varRefValue();
@@ -900,16 +631,6 @@ pub fn adapterValueIsUninitialized(slot: core.JSValue) bool {
     return adapterValueBorrow(slot).is(.uninitialized);
 }
 
-/// A deleted eval-created binding: its deletable cell was parked at
-/// UNINITIALIZED by ordinary global property deletion (qjs
-/// remove_global_object_property, quickjs.c). Distinct from a TDZ
-/// cell, which is uninitialized but NOT deletable.
-pub fn adapterIsDeletedEvalBinding(slot: core.JSValue) bool {
-    const cell = varRefCellFromValue(slot) orelse return false;
-    if (!cell.varRefIsDeletableSlot().*) return false;
-    return cell.varRefValue().is(.uninitialized);
-}
-
 /// Replace an owned JSValue Adapter slot. This cold boundary accepts a VarRef
 /// handle on either side and preserves its
 /// write-through semantics. It must not be used for frame locals or arguments.
@@ -918,14 +639,11 @@ pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, val
         slot.* = value;
         return;
     }
-    replaceAdapterRefCounted(ctx, slot, value);
+    replaceAdapterHeapValue(ctx, slot, value);
 }
 
-noinline fn replaceAdapterRefCounted(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
-    var assigned = value;
-    if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueBorrow(value);
-    }
+noinline fn replaceAdapterHeapValue(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
+    const assigned = adapterValueBorrow(value);
     if (varRefCellFromValue(slot.*)) |cell| {
         cell.setVarRefValue(ctx.runtime, assigned);
         return;
@@ -937,45 +655,16 @@ pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
     return core.VarRef.fromValue(value);
 }
 
-// ---- frame.var_refs slot accessors (VARREFS-SLOT-TYPING-BLUEPRINT, phase D) ----
-//
-// Single funnel for every ELEMENT access of `frame.var_refs: []*core.VarRef`
-// (qjs `JSVarRef **var_refs`: JSObject.u.func.var_refs alloc, quickjs.c;
-// JS_CallInternal prologue `var_refs = p->u.func.var_refs`). Every slot
-// is a live cell by the type; the phase-A/B "is this slot a cell" runtime
-// discrimination and its debug canary are gone. `varRefSlot*` returning
-// JSValue are the boundary views for the JSValue-typed domains (eval name
-// tables, property cells) — they wrap the cell, they do not chase its value.
-
-/// Bounds-checked cell read: `frame.var_refs[idx]`.
+/// `frame.var_refs[idx]`: every slot is a live closure cell.
 pub inline fn varRefSlotCell(frame: *const frame_mod.Frame, idx: usize) *core.VarRef {
     return frame.var_refs[idx];
-}
-
-/// Bounds-checked element read in JSValue form (the cell's value view).
-/// Borrowed: callers dup when they need ownership.
-pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
-    return frame.var_refs[idx].valueRef();
-}
-
-/// Cell store — slot REBIND, not value write-through. The only users are the
-/// element-level replacement points (global-decl PASS2 cell surgery and
-/// module prologue fill): the caller owns the
-/// refcount choreography for both the incoming cell and the displaced one.
-/// The JSValue parameter is the boundary form those callers hold (an owned
-/// ref to a cell by construction); the transfer keeps its refcount.
-pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JSValue) void {
-    frame.var_refs[idx] = varRefCellFromValue(slot).?;
 }
 
 /// Write-through store into the slot's cell (qjs OP_put_var_ref
 /// `set_value(ctx, var_refs[idx]->pvalue,...)`, quickjs.c). Preserves
 /// the Adapter replacement unwrap: an incoming cell VALUE is dereferenced
 /// before the store so cell values never nest through writes.
-pub inline fn replaceVarRefValueOwned(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) void {
-    var assigned = value;
-    if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueBorrow(value);
-    }
+inline fn replaceVarRefValueOwned(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) void {
+    const assigned = adapterValueBorrow(value);
     frame.var_refs[idx].setVarRefValue(ctx.runtime, assigned);
 }

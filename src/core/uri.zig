@@ -31,7 +31,7 @@ pub const FourByteEscapeUnits = struct {
 /// to the general decode path (null). Mirrors the URI grammar's ASCII-only
 /// constraint, so a non-ASCII utf16 string can never be a valid escape run.
 /// Reads at most twelve code units without allocating or materializing ropes.
-pub fn decodeSingleFourByteEscapeUnits(value: JSValue) !?FourByteEscapeUnits {
+pub fn decodeSingleFourByteEscapeUnits(value: JSValue) ?FourByteEscapeUnits {
     if (!value.isString()) return null;
     if (string.asFlat(value)) |flat| {
         return switch (flat.resolveData()) {
@@ -57,11 +57,11 @@ pub fn decodeSingleFourByteEscapeUnits(value: JSValue) !?FourByteEscapeUnits {
     return decodeSingleFourByteEscapeUnitsFromAscii(&bytes);
 }
 
-/// Probe a raw ASCII byte slice for a single four-byte UTF-8 URI escape.
-/// Returns null when the slice is not a 12-byte `%XX%XX%XX%XX` run starting
-/// with a 4-byte lead byte, and `error.URIError` for a malformed run (bad
-/// continuation bytes or an out-of-range code point), matching the URI spec.
-pub fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) !?FourByteEscapeUnits {
+/// Probe a raw ASCII byte slice for a single valid four-byte UTF-8 URI
+/// escape. Returns null for anything else, including a malformed run (bad
+/// continuation bytes or an out-of-range code point): the general decoder
+/// then reports it with its "malformed UTF-8" URIError.
+pub fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) ?FourByteEscapeUnits {
     if (bytes.len != 12) return null;
 
     if (bytes[0] != '%' or bytes[3] != '%' or bytes[6] != '%' or bytes[9] != '%') return null;
@@ -72,17 +72,15 @@ pub fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) !?FourByteEsc
 
     const b0 = h01;
     if (b0 < 0xf0) return null;
-    if (b0 > 0xf4) return error.URIError;
-    if ((h23 & 0xc0) != 0x80 or (h45 & 0xc0) != 0x80 or (h67 & 0xc0) != 0x80) {
-        return error.URIError;
-    }
+    if (b0 > 0xf4) return null;
+    if ((h23 & 0xc0) != 0x80 or (h45 & 0xc0) != 0x80 or (h67 & 0xc0) != 0x80) return null;
 
     const codepoint: u21 =
         (@as(u21, b0 & 0x07) << 18) |
         (@as(u21, h23 & 0x3f) << 12) |
         (@as(u21, h45 & 0x3f) << 6) |
         @as(u21, h67 & 0x3f);
-    if (codepoint < 0x10000 or codepoint > 0x10ffff) return error.URIError;
+    if (codepoint < 0x10000 or codepoint > 0x10ffff) return null;
 
     const pair = unicode.surrogatePairFromCodePoint(codepoint);
     return .{ .high = pair.high, .low = pair.low };

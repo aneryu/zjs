@@ -61,6 +61,24 @@ fn runEngineTests(
     return run;
 }
 
+/// Run the full suite built with `tools/sharded_test_runner.zig` as `shards`
+/// concurrent processes (`ZJS_TEST_SHARD=k/n`), all hanging on `step`.
+fn addShardedEngineTestRuns(
+    ctx: build_config.Ctx,
+    exe: *std.Build.Step.Compile,
+    gc_stress: bool,
+    shards: u32,
+    step: *std.Build.Step,
+) void {
+    for (0..shards) |shard| {
+        const run = runEngineTests(ctx, exe, gc_stress);
+        run.setEnvironmentVariable("ZJS_TEST_SHARD", ctx.b.fmt("{d}/{d}", .{ shard, shards }));
+        run.setName(ctx.b.fmt("run {s}{s} shard {d}/{d}", .{ exe.name, if (gc_stress) " (gc stress)" else "", shard, shards }));
+        run.expectExitCode(0);
+        step.dependOn(&run.step);
+    }
+}
+
 fn addSmokeStep(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) *std.Build.Step {
     const b = ctx.b;
     const options = b.addOptions();
@@ -77,6 +95,10 @@ fn addSmokeStep(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) *std.
     const run = b.addRunArtifact(tests);
     run.step.dependOn(&artifacts.install_zjs.step);
     run.step.dependOn(&artifacts.install_zjs_profile.step);
+    // The tests exec the installed binaries by path; hash them so an engine
+    // rebuild invalidates a cached pass.
+    run.addFileInput(artifacts.zjs_exe.getEmittedBin());
+    run.addFileInput(artifacts.zjs_profile_exe.getEmittedBin());
     const step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     step.dependOn(&run.step);
     return step;
@@ -108,6 +130,12 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         if (test_filter) |f| &.{ f, "zjs.pull_test_modules" } else &.{},
     );
     unified_tests.root_module.strip = test_strip;
+    // The full run shards across processes; a `-Dtest-filter` selection is
+    // small and keeps the default runner's per-test build-summary reporting.
+    const test_shards = b.option(u32, "test-shards", "Processes per full engine-suite run (default 8)") orelse 8;
+    if (test_filter == null) {
+        unified_tests.test_runner = .{ .path = b.path("tools/sharded_test_runner.zig"), .mode = .simple };
+    }
 
     const host_engine = addEngineModule(ctx, false);
     const cli_root = b.createModule(.{
@@ -128,9 +156,13 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     string_boundaries.addFileArg(b.path("tools/check_string_boundaries.py"));
     b.step("check-string-boundaries", "Reject implicit string materialization outside compatibility owners").dependOn(&string_boundaries.step);
     test_step.dependOn(&string_boundaries.step);
-    const run_unified = runEngineTests(ctx, unified_tests, false);
-    if (test_filter) |f| run_unified.setEnvironmentVariable("ZJS_TEST_FILTER", f);
-    test_step.dependOn(&run_unified.step);
+    if (test_filter) |f| {
+        const run_unified = runEngineTests(ctx, unified_tests, false);
+        run_unified.setEnvironmentVariable("ZJS_TEST_FILTER", f);
+        test_step.dependOn(&run_unified.step);
+    } else {
+        addShardedEngineTestRuns(ctx, unified_tests, false, @max(test_shards, 1), test_step);
+    }
     if (test_filter == null) {
         test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     }
@@ -144,7 +176,10 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
             .target = ctx.target,
             .optimize = ctx.optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "zjs", .module = host_engine }},
+            .imports = &.{
+                .{ .name = "zjs", .module = host_engine },
+                .{ .name = "zjs_host", .module = build_config.addHost(ctx, host_engine) },
+            },
         }),
     });
     build_config.forceLlvmBackendOnDebug(exact_root_exe);
@@ -190,7 +225,11 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     }
 
     const gc_stress_step = b.step("test-gc-stress", "Run the engine suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY=fatal ZJS_GC_AUDIT=fatal (~1 min; part of checkpoint-gate)");
-    gc_stress_step.dependOn(&runEngineTests(ctx, unified_tests, true).step);
+    if (test_filter == null) {
+        addShardedEngineTestRuns(ctx, unified_tests, true, @max(test_shards, 1), gc_stress_step);
+    } else {
+        gc_stress_step.dependOn(&runEngineTests(ctx, unified_tests, true).step);
+    }
 
     const smoke_step = addSmokeStep(ctx, artifacts);
 

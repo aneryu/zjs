@@ -1,18 +1,39 @@
 # Host boundary design
 
-Status: migration in progress, based on the 2026-09-23 working tree. The user
-approved removing public `zjs.EventLoop` / `zjs.runtime`. The internal build
-module, event scheduling, filesystem policy, print/console, and
-btoa/atob/queueMicrotask/gc extraction are implemented. Validation evidence
-must be read separately from the remaining target below.
+Status: **complete** (H1–H6, 2026-09-26). The first extraction (2026-09-23)
+moved the build module, event scheduling, filesystem policy, print/console,
+and btoa/atob/queueMicrotask/gc; the completion below covers the rest. The
+sections after it are the original plan, kept as the rationale.
 
-The first extraction preserves both existing module scheduler paths. Source
-policy now crosses `core/module_source.zig`; it does not replace file-backed
-TLA scheduling with the older HostHooks evaluator. Unifying those evaluators,
-extracting the remaining navigator/performance/DOMException compatibility
-extensions and CommonJS/Wasm source adaptation, and eliminating the residual
-host-specific Runtime fields remain separate work. This is not a claim that
-all non-ECMAScript code has left the engine.
+## Completion (2026-09-26)
+
+- **H3, one module scheduler.** The test-only HostHooks evaluator
+  (`evalFileModuleGraphWithHostHooks`, `DynamicImportHostState`, its preload
+  and dynamic-import twins) is deleted. Every module graph, static or
+  dynamic, runs through `exec.module.evalModuleGraph` (formerly
+  `evalFileModuleGraphWithOutput`) and reads sources only through the
+  Context's `ModuleSourceLoader`. Its former tests run on an in-memory
+  loader (`tests/harness/memory_modules.zig`), which also covers the
+  "custom loading without filesystem access" acceptance.
+- **CommonJS/Wasm source adaptation** existed only on that evaluator and is
+  removed with it; CommonJS is outside scope (LIMITATIONS.md). A host may
+  still hand the engine adapted source through its loader.
+- **H5, Web-compatibility globals.** `navigator`, `performance`, and
+  `DOMException` moved to `src/host/web.zig`; the engine's auto-init kinds,
+  performance builtin domain, DOMException construct path, `dom_exception`
+  class id (now `reserved_62`), and `JSRuntime.performance_time_origin_ms`
+  are gone. `performance.timeOrigin` is now per Realm, as in HR-Time. Host
+  builders root through `ExactValueRoots` and are covered by the
+  exact-roots contract program under nursery and OOM budgets.
+- **Native registration gap closed.** Host constructors register with
+  `FunctionOptions.constructor` and read `Call.newTarget()`; the construct
+  path publishes `new_target` for them. DOMException uses it.
+- **H6.** Engine code does not import `zjs_host`; only the CLI and test262
+  runner do. The `.host` builtin domain and `HostGlobalMethod`, which now
+  hold only engine helpers, are renamed `.engine_helper` /
+  `EngineHelperMethod`. An engine-only Realm has the ECMAScript globals plus
+  `InternalError` and `TypedArray`; `tests/embedding_examples.zig` pins
+  that no bundled host global is present.
 
 ## First extraction verification
 

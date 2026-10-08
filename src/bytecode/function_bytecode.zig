@@ -7,11 +7,7 @@ const context = @import("../core/context.zig");
 const gc = @import("../core/gc.zig");
 const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
-const compiler = @import("../compiler/root.zig");
-const Bytecode = bytecode.Bytecode;
-const pipeline = bytecode.pipeline;
 const opcode = bytecode.opcode;
-const module = bytecode.module;
 const EntryContract = bytecode.EntryContract;
 const pipeline_pc2line = bytecode.pipeline.pc2line;
 const function_bytecode = @This();
@@ -80,6 +76,9 @@ pub const VarDef = struct {
     /// Parser-only discriminator used while pairing private accessors.
     /// QuickJS drops this bit when JSVarDef becomes JSBytecodeVarDef.
     is_static_private: bool = false,
+    /// Parser-only: bound by a destructuring `catch` parameter, which a
+    /// lexical declaration in the catch block may not redeclare.
+    is_catch_pattern: bool = false,
     tdz_emitted_at_decl: bool = false,
     var_kind: VarKind = .normal,
     /// Stable index into the owning frame's open-binding table. This is the
@@ -88,8 +87,8 @@ pub const VarDef = struct {
     open_binding_idx: u16 = no_open_binding,
 };
 
-/// Final runtime variable row, mirroring `JSBytecodeVarDef`
-///. Unlike the compile-time `VarDef`, this carries
+/// Final runtime variable row, mirroring `JSBytecodeVarDef`.
+/// Unlike the compile-time `VarDef`, this carries
 /// only data read after finalization. Arguments and locals occupy one
 /// contiguous table in `FunctionBytecode`, with arguments first.
 pub const BytecodeVarDef = extern struct {
@@ -216,17 +215,6 @@ pub const ClosureVar = extern struct {
     pub inline fn varKind(self: ClosureVar) VarKind {
         return @enumFromInt(self.kind_flags & var_kind_mask);
     }
-
-    pub fn toInit(self: ClosureVar) Init {
-        return .{
-            .closure_type = self.closureType(),
-            .is_lexical = self.isLexical(),
-            .is_const = self.isConst(),
-            .var_kind = self.varKind(),
-            .var_idx = self.var_idx,
-            .var_name = self.var_name,
-        };
-    }
 };
 
 /// Finalization transfers the same physical row instead of translating to
@@ -290,7 +278,6 @@ pub const ExactArgsLeafKind = enum(u2) {
 };
 
 pub const ExecutionFlags = packed struct(u16) {
-    has_mapped_arguments: bool = false,
     simple_inline_eligible: bool = false,
     strict_simple_inline_eligible: bool = false,
     strict_simple_snapshot_inline_eligible: bool = false,
@@ -319,6 +306,7 @@ pub const ExecutionFlags = packed struct(u16) {
     /// (`op.call_method_apply_fwd`). Consulted by constructor TAKE and
     /// D8-L1 native_caller attach — not by vanilla `op_call_method`.
     apply_forward_inlined: bool = false,
+    _reserved: u1 = 0,
 };
 
 /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -931,9 +919,6 @@ pub const FunctionBytecodeImpl = extern struct {
         // authoritative FAM word (canonicalCallFacts reads the mirror).
         self.call_facts_mirror = facts;
     }
-    pub inline fn hasMappedArguments(self: *const FunctionBytecodeImpl) bool {
-        return self.executionFlags().has_mapped_arguments;
-    }
     pub inline fn simpleInlineEligible(self: *const FunctionBytecodeImpl) bool {
         return self.executionFlags().simple_inline_eligible;
     }
@@ -1171,7 +1156,7 @@ pub const FunctionBytecodeImpl = extern struct {
 
     /// True when the final-form opcode carries an atom operand (its atom is
     /// always the 4-byte field at `pc + 1`). Mirrors the pipeline's
-    /// `hasAtomOperand` but lives here so the retention walk is self-contained.
+    /// `FormRow.hasAtom` but lives here so the retention walk is self-contained.
     inline fn hasAtomOperandFmt(op_id: u8) bool {
         const fmt = opcode.formatOf(op_id);
         return fmt == .atom or fmt == .atom_u8 or fmt == .atom_cache_u8 or
@@ -1228,7 +1213,7 @@ pub const FunctionBytecodeImpl = extern struct {
         // Small-inline CallerState lives in the hot pad and is found via
         // the live code pointer. Tear it down before the code pointer is
         // cleared.
-        if (rt.small_inline_destroy) |cb| cb(rt, @ptrCast(self));
+        if (rt.small_inline.destroy) |cb| cb(rt, @ptrCast(self));
 
         self.byte_code = null;
         self.byte_code_len = 0;

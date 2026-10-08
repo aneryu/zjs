@@ -5,7 +5,7 @@
 //! conversion can build the same named value without mutating that slot. Only
 //! preallocated or explicitly stackless paths omit capture. This centralizes
 //! parser, host-I/O, promise, and runtime error policy around QuickJS
-//! `JS_ThrowError2` and stack setup at quickjs.c.
+//! `JS_ThrowError2` and stack setup.
 
 const std = @import("std");
 
@@ -15,8 +15,6 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
-
-const SourceLocation = core.BacktraceLocation;
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 
@@ -55,9 +53,8 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
 ///
 /// Two contracts in the tree already assume the stable answer: the
 /// engine-production pin that OOM delivery to a JS catch allocates nothing
-/// (`src/tests/oom_cap.zig`), and the OOM tier's rule that a rethrown OOM is
-/// still an OOM rather than an arbitrary user exception
-/// (`src/tests/oom.zig`). The OOM tier caught the divergence once its
+/// (`tests/oom.zig`), and the OOM tier's rule that a rethrown OOM is
+/// still an OOM rather than an arbitrary user exception (same file). The OOM tier caught the divergence once its
 /// injection reached the allocations the tracing collector had moved out of
 /// its view: `native-callback-map-reflect-apply` catches the failure, sees it
 /// is not the `RangeError` it expected, and rethrows -- and the rethrown
@@ -82,7 +79,7 @@ pub fn createSentinelError(
 /// Construct a named error directly on a realm-owned native-error prototype.
 /// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
 /// bindings and receiver objects do not participate in Realm selection.
-pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, message: []const u8) !core.JSValue {
     var rooted_prototype = prototype.value();
     var root_frame = core.runtime.rootValues(.{&rooted_prototype});
     root_frame.activate(ctx.runtime);
@@ -95,17 +92,14 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
     try defineNonEnumValueProperty(ctx.runtime, object, core.atom.ids.message, message_value);
     try attachStackToErrorValue(ctx, global, error_value);
     // No own `name` property: it lives on `prototype`, which the caller has
-    // already selected for exactly this name (same rule as
-    // `errorConstructWithPrototype`). `name` is kept so the call sites stay
-    // self-documenting about which error they are building.
-    _ = name;
+    // already selected (same rule as `errorConstructWithPrototype`).
     return error_value;
 }
 
 /// Raw, stack-less variant of `createNamedError`. Every user-observable
 /// throw path must construct through the stack-attaching primitives above.
 /// The only allowed uses of this entry are:
-/// - the preallocated out-of-memory error (`JSRuntime.preallocated_oom_error`):
+/// - the preallocated out-of-memory error (`RealmContext.preallocated_oom_error`):
 ///   it is built once at startup while memory is plentiful and delivered via
 ///   an allocation-free `dup()` once the heap is exhausted, so it can neither
 ///   capture a meaningful backtrace at construction time nor allocate one at
@@ -114,9 +108,56 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
 /// - the embedding API `JSContext.createError` when the embedder explicitly
 ///   opts out via `ErrorOptions.capture_stack = false`.
 pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+    // A standard error kind takes the realm's intrinsic prototype (e.g.
+    // %TypeError.prototype%), never whatever `globalThis.TypeError` holds now.
+    if (nativeErrorKindFromName(name)) |kind| {
+        if (rt.contextForGlobalIncludingConstructing(global)) |realm| {
+            if (realm.nativeErrorPrototypeObject(kind)) |prototype| {
+                return buildErrorObjectWithPrototype(rt, prototype, message);
+            }
+        }
+    }
     const ctor_key = try rt.internAtom(name);
     const ctor_value = try global.getProperty(ctor_key);
-    return buildNamedErrorObject(rt, ctor_value, name, message);
+    const error_prototype = if (rt.contextForGlobalIncludingConstructing(global)) |realm|
+        realm.nativeErrorPrototypeObject(.error_)
+    else
+        null;
+    return buildNamedErrorObject(rt, ctor_value, error_prototype, name, message);
+}
+
+fn nativeErrorKindFromName(name: []const u8) ?core.context.NativeErrorKind {
+    const names = [_]struct { []const u8, core.context.NativeErrorKind }{
+        .{ "Error", .error_ },
+        .{ "EvalError", .eval_error },
+        .{ "RangeError", .range_error },
+        .{ "ReferenceError", .reference_error },
+        .{ "SyntaxError", .syntax_error },
+        .{ "TypeError", .type_error },
+        .{ "URIError", .uri_error },
+        .{ "InternalError", .internal_error },
+        .{ "AggregateError", .aggregate_error },
+        .{ "SuppressedError", .suppressed_error },
+    };
+    for (names) |entry| {
+        if (std.mem.eql(u8, name, entry[0])) return entry[1];
+    }
+    return null;
+}
+
+fn buildErrorObjectWithPrototype(rt: *core.JSRuntime, prototype: *core.Object, message: []const u8) !core.JSValue {
+    var rooted_prototype = prototype.value();
+    var message_value = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{ &rooted_prototype, &message_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+    // Copy `message` before anything else allocates: callers may pass bytes
+    // borrowed from an atom or string that a collection can free.
+    message_value = try value_ops.createStringValue(rt, message);
+    const object = try core.Object.create(rt, core.class.ids.error_, objectFromValue(rooted_prototype).?);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
+    try defineNonEnumValueProperty(rt, object, core.atom.ids.message, message_value);
+    return object.value();
 }
 
 /// Build the runtime's preallocated OOM catch value. Unlike normal named
@@ -131,7 +172,9 @@ pub fn createPreallocatedOutOfMemoryError(rt: *core.JSRuntime, global: *core.Obj
     return error_value;
 }
 
-fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
+/// `fallback_prototype` (the Realm's %Error.prototype%) is used when `name`
+/// has no constructor with an object `prototype` on the global.
+fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, fallback_prototype: ?*core.Object, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_ctor_value = ctor_value;
     var root_frame = core.runtime.rootValues(.{&rooted_ctor_value});
     root_frame.activate(rt);
@@ -160,10 +203,12 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
         }
     }
     if (!prototype_installed) {
-        // Degraded fallback for names with no realm constructor (e.g. the
-        // zjs-specific InvalidCharacterError): keep a self-describing own
-        // `name` so `e.name` still identifies the error class. qjs cannot
-        // reach this state — every JSErrorEnum has a native_error_proto.
+        // A name with no realm constructor (an embedder's custom name): an
+        // ordinary Error with a self-describing own `name`, so `e.name`
+        // identifies it and it still converts and prints like an Error.
+        // qjs cannot reach this state -- every JSErrorEnum has a
+        // native_error_proto.
+        if (fallback_prototype) |prototype| try object.setPrototype(rt, prototype);
         const name_value = try value_ops.createStringValue(rt, name);
         try defineNonEnumValueProperty(rt, object, core.atom.ids.name, name_value);
     }
@@ -181,7 +226,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const error_value = try buildNamedErrorObject(rt, ctor_value, "TypeError", "boom");
+    const error_value = try buildNamedErrorObject(rt, ctor_value, null, "TypeError", "boom");
     const object = try property_ops.expectObject(error_value);
 
     // The ctor value stays rooted across the allocating construction even
@@ -210,9 +255,17 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-/// Throw the canonical `ReferenceError` for a TDZ violation.
-/// Returns `error.ReferenceError` to align with the VM sentinel convention.
-pub fn throwTdzReferenceError(ctx: *core.JSContext) error{ReferenceError} {
+fn tdzMessage(rt: *core.JSRuntime, name: core.Atom, buffer: []u8) []const u8 {
+    const generic = "Cannot access lexical binding before initialization";
+    if (name == core.atom.null_atom) return generic;
+    const text = rt.atoms.name(name) orelse return generic;
+    return std.fmt.bufPrint(buffer, "Cannot access '{s}' before initialization", .{text}) catch generic;
+}
+
+/// Throw the canonical `ReferenceError` for a TDZ violation of `name`
+/// (`null_atom` when the binding is unnamed). Returns
+/// `error.ReferenceError` to align with the VM sentinel convention.
+pub fn throwTdzReferenceError(ctx: *core.JSContext, name: core.Atom) error{ReferenceError} {
     const global = ctx.global orelse {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
@@ -226,12 +279,12 @@ pub fn throwTdzReferenceError(ctx: *core.JSContext) error{ReferenceError} {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
+    var message_buffer: [160]u8 = undefined;
     const error_value = createNamedErrorWithPrototype(
         ctx,
         global,
         prototype,
-        "ReferenceError",
-        "Cannot access 'x' before initialization",
+        tdzMessage(ctx.runtime, name, &message_buffer),
     ) catch {
         // Preserve the allocation-failure-hardened TDZ path. The caller still
         // receives the ReferenceError sentinel and can materialize or replace
@@ -250,22 +303,6 @@ pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError}
     };
 }
 
-pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
-    if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
-    const value = switch (@as(anyerror, err)) {
-        error.TypeError => try createNamedError(ctx, global, "TypeError", ""),
-        error.RangeError => try createNamedError(ctx, global, "RangeError", ""),
-        error.ReferenceError => try createNamedError(ctx, global, "ReferenceError", "not defined"),
-        error.SyntaxError => try createNamedError(ctx, global, "SyntaxError", "invalid syntax"),
-        else => {
-            if (ctx.hasException()) ctx.clearException();
-            return err;
-        },
-    };
-    if (ctx.hasException()) ctx.clearException();
-    return value;
-}
-
 /// Internally built AggregateError for Promise.any/allSettled rejection.
 /// Mirrors js_aggregate_error_constructor: a bare
 /// error-class object on AggregateError.prototype whose only own property is
@@ -275,24 +312,22 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
 /// otherwise rebuild a backtrace from whichever context first reads it.
 pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const ctor_key = core.atom.ids.AggregateError;
-    const ctor_value = try global.getProperty(ctor_key);
-
-    const object = try core.Object.create(rt, core.class.ids.error_, null);
+    // %AggregateError.prototype% of the realm, never whatever
+    // `globalThis.AggregateError` holds now.
+    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const prototype = realm.nativeErrorPrototypeObject(.aggregate_error) orelse return error.InvalidBuiltinRegistry;
+    const object = try core.Object.create(rt, core.class.ids.error_, prototype);
     const aggregate_error = object.value();
-    if (ctor_value.is(.object)) {
-        if (core.value_semantics.objectFromValue(ctor_value)) |ctor_object| {
-            const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
-            if (proto_value.is(.object)) {
-                if (core.value_semantics.objectFromValue(proto_value)) |prototype| {
-                    try object.setPrototype(rt, prototype);
-                }
-            }
-        }
-    }
     try defineNonEnumValueProperty(rt, object, core.atom.ids.errors, errors.value());
     try attachStackToErrorValue(ctx, global, aggregate_error);
     return aggregate_error;
+}
+
+/// Whether a JS `catch` may observe `err`: a pending exception it raised or
+/// an engine sentinel with a known error class, never an uncatchable one.
+pub fn isCatchableError(ctx: *core.JSContext, err: anyerror) bool {
+    if (err == error.Interrupted or ctx.exceptionIsUncatchable()) return false;
+    return pendingExceptionMatchesError(ctx, err) or runtimeErrorInfo(err) != null;
 }
 
 pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: HostError) HostError!core.JSValue {
@@ -330,7 +365,7 @@ pub fn rejectedPromiseForRuntimeError(
     prototype: ?*core.Object,
 ) HostError!core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
-        const thrown_value = ctx.runtime.current_exception;
+        const thrown_value = ctx.runtime.exception.value;
         const promise = try core.promise.rejectedWithPrototype(ctx, thrown_value, prototype);
         ctx.clearException();
         return promise;
@@ -359,9 +394,9 @@ pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, messag
 /// Throw an `InternalError` with `message` (mirrors QuickJS `JS_ThrowInternalError`).
 ///
 /// The returned sentinel is deliberately `error.StackOverflow`, not an
-/// `InternalError`-shaped one: every caller is a stack/recursion budget guard
-/// (`vm_call`, `inline_calls`, `builtin_dispatch`), and that is the sentinel
-/// their unwind paths match on. The thrown JS value is the InternalError.
+/// `InternalError`-shaped one: the callers are stack/recursion budget guards
+/// (`vm_opcodes`, `inline_calls`, `builtin_dispatch`) whose unwind paths match
+/// on that sentinel; host/globals.zig's GC-marking failure reuses it. The thrown JS value is the InternalError.
 pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "InternalError", message);
     _ = ctx.throwValue(error_value);
@@ -392,6 +427,27 @@ pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
     return error.Interrupted;
 }
 
+/// The interrupt poll of a long native loop (contract C8). Every
+/// `JSRuntime.native_poll_interval` iterations of any native loop it runs
+/// the interrupt handler and, when that asks to stop, throws the uncatchable
+/// "interrupted" InternalError. It never runs a GC safepoint, but throwing
+/// allocates, so poll where the loop could already allocate or call user
+/// code (its head), never mid-update.
+pub inline fn pollNativeLoop(ctx: *core.JSContext, global: *core.Object) !void {
+    ctx.runtime.pollNativeWork() catch return throwInterrupted(ctx, global);
+}
+
+/// Gives a bare `error.Interrupted` from `JSRuntime.pollNativeWork` its
+/// uncatchable InternalError before a JavaScript catch can see the sentinel;
+/// an interrupt the VM already raised keeps its pending error. Seams that
+/// call code which polls without a Realm (the parser and compiler) route
+/// their errors through here.
+pub fn raiseBareInterrupt(ctx: *core.JSContext, global: *core.Object, err: anyerror) void {
+    if (err == error.Interrupted and !ctx.exceptionIsUncatchable()) {
+        throwInterrupted(ctx, global) catch {};
+    }
+}
+
 /// One semantic call/jump poll. Counter ownership and cadence live in the
 /// RealmContext; error construction stays in exec because it needs that
 /// Realm's InternalError intrinsic.
@@ -399,14 +455,6 @@ pub inline fn pollInterrupt(ctx: *core.JSContext, global: *core.Object) !void {
     ctx.runtime.assertExecutionAllowed();
     if (!ctx.pollInterrupt()) return;
     return throwInterrupted(ctx, global);
-}
-
-/// The slow half of `pollInterrupt` for callers that inline the counter tick
-/// themselves (`ctx.pollInterruptTick()`): reset, GC safepoint, interrupt
-/// handler, and the throw when the handler asked for it.
-pub noinline fn pollInterruptSlowLeg(ctx: *core.JSContext, global: *core.Object) core.errors.HostError!void {
-    if (!ctx.pollInterruptSlowPublic()) return;
-    return throwInterrupted(ctx, global) catch |err| return @errorCast(err);
 }
 
 pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
@@ -439,14 +487,10 @@ pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, messa
     return error.SyntaxError;
 }
 
-pub fn isCallSiteObject(object: *core.Object) bool {
-    return object.isCallSite();
-}
-
 /// CallSite prototype methods dispatched by `.host` native-record id; the
 /// receiver must be a CallSite object (the metadata lives in internal slots).
-pub fn callSiteMethodById(object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
-    if (!isCallSiteObject(object)) return null;
+pub fn callSiteMethodById(object: *core.Object, id: core.function.EngineHelperMethod) ?core.JSValue {
+    if (!object.isCallSite()) return null;
     return switch (id) {
         .callsite_get_function => core.JSValue.nullValue(),
         .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value else core.JSValue.nullValue(),
@@ -504,8 +548,8 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
         // The published frame.pc is the resume/return address (it points past
         // the currently-executing instruction, like qjs sf->cur_pc). Back off
         // one byte so the line/col lookup lands inside that instruction —
-        // mirrors build_backtrace's `sf->cur_pc - b->byte_code_buf - 1`
-        //; without it a frame whose call is the last
+        // mirrors build_backtrace's `sf->cur_pc - b->byte_code_buf - 1`.
+        // Without it a frame whose call is the last
         // statement maps past the call (even one line past EOF).
         .pc = frame.pc -| 1,
         .location_data = function,
@@ -514,25 +558,11 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
     };
 }
 
-pub fn isErrorConstructorName(name: []const u8) bool {
-    return core.error_names.isErrorConstructorName(name);
-}
-
-pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    const object = core.value_semantics.objectFromValue(value) orelse return rt.nativeAllocator().dupe(u8, "");
-    const name_value = try object.getProperty(core.atom.ids.name);
-    if (!name_value.isString()) return rt.nativeAllocator().dupe(u8, "");
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.nativeAllocator());
-    try value_ops.appendRawString(rt, &bytes, name_value);
-    return rt.nativeAllocator().dupe(u8, bytes.items);
-}
-
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool {
     if (!ctx.hasException()) return false;
     if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
-    const object = objectFromValue(ctx.runtime.current_exception) orelse return false;
+    const object = objectFromValue(ctx.runtime.exception.value) orelse return false;
     var borrow = core.runtime.NoGcScope{};
     borrow.activate(ctx.runtime);
     defer borrow.deactivate();
@@ -608,40 +638,91 @@ pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
         error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
         // qjs js_bigint_pow negative-exponent guard.
         error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
+        // qjs js_string_repeat guards.
+        error.InvalidRepeatCount => .{ .name = "RangeError", .message = "invalid repeat count" },
+        error.InvalidStringLength => .{ .name = "RangeError", .message = "invalid string length" },
+        error.InvalidArrayLength => .{ .name = "RangeError", .message = "invalid array length" },
+        error.InvalidArrayBufferLength => .{ .name = "RangeError", .message = "invalid array buffer length" },
+        error.InvalidOffset => .{ .name = "RangeError", .message = "offset is out of bounds" },
+        error.DetachedArrayBuffer => .{ .name = "TypeError", .message = "ArrayBuffer is detached" },
+        error.IncompatibleSpeciesResult => .{ .name = "TypeError", .message = "species constructor returned an incompatible object" },
+        error.ArrayTooLong => .{ .name = "TypeError", .message = "array length would exceed 2^53 - 1" },
+        error.TooManyArguments => .{ .name = "RangeError", .message = "too many arguments in function call (only 65534 allowed)" },
+        error.TypedArrayOutOfBounds => .{ .name = "TypeError", .message = "TypedArray is detached or out of bounds" },
+        error.NotATypedArray => .{ .name = "TypeError", .message = "not a TypedArray" },
+        error.NotAnArrayBuffer => .{ .name = "TypeError", .message = "not an ArrayBuffer" },
+        error.NotAUint8Array => .{ .name = "TypeError", .message = "not a Uint8Array" },
+        error.InvalidPropertyDescriptor => .{ .name = "TypeError", .message = "property descriptor must be an object" },
+        error.InvalidAccessor => .{ .name = "TypeError", .message = "getter or setter is not a function" },
+        error.MixedPropertyDescriptor => .{ .name = "TypeError", .message = "cannot have a getter or setter and a value or writable" },
+        error.ProxyInvariantViolation => .{ .name = "TypeError", .message = "proxy trap result violates an invariant" },
+        error.NullishToObject => .{ .name = "TypeError", .message = "cannot convert undefined or null to object" },
+        error.CannotConvertToBigInt => .{ .name = "TypeError", .message = "cannot convert to BigInt" },
+        error.BigIntNotSerializable => .{ .name = "TypeError", .message = "BigInt value can't be serialized in JSON" },
+        error.InvalidRadix => .{ .name = "RangeError", .message = "radix must be between 2 and 36" },
+        error.DataViewOutOfBounds => .{ .name = "TypeError", .message = "DataView is detached or out of bounds" },
+        error.DataViewOffsetOutOfRange => .{ .name = "RangeError", .message = "offset is outside the bounds of the DataView" },
+        error.CannotDefineProperty => .{ .name = "TypeError", .message = "could not define property" },
+        error.CannotPreventExtensions => .{ .name = "TypeError", .message = "cannot prevent extensions" },
+        error.CannotDeleteProperty => .{ .name = "TypeError", .message = "could not delete property" },
+        error.PrivateMemberExists => .{ .name = "TypeError", .message = "private member already exists on this object" },
+        error.IncompatibleDescriptor => .{ .name = "TypeError", .message = "cannot redefine property" },
+        error.ReadOnly => .{ .name = "TypeError", .message = "property is read-only" },
+        error.AccessorWithoutSetter => .{ .name = "TypeError", .message = "no setter for property" },
+        error.RevokedProxy => .{ .name = "TypeError", .message = "revoked proxy" },
+        error.InvalidWeakTarget => .{ .name = "TypeError", .message = "invalid target" },
+        error.HeldValueIsTarget => .{ .name = "TypeError", .message = "held value cannot be the target" },
+        error.InvalidUnregisterToken => .{ .name = "TypeError", .message = "invalid unregister token" },
+        error.IncompatibleReceiver => .{ .name = "TypeError", .message = "method called on incompatible receiver" },
+        error.NotAConstructor => .{ .name = "TypeError", .message = "not a constructor" },
+        error.NotAnObject => .{ .name = "TypeError", .message = "not an object" },
+        error.NotARegExp => .{ .name = "TypeError", .message = "not a RegExp" },
+        error.NotAString => .{ .name = "TypeError", .message = "not a string" },
+        error.NotASymbol => .{ .name = "TypeError", .message = "not a symbol" },
+        error.InvalidExecResult => .{ .name = "TypeError", .message = "exec result must be an object or null" },
+        error.RegExpFlagsNotUndefined => .{ .name = "TypeError", .message = "flags must be undefined when the pattern is a RegExp" },
+        error.NotAFunction => .{ .name = "TypeError", .message = "not a function" },
+        error.InvalidArgumentList => .{ .name = "TypeError", .message = "argument list must be an object" },
+        error.NotIterable => .{ .name = "TypeError", .message = "value is not iterable" },
+        error.InvalidIteratorResult => .{ .name = "TypeError", .message = "iterator must return an object" },
+        error.GeneratorRunning => .{ .name = "TypeError", .message = "cannot invoke a running generator" },
+        error.NotAGenerator => .{ .name = "TypeError", .message = "not a generator" },
+        error.UninitializedBinding => .{ .name = "ReferenceError", .message = "cannot access a binding before initialization" },
+        error.InvalidOptionValue => .{ .name = "TypeError", .message = "invalid option value" },
+        error.TypedArrayContentTypeMismatch => .{ .name = "TypeError", .message = "cannot mix BigInt and Number typed arrays" },
+        error.EmptyReduce => .{ .name = "TypeError", .message = "reduce of empty iterator with no initial value" },
+        error.InvalidZipMode => .{ .name = "TypeError", .message = "mode must be \"shortest\", \"longest\" or \"strict\"" },
+        error.IteratorLengthMismatch => .{ .name = "TypeError", .message = "iterators have different lengths" },
+        error.InvalidPromiseCapability => .{ .name = "TypeError", .message = "promise resolve or reject function is not callable" },
+        error.PromiseCapabilityAlreadySet => .{ .name = "TypeError", .message = "promise capability executor already called" },
+        error.NotADisposableStack => .{ .name = "TypeError", .message = "not a disposable stack" },
+        error.NotDisposable => .{ .name = "TypeError", .message = "value is not disposable" },
+        error.DisposableStackDisposed => .{ .name = "ReferenceError", .message = "stack has been disposed" },
+        error.NotADateObject => .{ .name = "TypeError", .message = "not a Date object" },
+        error.DateValueIsNaN => .{ .name = "RangeError", .message = "Date value is NaN" },
+        error.InvalidArrayIndex => .{ .name = "RangeError", .message = "invalid array index" },
+        error.NonFiniteToBigInt => .{ .name = "RangeError", .message = "cannot convert NaN or Infinity to BigInt" },
+        error.NonIntegerToBigInt => .{ .name = "RangeError", .message = "cannot convert to BigInt: not an integer" },
+        error.SymbolToNumber => .{ .name = "TypeError", .message = "cannot convert symbol to number" },
+        error.SymbolToString => .{ .name = "TypeError", .message = "cannot convert symbol to string" },
+        error.BigIntToNumber => .{ .name = "TypeError", .message = "cannot convert bigint to number" },
+        error.BigIntUnaryPlus => .{ .name = "TypeError", .message = "bigint argument with unary +" },
+        error.BigIntUnsignedShift => .{ .name = "TypeError", .message = "bigint operands are forbidden for >>>" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => null,
     };
 }
 
-pub fn promiseErrorInfo(err: anyerror) ErrorInfo {
-    return switch (@as(anyerror, err)) {
-        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
-        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
-        error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
-        error.Interrupted => .{ .name = "InternalError", .message = "interrupted" },
-        error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
-        error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
-        error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },
-        error.TypeError => .{ .name = "TypeError", .message = "" },
-        error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
-        error.RangeError => .{ .name = "RangeError", .message = "" },
-        // qjs js_bigint_new single throw site.
-        error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
-        // qjs js_bigint_divrem division-by-zero guard.
-        error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
-        // qjs js_bigint_pow negative-exponent guard.
-        error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
-        error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
-        else => .{ .name = "Error", .message = "" },
-    };
+fn promiseErrorInfo(err: anyerror) ErrorInfo {
+    return runtimeErrorInfo(err) orelse .{ .name = "Error", .message = "" };
 }
 
 /// Concrete host-I/O producer surface. Keep this exact rather than accepting
 /// `anyerror`: a Zig stdlib change must make this switch fail to compile until
 /// the JS conversion policy is reviewed.
-pub const HostIoError = std.Io.Dir.ReadFileAllocError || std.Io.Writer.Error;
+const HostIoError = std.Io.Dir.ReadFileAllocError || std.Io.Writer.Error;
 
-pub fn hostIoErrorInfo(err: HostIoError) ErrorInfo {
+fn hostIoErrorInfo(err: HostIoError) ErrorInfo {
     return switch (err) {
         error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
         error.AccessDenied,
@@ -707,7 +788,9 @@ pub fn throwHostError(
     return error.JSException;
 }
 
-pub const module_host_stall_message = "module host made no progress";
+/// Nothing queued (jobs, timers, host work) can settle what a module awaits:
+/// in practice a top-level `await` on a promise that never settles.
+const module_host_stall_message = "unsettled top-level await: no pending job or host task can settle it";
 
 /// A host scheduler that cannot advance a pending module evaluation is an
 /// engine/host integration failure, not the dynamic-import "unsupported"
@@ -727,27 +810,16 @@ pub fn throwModuleHostStall(
     return error.JSException;
 }
 
+/// The error name a pending exception must carry to already represent `err`.
+/// `Interrupted` is excluded: admitting it would let generator catches and
+/// assertion helpers consume an uncatchable error (see `promiseErrorValue`).
 fn errorNameForRuntimeError(err: anyerror) ?[]const u8 {
-    return switch (@as(anyerror, err)) {
-        error.URIError, error.InvalidUtf8 => "URIError",
-        error.StackOverflow => "InternalError",
-        error.StringTooLong => "InternalError",
-        // `runtimeErrorInfo` maps this to InternalError too, so its absence
-        // here was an oversight with teeth: `pendingExceptionMatchesError`
-        // would not recognize an already-pending out-of-memory exception, and
-        // the caller would clear it and build a replacement -- allocating on
-        // an exhausted heap and losing the original error's stack.
-        error.OutOfMemory => "InternalError",
-        error.DerivedConstructorReturn, error.TypeError => "TypeError",
-        error.DerivedThisUninitialized, error.ReferenceError => "ReferenceError",
-        error.InvalidCharacterError => "InvalidCharacterError",
-        error.SyntaxError => "SyntaxError",
-        error.RangeError, error.BigIntTooLarge, error.DivisionByZero, error.NegativeExponent => "RangeError",
-        else => null,
-    };
+    if (@as(anyerror, err) == error.Interrupted) return null;
+    const info = runtimeErrorInfo(err) orelse return null;
+    return info.name;
 }
 
-fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_pc: usize) ?SourceLocation {
+fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_pc: usize) ?core.BacktraceLocation {
     const bytes = function.pc2lineBuf();
     const pc = std.math.cast(u32, target_pc) orelse return null;
     const location = bytecode.pipeline.pc2line.findSourceLocation(bytes, pc) catch return null;
@@ -773,27 +845,27 @@ fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
     _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom.raw())));
 }
 
-// ----- merged from exceptions.zig -----
+// ----- Engine-error type aliases -----
 // Compatibility names for the core engine-error authority.
 const core_errors = @import("../core/errors.zig");
 pub const RuntimeError = core_errors.RuntimeError;
 pub const HostError = core_errors.HostError;
 
-// ----- merged from error_ops.zig -----
+// ----- Error-object native records -----
 // Error-object native records and their realm-aware dispatch seam.
 //
 // This module owns the Error prototype/static record ids and forwards stack
 // access, captureStackTrace, and `toString` to their implementation owners.
 // Receiver and arguments are borrowed; returned JSValues are owned. Callable
 // realm selection stays atomic through `builtin_dispatch`, matching the
-// QuickJS Error prototype table and `js_error_toString` at
+// QuickJS Error prototype table and `js_error_toString`.
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const string_ops = @import("string_ops.zig");
 pub const PrototypeMethod = core.host_function.builtin_method_ids.error_object.PrototypeMethod;
 pub const StaticMethod = enum(u32) {
     capture_stack_trace = 10,
+    is_error = 11,
 };
 pub const internal_entries = errorEntries: {
     const Entry = core.host_function.InternalEntry;
@@ -802,6 +874,7 @@ pub const internal_entries = errorEntries: {
         errorEntry("get stack", 1, @intFromEnum(PrototypeMethod.stack_getter)),
         errorEntry("set stack", 1, @intFromEnum(PrototypeMethod.stack_setter)),
         errorEntry("captureStackTrace", 1, @intFromEnum(StaticMethod.capture_stack_trace)),
+        errorEntry("isError", 1, @intFromEnum(StaticMethod.is_error)),
     };
 };
 fn errorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
@@ -831,12 +904,12 @@ fn errorCall(
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
+    // Like V8 and QuickJS-ng, captureStackTrace ignores its receiver, so
+    // subclasses (`AppError.captureStackTrace`) and unbound calls work.
     if (id == @intFromEnum(StaticMethod.capture_stack_trace)) {
-        const receiver = call.thisObject(this_value) orelse return error.TypeError;
-        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
-        if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Error")) return error.TypeError;
         return errorCaptureStackTrace(ctx, output, realm.global, args);
     }
+    if (id == @intFromEnum(StaticMethod.is_error)) return errorIsError(args);
 
     const func_obj = host_call.func_obj;
     return switch (id) {
@@ -850,7 +923,7 @@ fn errorCall(
     };
 }
 
-// ----- merged from error_stack_ops.zig -----
+// ----- Error.stack capture and CallSite helpers -----
 // Error.stack capture/formatting, backtrace naming and CallSite helpers.
 const method_ids = core.host_function.builtin_method_ids;
 const array_ops = @import("array_ops.zig");
@@ -861,7 +934,7 @@ const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
 pub fn captureErrorStack(ctx: *core.JSContext, global: *core.Object, instance: *core.Object) !void {
-    const sites = try buildCallSiteArray(ctx, global, null);
+    const sites = try buildCallSiteArray(ctx, global, .none);
     try instance.setErrorStackSites(ctx.runtime, sites);
 }
 
@@ -875,11 +948,36 @@ pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value
     try captureErrorStack(ctx, global, object);
 }
 
-pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue {
-    if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
+/// Which innermost frames `Error.captureStackTrace` leaves out.
+pub const StackSkip = union(enum) {
+    none,
+    /// Its own native frame: the stack starts at its caller.
+    api_frame,
+    /// Every frame up to and including the newest call of this function
+    /// (`constructorOpt`); no frames at all when it is not on the stack.
+    through: core.JSValue,
+
+    /// Whether frames before the first kept one are being dropped.
+    pub fn active(self: StackSkip) bool {
+        return self != .none;
+    }
+
+    /// Does dropping end at `frame`? Read before the frame's name is resolved,
+    /// which clears its function value.
+    pub fn endsAt(self: StackSkip, frame: core.BacktraceFrame) bool {
+        return switch (self) {
+            .none => false,
+            .api_frame => true,
+            .through => |function| frame.function_value.same(function),
+        };
+    }
+};
+
+fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip: StackSkip) !core.JSValue {
+    if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip);
 
     if (try errorPrepareStackTrace(global)) |prepare| {
-        const sites = try buildCallSiteArray(ctx, global, skip_name);
+        const sites = try buildCallSiteArray(ctx, global, skip);
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
         return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
@@ -892,10 +990,10 @@ pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
             return err;
         };
     }
-    return buildErrorStackStringValue(ctx, global, skip_name);
+    return buildErrorStackStringValue(ctx, global, skip);
 }
 
-pub fn formatCapturedErrorStackValue(
+fn formatCapturedErrorStackValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -906,10 +1004,9 @@ pub fn formatCapturedErrorStackValue(
     if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 
     if (try errorPrepareStackTrace(global)) |prepare| {
-        const sites_arg = sites_value;
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
-        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
+        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_value }, null, null) catch |err| {
             if (pendingExceptionMatchesError(ctx, err)) {
                 _ = ctx.takeException();
                 return core.JSValue.nullValue();
@@ -941,13 +1038,14 @@ pub fn throwParseSyntaxError(
     const rt = ctx.runtime;
     const line_num: i32 = std.math.cast(i32, line) orelse std.math.maxInt(i32);
     const col_num: i32 = std.math.cast(i32, col) orelse std.math.maxInt(i32);
+    // Callers pass the filename borrowed from the atom table, and nothing
+    // roots that atom once compilation returned: the allocations below can
+    // collect it and recycle its bytes. Copy before allocating.
+    const owned_filename = try rt.nativeAllocator().dupe(u8, filename);
+    defer rt.nativeAllocator().free(owned_filename);
     const error_value = try createNamedErrorWithoutStack(rt, global, "SyntaxError", message);
-    // Ownership: on construction failure below free the value; once
-    // `throwValue` has stored it the exception slot owns it (the final
-    // `return error.SyntaxError` is the intended result, not a failure).
-    defineParseErrorSurface(ctx, global, error_value, filename, line_num, col_num) catch |err| {
-        return err;
-    };
+    // The final `return error.SyntaxError` is the intended result, not a failure.
+    try defineParseErrorSurface(ctx, global, error_value, owned_filename, line_num, col_num);
     _ = ctx.throwValue(error_value);
     return error.SyntaxError;
 }
@@ -962,7 +1060,7 @@ fn defineParseErrorSurface(
 ) !void {
     const rt = ctx.runtime;
     const instance = core.value_semantics.objectFromValue(error_value) orelse return;
-    const filename_value = try value_ops.createStringValue(rt, filename);
+    const filename_value = try value_ops.createStringValueLossy(rt, filename);
     try instance.defineOwnProperty(rt, core.atom.ids.fileName, core.Descriptor.data(filename_value, .method));
     try instance.defineOwnProperty(rt, core.atom.ids.lineNumber, core.Descriptor.data(core.JSValue.int32(line_num), .method));
     try instance.defineOwnProperty(rt, core.atom.ids.columnNumber, core.Descriptor.data(core.JSValue.int32(col_num), .method));
@@ -970,9 +1068,9 @@ fn defineParseErrorSurface(
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(rt.nativeAllocator());
     try bytes.print(rt.nativeAllocator(), "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
-    const frames_value = try buildErrorStackStringValue(ctx, global, null);
+    const frames_value = try buildErrorStackStringValue(ctx, global, .none);
     try value_ops.appendRawString(rt, &bytes, frames_value);
-    const stack_value = try value_ops.createStringValue(rt, bytes.items);
+    const stack_value = try value_ops.createStringValueLossy(rt, bytes.items);
     try instance.setErrorStack(rt, stack_value);
 }
 
@@ -988,23 +1086,29 @@ fn errorPrepareStackTrace(global: *core.Object) !?core.JSValue {
     return prepare;
 }
 
-pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame, expected: []const u8) bool {
-    return std.mem.eql(u8, callSiteFunctionName(ctx, entry), expected);
+/// Display name for a backtrace frame. Mirrors qjs build_backtrace:
+/// an empty name renders "<anonymous>", a top-level
+/// script/eval frame renders "<eval>". qjs gets the latter for free because
+/// the compiler names every top-level function def JS_ATOM__eval_; zjs's
+/// top-level bytecode instead carries name == filename (the name-equality is
+/// also its eval-frame detection convention), so the "<eval>" mapping is
+/// applied at this rendering seam.
+/// A top-level function is named after its file. A file path need not be
+/// UTF-8, and the name was read back from the function's `name` string, so a
+/// non-UTF-8 path matches in its replacement-character spelling.
+fn isTopLevelFrameName(name: []const u8, file: []const u8) bool {
+    if (std.mem.eql(u8, name, file)) return true;
+    if (std.unicode.utf8ValidateSlice(file)) return false;
+    var buffer: [1024]u8 = undefined;
+    const replaced = std.fmt.bufPrint(&buffer, "{f}", .{std.unicode.fmtUtf8(file)}) catch return false;
+    return std.mem.eql(u8, name, replaced);
 }
 
-/// Display name for a backtrace frame. Mirrors qjs build_backtrace
-///: an empty name renders "<anonymous>", a top-level
-/// script/eval frame renders "<eval>". qjs gets the latter for free because
-/// the compiler names every top-level function def JS_ATOM__eval_
-///; zjs's top-level bytecode instead carries name ==
-/// filename (the name-equality is also its eval-frame detection convention,
-/// e.g. vm_call.zig / eval_ops.zig), so the "<eval>" mapping is applied at
-/// this rendering seam.
 pub fn callSiteFunctionName(ctx: *core.JSContext, entry: core.BacktraceFrame) []const u8 {
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
     if (name.len == 0) return "<anonymous>";
-    if (std.mem.eql(u8, name, file)) return "<eval>";
+    if (isTopLevelFrameName(name, file)) return "<eval>";
     return name;
 }
 
@@ -1012,18 +1116,18 @@ pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFram
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
     if (name.len == 0) return core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, file)) return value_ops.createStringValue(ctx.runtime, "<eval>");
-    return value_ops.createStringValue(ctx.runtime, name);
+    if (isTopLevelFrameName(name, file)) return value_ops.createStringValue(ctx.runtime, "<eval>");
+    return value_ops.createStringValueLossy(ctx.runtime, name);
 }
 
-pub fn errorStackTraceLimit(_: *core.JSRuntime, global: *core.Object) usize {
+pub fn errorStackTraceLimit(global: *core.Object) usize {
     const error_key = core.atom.ids.Error;
     const error_object = global.getOwnDataObjectBorrowed(error_key) orelse return 10;
     const limit_key = core.atom.ids.stackTraceLimit;
     const limit_value = error_object.getOwnDataPropertyValue(limit_key) orelse return 10;
     if (limit_value.is(.undefined_value) or limit_value.is(.null_value)) return 0;
     const number = value_ops.numberValue(limit_value) orelse return 10;
-    if (!std.math.isFinite(number) or number <= 0) return 0;
+    if (std.math.isNan(number) or number <= 0) return 0;
     const truncated = @floor(number);
     if (truncated > @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
     return @intFromFloat(truncated);
@@ -1039,7 +1143,7 @@ pub fn appendBacktraceFunctionName(
     const file = ctx.runtime.atoms.name(filename) orelse "";
     if (name.len == 0) {
         try bytes.appendSlice(ctx.runtime.nativeAllocator(), "<anonymous>");
-    } else if (std.mem.eql(u8, name, file)) {
+    } else if (isTopLevelFrameName(name, file)) {
         // Top-level script/eval frame (see callSiteFunctionName).
         try bytes.appendSlice(ctx.runtime.nativeAllocator(), "<eval>");
     } else {
@@ -1077,7 +1181,7 @@ pub fn errorStackGetter(
     global: *core.Object,
     this_value: core.JSValue,
 ) !core.JSValue {
-    const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    const object = object_ops.objectFromValue(this_value) orelse return error.NotAnObject;
     if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
     if (object.errorStack()) |stack| return stack;
     if (object.errorStackSites()) |sites| {
@@ -1085,10 +1189,13 @@ pub fn errorStackGetter(
         try object.setErrorStack(ctx.runtime, stack);
         return stack;
     }
-    return buildErrorStackValue(ctx, output, global, this_value, null);
+    // An Error that never captured a stack (the preallocated out-of-memory
+    // error cannot allocate one) has none: the reader's own frames would
+    // describe where `stack` was read, not where the error arose.
+    return (try ctx.runtime.emptyString()).value();
 }
 
-pub fn errorStackSetter(
+fn errorStackSetter(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1098,12 +1205,13 @@ pub fn errorStackSetter(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.NotAnObject;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!value.isString()) return error.TypeError;
+    if (!value.isString()) return error.NotAString;
 
     if (ctx.nativeErrorPrototypeObject(.error_)) |error_proto| {
-        if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
+        if (object_ops.sameObjectIdentity(this_value, error_proto.value()))
+            return throwTypeErrorMessage(ctx, global, "cannot set stack on Error.prototype");
     }
 
     const stack_key = core.atom.ids.stack;
@@ -1116,12 +1224,11 @@ pub fn errorStackSetter(
         else blk: {
             receiver.defineOwnProperty(ctx.runtime, stack_key, create_desc) catch |err| switch (err) {
                 error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => break :blk false,
-                error.InvalidLength => return error.RangeError,
                 else => return err,
             };
             break :blk true;
         };
-        if (!ok) return error.TypeError;
+        if (!ok) return error.CannotDefineProperty;
         return core.JSValue.undefinedValue();
     }
 
@@ -1136,18 +1243,18 @@ pub fn errorStackSetter(
 
     if (receiver.proxyTarget() != null) {
         const ok = try object_ops.proxySetValueProperty(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame);
-        if (!ok) return error.TypeError;
+        if (!ok) return error.ReadOnly;
         return core.JSValue.undefinedValue();
     }
 
     switch (own_desc.kind) {
         .accessor => {
-            if (own_desc.setter.is(.undefined_value)) return error.TypeError;
+            if (own_desc.setter.is(.undefined_value)) return error.AccessorWithoutSetter;
             _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             return core.JSValue.undefinedValue();
         },
         .data, .generic => {
-            if (own_desc.kind == .data and own_desc.writable == false) return error.TypeError;
+            if (own_desc.kind == .data and own_desc.writable == false) return error.ReadOnly;
             try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor{ .kind = .data, .value = value, .value_present = true }, caller_function, caller_frame);
             return core.JSValue.undefinedValue();
         },
@@ -1160,7 +1267,13 @@ fn isErrorStackSetterValue(value: core.JSValue) bool {
     return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);
 }
 
-pub fn errorCaptureStackTrace(
+fn errorIsError(args: []const core.JSValue) core.JSValue {
+    if (args.len < 1) return core.JSValue.boolean(false);
+    const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
+    return core.JSValue.boolean(object.class_id == core.class.ids.error_);
+}
+
+fn errorCaptureStackTrace(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1168,12 +1281,14 @@ pub fn errorCaptureStackTrace(
 ) !core.JSValue {
     if (args.len < 1 or !args[0].is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
     const target = try property_ops.expectObject(args[0]);
-    const skip_name = if (args.len >= 2 and isCallableValue(args[1]))
-        try functionNameBytes(ctx.runtime, args[1])
-    else
-        null;
-    defer if (skip_name) |bytes| ctx.runtime.nativeAllocator().free(bytes);
-    const stack_value = try buildErrorStackValue(ctx, output, global, args[0], skip_name);
-    try target.defineOwnProperty(ctx.runtime, core.atom.ids.stack, core.Descriptor.data(stack_value, .method));
+    const skip: StackSkip = if (args.len >= 2 and isCallableValue(args[1])) .{ .through = args[1] } else .api_frame;
+    const stack_value = try buildErrorStackValue(ctx, output, global, args[0], skip);
+    const desc = core.Descriptor.data(stack_value, .method);
+    // DefinePropertyOrThrow: a Proxy target defines through its trap.
+    if (target.proxyTarget() != null) {
+        if (!try object_ops.proxyDefineOwnProperty(ctx, output, global, target, core.atom.ids.stack, desc, null, null)) return error.IncompatibleDescriptor;
+    } else {
+        try target.defineOwnProperty(ctx.runtime, core.atom.ids.stack, desc);
+    }
     return core.JSValue.undefinedValue();
 }

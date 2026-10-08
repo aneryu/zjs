@@ -8,8 +8,9 @@ contract.
 
 ## Ownership is all-tracing
 
-The collector is a non-moving, generational (sticky mark bit), incrementally
-marking stop-the-world tracer (`src/core/gc_trace_stw.zig`). It owns every
+The collector is a generational (sticky mark bit) stop-the-world tracer
+(`src/core/gc_trace_stw.zig`), non-moving except for the opt-in copying
+nursery (`ZJS_GC_NURSERY=1`, below). It owns every
 `gc.Header` kind. `gc.RefKind` is a `u4` with fourteen values: 0 `object`,
 1 `function_bytecode`, 2 `var_ref`, 3 `realm_context`, 4 `module`, 5 `shape`,
 6 `string`, 7 `big_int`, 8 `property_storage`, 9 `array_storage`,
@@ -41,9 +42,9 @@ Shape (S1-a, 2026-09-03) keeps no count at all. `ShapeOwnership.shared` is a
 sticky copy-on-write bit set on the second adoption (`Shape.markShared`); an
 unshared shape has exactly one holder, so that holder's drop frees it at once
 (`shape.Registry.dropUnshared` -- the qjs `js_free_shape` rc→0 leg without the
-counter), while a shared shape is left to the sweep. Shape is deliberately
-NOT `frontierEpochSafe`: `relocateShape` frees and re-creates the struct on
-inline FAM growth, so shapes are shaded synchronously, never queued.
+counter), while a shared shape is left to the sweep. `relocateShape` frees and
+re-creates the struct on inline FAM growth, so shapes are shaded
+synchronously, never queued.
 
 Realm (S1-b, 2026-09-03) keeps no count either. `RealmRef` is a plain traced
 pointer; `JSContext.destroy` only drops the host create-ref root provider and
@@ -52,7 +53,7 @@ the realm dies in the next major that finds it unreachable (or in
 owner's child edges (FunctionBytecode, native function payload, auto-init
 slot, FinalizationRegistry, RealmRecord), native holders through a root
 provider (`Job`, module-graph continuation/waiter lists, Atomics.waitAsync
-waiters) or a pin (`OwnedBinding`). `EventLoop.realm` is borrowed from the
+waiters) or a pin. `EventLoop.realm` is borrowed from the
 host's live `JSContext`. A new native holder without one of these is a
 use-after-free after the next major.
 
@@ -102,7 +103,7 @@ instead, and `verifyObjectPropertyStorageLayouts` audits the invariant
 The authority trace lives beside the data it describes:
 `Object.traceChildEdgesFallible` (`object.zig`) for objects, and the
 per-kind `traceChildEdges*` for shape, realm and module, dispatched from
-`traceHeaderEdges` (`gc_trace_stw.zig:63`). There are no separate hot-arm
+`traceHeaderEdges` (`gc_trace_stw.zig`). There are no separate hot-arm
 copies any more (the rc-era `object_gc.zig` hot arms were test-only and are
 removed by S0). **Adding an edge means updating the authority and the
 representation snapshot; a value kind that becomes tracer-owned must appear
@@ -129,11 +130,9 @@ epoch`); anything else is unbound and swept.
 
 Every store of a heap reference into a published owner goes through
 `Registry.generationalBarrierValue(owner, value)` or, for bulk writes,
-`rememberOwnerForBulkWrite(owner)` before the stores (`gc.zig:4777-5040`).
-Outside marking the barrier is a generational remember-owner barrier; during
-incremental marking it is a Dijkstra insertion barrier that shades the exact
-new target (`gc_concurrent.zig` header comment). The two are alternatives,
-never a sequence.
+`rememberOwnerForBulkWrite(owner)` before the stores (`gc.zig`). The barrier
+is a generational remember-owner barrier: an old owner that gains a young
+target is remembered so the next minor re-traces it.
 
 An unpublished owner (`alloc_info.heap_accounted == false`) must not be
 queued or remembered: publication traces its initial edges
@@ -182,9 +181,9 @@ must propagate as OOM, independently of invalid-literal SyntaxError.
 Activate at its final address and deactivate in strict LIFO order, including
 error exits. It does not register roots, pin memory, prevent explicit buffer
 mutation, or extend lifetimes. Native allocation is allowed. Runtime collection
-and polling, direct major/minor entry, and pending/sliced destruction reject
-collection requests before changing collector state; they do not defer or skip
-the request to conceal a violation. Runtime teardown also rejects an active
+and polling and direct major/minor entry reject collection requests before
+changing collector state; they do not defer or skip the request to conceal a
+violation. Runtime teardown also rejects an active
 scope. The scope and Runtime link have no storage in non-test Release builds.
 `appendValueUtf8` uses this scope while traversing borrowed string leaves.
 
@@ -195,7 +194,7 @@ in strict root-frame LIFO order; an active scope must not move. Its borrowed
 and a non-reused activation generation before accessing a slot. References
 expire on deactivation and never extend Runtime lifetime. Registration and
 updates do not allocate or collect. These checked registration and setter
-operations reject mutation while `gc_running` or a root/payload trace window is active; the current collector completes
+operations reject mutation while `gc.hot.collecting` or a root/payload trace window is active; the current collector completes
 marking while the mutator is stopped and scans these slots at each collection. Collector slot repair uses
 the visitor directly, not the mutator setter. A handle `takeInto` installs the
 destination before removing the source, leaving the source intact on failure.
@@ -251,9 +250,9 @@ buffers before destroying execution or heap state. Borrowed native windows
 continue to use scoped frames and require stable source storage.
 
 Precise roots: `pin_entries`, value root frames, active jobs, interpreter
-frames and operand stack (`active_invocation_trace.zig`), `runtime.traceRoots`,
-root providers. **In production only container/window value-root frames are
-linked** (`runtime.zig:501`); scalar `rootValues`/`rootObjects` are compiled
+frames and operand stack (`inline_calls.zig` `traceMachine`),
+`runtime.traceRoots`, root providers. **In production only container/window
+value-root frames are linked** (`runtime.zig`); scalar `rootValues`/`rootObjects` are compiled
 out, and the conservative native stack/register scan (`gc_conservative.zig`)
 is the net for every Zig local that holds a heap reference across an
 allocation. Until lane R1 lands, deleting or narrowing the conservative scan
@@ -269,10 +268,14 @@ are offered (`forEachNurseryCandidateAt`). Every page so named is retained
 before anything is evacuated.
 
 The interpreter's pending call window (`stack.PendingCallRegion`) is judged
-live by Stack identity and top position. A retired Entry's Stack slot is
-reused by later frames, so retiring or tail-replacing an Entry forgets a
-window that names it (`Machine.forgetPendingCallRegion`); otherwise a reused
-slot could match and the tracer would read dead operand slots.
+live by Stack identity and top position, and that test cannot tell a
+finished call from a live one: a top can return to the same slot later. So
+the window ends when the call does -- every Entry retirement
+(`Machine.endPendingCallRegion`) and every caught exception
+(`deliverCatchable`) clears it -- and a host callback that re-enters the same
+Machine mid-push (`ctx.callFunction` from a weak-handle callback or the
+interrupt handler) runs inside a `NativeBoundaryScope` that saves and
+restores the outer site's window.
 
 R1-a/c/d narrowed but did not close the precise-root gap: of the six
 attributable windows only the regexp match array was a genuine missing root,
@@ -282,11 +285,10 @@ no added root frame fixes. The R3 census therefore cannot be used as an R1
 worklist.
 
 `host_pins` on an atom entry is the ABI-side root the tracer cannot see
-(`PropNameID.internStatic`/`release`, reused by `LengthIndexAtom` and
-`temporaryStringAtom`). A native holder without a pin, a root provider or a
+(`AtomTable.pinForHost`/`unpinForHost`). A native holder without a pin, a root provider or a
 traced owner edge is a use-after-free after the next major.
 
-Membership lists are not roots: `context_head`, `constructing_context_head`
+Membership lists are not roots: `contexts.live_head`, `contexts.constructing_head`
 and the root-provider table answer "which runtime owns this", not "is this
 alive" (`runtime.zig`). A realm is a root only while its host create-ref is
 unconsumed.
@@ -300,31 +302,26 @@ the realm old and unremembered and the next minor condemns the young value
 published owners: an unpublished realm remembered mid-construction gets its
 uninitialised fields traced.
 
-**Realm → Shape during incremental marking is shaded synchronously**
-(`shadeForConcurrentMark`): neither kind can be queued, so the shape is
-marked and its proto queued; failing the cycle there surfaced as a spurious
-`OutOfMemory` in every `$262.createRealm()` test.
-
 ## Weak semantics
 
 There are no husks. S4-e deleted `lifetime.trace.flags.husk`,
 `headerIsReclaimableWeakHusk`, `destroyDeadWeakHusk` and the husk case of
-`Block.forgetDoomedCell`: weak liveness is decided by mark bits at major
-finish (`processWeak`), and the weak-id map is then the *whole* liveness
+`Block.forgetDoomedCell`: weak liveness is decided by mark bits at the end of
+every collection, minor and major (`processWeak`), and the weak-id map is then the *whole* liveness
 test -- `liveObjectFromWeakIdentity` resolves an id iff the object is still
 registered. Two rules follow (`runtime.zig` `registerWeakObjectIdentity` /
-`takeWeakObjectIdentity`; S4-e):
+`gc_weak.takeObject`; S4-e):
 
 - the id is handed back inside the same destruction that frees the struct,
   before `unregisterObjectWithBytes`, so the map never names a corpse for
   even one poll;
 - an object handed a weak identity keeps `needs_finalizer` set. Retracting
-  the bit would strand a `weak_object_ids` / `weak_id_objects` pair naming
+  the bit would strand a `weak.object_ids` / `weak.id_objects` pair naming
   freed memory, which is a resurrection, not a leak.
 
 `visitWeakCollectionEntry` stays a no-op in the mark visitor: marking a weak
-edge would promote it to a strong one. Clearing is a separate phase and runs
-only at major finish.
+edge would promote it to a strong one. Clearing is a separate phase
+(`processWeak`) that runs at the end of every collection.
 
 ## Minor collections
 
@@ -344,10 +341,11 @@ tombstoned (`heap_accounted` cleared): its page may be retained for a
 neighbour, and neither a stale native word nor the next corpse walk may treat
 it as live again.
 
-Minors do not run `processWeak`; WeakRef / FinalizationRegistry / WeakMap
-clearing happens only at major finish. A minor may not run while a major's
-retirement is not `clean` (`minorsAllowed`), nor while the morgue
-(`doomed_pending`) is open.
+Minors run `processWeak` after their ephemeron fixed point, like majors: a
+WeakRef / FinalizationRegistry / WeakMap referent that died young is cleared
+by the minor that reclaims it. A minor may not run while a major's retirement
+is not `clean` (`minorsAllowed`). Every collection destroys what it condemned
+before it returns, so the morgue is empty outside a collection.
 
 **Trace-coupled retirement: one mark claim owes one retirement** (S4-i).
 `beginMinorRetirement()` opens the window *before any shade*, symmetrically
@@ -433,10 +431,6 @@ reasons had gone -- no refcount decrements during destruction (S1), and no
 husk keeping a corpse addressable. What is left is the one-pass release the
 string family has used since S2, over the `doomed & needs_finalizer`
 population.
-
-STW and incremental majors still run two structurally identical destruction
-routines (`destroyCondemned` and `destroyDoomedSlice`); collapsing them is
-S5-b, not a semantic difference.
 
 ## What the gates do and do not cover
 

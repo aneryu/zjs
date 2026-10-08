@@ -11,7 +11,6 @@ const unicode = @import("libs/unicode.zig");
 const number_format = @import("libs/number_format.zig");
 const t = @import("token.zig");
 
-const Atom = atom_module.Atom;
 const AtomTable = atom_module.AtomTable;
 
 pub const Error = error{
@@ -225,7 +224,7 @@ pub const Lexer = struct {
     /// `js_parse_template_part`.
     ///
     /// **Lexer position contract**: must be called with `pos` AT the
-    /// closing `}` byte. The `nextTemplatePartAfterBrace` variant is
+    /// closing `}` byte. The `nextTemplatePartAfterBraceInto` variant is
     /// for the parser case where the `}` has already been advanced past
     /// (i.e. the parser observed `}` as the lookahead token after the
     /// substitution's expression, so `lex.pos` is one byte past `}`).
@@ -240,16 +239,10 @@ pub const Lexer = struct {
         return self.lexTemplate(out, .middle_or_tail);
     }
 
-    /// Like `nextTemplatePart`, but assumes the closing `}` has already
+    /// Like `nextTemplatePartInto`, but assumes the closing `}` has already
     /// been lexed and consumed by the parser's lookahead. Used by the
     /// expression parser, which discovers `}` only via its standard
     /// post-expression lookahead.
-    pub fn nextTemplatePartAfterBrace(self: *Lexer) Error!t.Token {
-        var result: t.Token = undefined;
-        try self.nextTemplatePartAfterBraceInto(&result);
-        return result;
-    }
-
     pub fn nextTemplatePartAfterBraceInto(self: *Lexer, out: *t.Token) Error!void {
         self.mark();
         return self.lexTemplateBody(out, .middle_or_tail, false);
@@ -310,13 +303,20 @@ pub const Lexer = struct {
         return simple_token.parenArrowAfterOpen(self.source, self.pos);
     }
 
+    /// Advance one byte. Lines end at LF, lone CR, the LF of CRLF, or a raw
+    /// U+2028/U+2029 (LineTerminatorSequence; strings and templates may hold
+    /// them raw); columns count code points, so UTF-8 continuation bytes do
+    /// not advance them.
     inline fn bump(self: *Lexer) void {
         const b = self.source[self.pos];
         self.pos += 1;
-        if (b == '\n') {
+        if (b == '\n' or (b == '\r' and (self.pos >= self.source.len or self.source[self.pos] != '\n')) or
+            (b == 0xE2 and self.pos + 1 < self.source.len and self.source[self.pos] == 0x80 and
+                (self.source[self.pos + 1] == 0xA8 or self.source[self.pos + 1] == 0xA9)))
+        {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if (b & 0xC0 != 0x80) {
             self.col += 1;
         }
     }
@@ -407,55 +407,15 @@ pub const Lexer = struct {
     }
 
     fn skipNonAsciiWhiteSpace(self: *Lexer) ?bool {
-        if (self.remaining() >= 2 and self.peek() == 0xC2 and self.peekAt(1) == 0xA0) {
-            self.pos += 2;
+        const space = nonAsciiWhiteSpace(self.source[self.pos..]) orelse return null;
+        self.pos += space.len;
+        if (space.line_terminator) {
+            self.line += 1;
+            self.col = 1;
+        } else {
             self.col += 1;
-            return false;
         }
-        if (self.remaining() >= 3) {
-            const b1 = self.peek();
-            const b2 = self.peekAt(1);
-            const b3 = self.peekAt(2);
-            if (b1 == 0xE1 and b2 == 0x9A and b3 == 0x80) {
-                self.pos += 3;
-                self.col += 1;
-                return false;
-            }
-            if (b1 == 0xE2 and b2 == 0x80) {
-                if (b3 >= 0x80 and b3 <= 0x8A) {
-                    self.pos += 3;
-                    self.col += 1;
-                    return false;
-                }
-                if (b3 == 0xA8 or b3 == 0xA9) {
-                    self.pos += 3;
-                    self.line += 1;
-                    self.col = 1;
-                    return true;
-                }
-                if (b3 == 0xAF) {
-                    self.pos += 3;
-                    self.col += 1;
-                    return false;
-                }
-            }
-            if (b1 == 0xE2 and b2 == 0x81 and b3 == 0x9F) {
-                self.pos += 3;
-                self.col += 1;
-                return false;
-            }
-            if (b1 == 0xE3 and b2 == 0x80 and b3 == 0x80) {
-                self.pos += 3;
-                self.col += 1;
-                return false;
-            }
-            if (b1 == 0xEF and b2 == 0xBB and b3 == 0xBF) {
-                self.pos += 3;
-                self.col += 1;
-                return false;
-            }
-        }
-        return null;
+        return space.line_terminator;
     }
 
     fn isUtf8LineSeparator(self: *Lexer) bool {
@@ -648,6 +608,7 @@ pub const Lexer = struct {
                 self.bump();
                 continue;
             }
+            if (isNonAsciiTriviaStart(self)) break;
             if (c >= 0x80) {
                 try self.consumeIdentCodePoint(&decoded, false);
                 continue;
@@ -719,6 +680,11 @@ pub const Lexer = struct {
 
         if (!leading_dot) {
             try consumeDecDigitsRequired(self);
+            // A LegacyOctalIntegerLiteral ends at its digits: `017.a` is a
+            // member access, not a fraction.
+            if (isLegacyOctalInteger(self.source[start..self.pos])) {
+                return self.finishNumber(out, start, false, 10);
+            }
         }
         if (self.pos < self.source.len and self.peek() == '.') {
             self.bump();
@@ -776,6 +742,7 @@ pub const Lexer = struct {
             const c = self.peek();
             if (c == quote) {
                 const bytes = @constCast(self.source[content_start..self.pos]);
+                if (!std.unicode.wtf8ValidateSlice(bytes)) return error.InvalidUtf8;
                 self.bump();
                 self.emitInto(out, .string, .{ .str = .{
                     .bytes = bytes,
@@ -800,6 +767,10 @@ pub const Lexer = struct {
         while (self.pos < self.source.len) {
             const c = self.peek();
             if (c == quote) {
+                // Validate the source text of the literal, not the decoded
+                // bytes. Both may hold lone surrogates (WTF-8): a
+                // SourceCharacter is any code point, and so is an escape.
+                if (!std.unicode.wtf8ValidateSlice(self.source[content_start..self.pos])) return error.InvalidUtf8;
                 self.bump();
                 const owned = try self.allocator.dupe(u8, buf.items);
                 self.emitInto(out, .string, .{ .str = .{
@@ -872,7 +843,7 @@ pub const Lexer = struct {
             },
             'u' => {
                 // unicode escape (surrogate pair handled below)
-                const cp = try self.consumeUnicodeEscapeAfterBackslash();
+                const cp = try self.consumeUnicodeEscapeAfterBackslash(true);
                 try appendUtf8(out, self.allocator, cp);
             },
             '\n' => {
@@ -933,8 +904,11 @@ pub const Lexer = struct {
     /// Returns the decoded code point. Handles surrogate pair joining
     /// when the next thing is also a `\uXXXX` escape forming a valid
     /// surrogate pair.
-    fn consumeUnicodeEscapeAfterBackslash(self: *Lexer) Error!u21 {
-        if (self.peek() != 'u') return error.InvalidUnicodeEscape;
+    /// `join_surrogates`: strings and templates combine `\uD83D\uDE00` into
+    /// one code point; an identifier escape must denote one code point by
+    /// itself, so a surrogate there stays lone (and is rejected).
+    fn consumeUnicodeEscapeAfterBackslash(self: *Lexer, join_surrogates: bool) Error!u21 {
+        if (self.pos >= self.source.len or self.peek() != 'u') return error.InvalidUnicodeEscape;
         self.bump();
         if (self.pos < self.source.len and self.peek() == '{') {
             self.bump();
@@ -954,7 +928,7 @@ pub const Lexer = struct {
         }
         const cp1 = try self.consumeFourHex();
         // Surrogate pair: \uD800-\uDBFF followed by \uDC00-\uDFFF
-        if (cp1 >= 0xD800 and cp1 <= 0xDBFF and self.remaining() >= 6 and
+        if (join_surrogates and cp1 >= 0xD800 and cp1 <= 0xDBFF and self.remaining() >= 6 and
             self.peek() == '\\' and self.peekAt(1) == 'u' and self.peekAt(2) != '{')
         {
             const second_escape_pos = self.pos;
@@ -978,9 +952,9 @@ pub const Lexer = struct {
     }
 
     fn consumeUnicodeEscape(self: *Lexer) Error!u21 {
-        if (self.peek() != '\\') return error.InvalidUnicodeEscape;
+        if (self.pos >= self.source.len or self.peek() != '\\') return error.InvalidUnicodeEscape;
         self.bump();
-        return self.consumeUnicodeEscapeAfterBackslash();
+        return self.consumeUnicodeEscapeAfterBackslash(false);
     }
 
     fn consumeFourHex(self: *Lexer) Error!u16 {
@@ -1023,6 +997,7 @@ pub const Lexer = struct {
         while (self.pos < self.source.len) {
             const c = self.peek();
             if (c == '`') {
+                if (!std.unicode.wtf8ValidateSlice(raw_buf.items)) return error.InvalidUtf8;
                 const raw = try self.allocator.dupe(u8, raw_buf.items);
                 errdefer self.allocator.free(raw);
                 self.bump();
@@ -1041,6 +1016,7 @@ pub const Lexer = struct {
                 return;
             }
             if (c == '$' and self.peekAt(1) == '{') {
+                if (!std.unicode.wtf8ValidateSlice(raw_buf.items)) return error.InvalidUtf8;
                 const raw = try self.allocator.dupe(u8, raw_buf.items);
                 errdefer self.allocator.free(raw);
                 self.bump();
@@ -1572,15 +1548,27 @@ fn decimalBigIntHasInvalidLeadingZero(lexeme: []const u8) bool {
     return digit_count > 1 and first_digit == '0';
 }
 
+fn isLegacyOctalInteger(lexeme: []const u8) bool {
+    if (lexeme.len < 2 or lexeme[0] != '0') return false;
+    for (lexeme[1..]) |c| {
+        if (c < '0' or c > '7') return false;
+    }
+    return true;
+}
+
+/// A decimal literal with a leading `0` and more digits (Annex B): a
+/// LegacyOctalIntegerLiteral takes no fraction, exponent, or separator; a
+/// NonOctalDecimalIntegerLiteral (`08`, `09.5`) parses as decimal but takes
+/// no separator. Both are errors in strict code. Null means "plain decimal".
 fn legacyOrNonOctalDecimalValue(self: *Lexer, lexeme: []const u8) !?f64 {
     if (lexeme.len < 2 or lexeme[0] != '0') return null;
-    var has_dot_or_exp = false;
+    const integer_end = std.mem.indexOfAny(u8, lexeme, ".eE") orelse lexeme.len;
+    const integer_part = lexeme[0..integer_end];
     var has_separator = false;
     var all_octal = true;
     var digit_count: usize = 0;
-    for (lexeme) |c| {
+    for (integer_part) |c| {
         switch (c) {
-            '.', 'e', 'E' => has_dot_or_exp = true,
             '_' => has_separator = true,
             '0'...'7' => digit_count += 1,
             '8', '9' => {
@@ -1590,15 +1578,19 @@ fn legacyOrNonOctalDecimalValue(self: *Lexer, lexeme: []const u8) !?f64 {
             else => {},
         }
     }
-    if (has_dot_or_exp or digit_count <= 1) return null;
-    if (has_separator or self.is_strict_mode) return error.InvalidNumber;
+    if (digit_count <= 1) return null;
+    if (has_separator) return error.InvalidNumber;
+    if (self.is_strict_mode) return error.LegacyOctalInStrictMode;
     if (!all_octal) return null;
-    var value: u128 = 0;
-    for (lexeme) |c| {
-        if (c < '0' or c > '7') continue;
-        value = value * 8 + (c - '0');
-    }
-    return @floatFromInt(value);
+    if (integer_end != lexeme.len) return error.InvalidNumber;
+    // Any number of digits: parse as `0o<digits>` for the correctly rounded
+    // double instead of accumulating in a fixed-width integer.
+    const prefixed = try self.allocator.alloc(u8, integer_part.len + 2);
+    defer self.allocator.free(prefixed);
+    prefixed[0] = '0';
+    prefixed[1] = 'o';
+    @memcpy(prefixed[2..], integer_part);
+    return parseNumberLiteral(prefixed) orelse error.InvalidNumber;
 }
 
 /// qjs `js_parse_number` -> `js_atof` with `ATOD_ACCEPT_BIN_OCT |
@@ -1607,4 +1599,26 @@ fn legacyOrNonOctalDecimalValue(self: *Lexer, lexeme: []const u8) !?f64 {
 /// BigInt suffix are handled before reaching here.
 fn parseNumberLiteral(lexeme: []const u8) ?f64 {
     return number_format.parseNumberExact(lexeme, 0, .{ .accept_bin_oct = true, .accept_underscores = true });
+}
+
+pub const NonAsciiWhiteSpace = struct { len: u8, line_terminator: bool };
+
+/// The non-ASCII WhiteSpace or LineTerminator (U+2028/U+2029) starting
+/// `bytes`: NBSP, U+1680, U+2000-200A, U+202F, U+205F, U+3000 and ZWNBSP.
+pub fn nonAsciiWhiteSpace(bytes: []const u8) ?NonAsciiWhiteSpace {
+    if (bytes.len >= 2 and bytes[0] == 0xC2 and bytes[1] == 0xA0) return .{ .len = 2, .line_terminator = false };
+    if (bytes.len < 3) return null;
+    const b1 = bytes[0];
+    const b2 = bytes[1];
+    const b3 = bytes[2];
+    const space: NonAsciiWhiteSpace = .{ .len = 3, .line_terminator = false };
+    if (b1 == 0xE1 and b2 == 0x9A and b3 == 0x80) return space;
+    if (b1 == 0xE2 and b2 == 0x80) {
+        if (b3 >= 0x80 and b3 <= 0x8A or b3 == 0xAF) return space;
+        if (b3 == 0xA8 or b3 == 0xA9) return .{ .len = 3, .line_terminator = true };
+    }
+    if (b1 == 0xE2 and b2 == 0x81 and b3 == 0x9F) return space;
+    if (b1 == 0xE3 and b2 == 0x80 and b3 == 0x80) return space;
+    if (b1 == 0xEF and b2 == 0xBB and b3 == 0xBF) return space;
+    return null;
 }

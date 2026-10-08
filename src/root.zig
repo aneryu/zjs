@@ -38,7 +38,6 @@ pub const Call = js_context.Call;
 pub const GCStats = core.GCStats;
 pub const GCDetailedStats = core.GCDetailedStats;
 pub const GCPauseDistribution = core.GCPauseDistribution;
-pub const RuntimeOptions = core.RuntimeOptions;
 pub const MicrotaskPolicy = core.runtime.MicrotaskPolicy;
 pub const MicrotaskScope = core.runtime.MicrotaskScope;
 pub const MicrotaskExceptionHandler = core.runtime.MicrotaskExceptionHandler;
@@ -70,7 +69,6 @@ pub const Atom = core.Atom;
 pub const JSValueHandle = core.JSValueHandle;
 pub const LocalHandle = core.LocalHandle;
 pub const HandleScope = core.HandleScope;
-pub const WeakPersistent = core.WeakPersistent;
 pub const WeakPersistentValue = core.WeakPersistentValue;
 pub const NativePin = core.NativePin;
 pub const JSString = core.JSValue.String;
@@ -79,6 +77,9 @@ pub const SharedArrayBufferRef = core.SharedArrayBufferRef;
 pub const GCPolicy = core.GCPolicy;
 
 pub const EvalOptions = core.context.EvalOptions;
+/// Host policy that resolves and reads module sources; install it with
+/// `Context.setModuleSourceLoader` (QuickJS `JS_SetModuleLoaderFunc`).
+pub const ModuleSourceLoader = core.context.ModuleSourceLoader;
 pub const EvalTiming = core.context.EvalTiming;
 pub const DataPropertyOptions = core.DataPropertyOptions;
 

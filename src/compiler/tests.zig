@@ -13,7 +13,6 @@ const bytecode_mod = @import("../bytecode.zig");
 const zjs_vm = @import("../exec/zjs_vm.zig");
 const object_ops = @import("../exec/object_ops.zig");
 const stack_mod = @import("../exec/stack.zig");
-const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
 const labels = @import("labels.zig");
 const resolve_labels = @import("resolve_labels.zig");
@@ -857,17 +856,15 @@ test "compiler.s2g1: if else empty" {
 
     const b = h.builder();
     try expectV2Stream(b, &.{
-        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.goto, .size = 5, .label = 1 },
-        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 17), b.code_len);
+    try std.testing.expectEqual(@as(u32, 11), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 14);
-    try expectLabel(b, 1, 1, 14);
-    try std.testing.expectEqual(@as(?u32, 14), b.last_opcode_pos);
+    try expectLabel(b, 0, 1, 11);
+    try expectLabel(b, 1, 1, 11);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -883,7 +880,6 @@ test "compiler.s2g1: if else expression bodies" {
 
     const b = h.builder();
     try expectV2Stream(b, &.{
-        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.push_false, .size = 1 },
@@ -891,14 +887,13 @@ test "compiler.s2g1: if else expression bodies" {
         .{ .op = qop.goto, .size = 5, .label = 1 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
-        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 15), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 16);
-    try expectLabel(b, 1, 1, 18);
-    try std.testing.expectEqual(@as(?u32, 18), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 9, 16 });
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 1, 15);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 6, 13 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -913,15 +908,13 @@ test "compiler.s2g1: if without else" {
 
     const b = h.builder();
     try expectV2Stream(b, &.{
-        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
-        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 12), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.code_len);
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
-    try expectLabel(b, 0, 1, 9);
-    try std.testing.expectEqual(@as(?u32, 9), b.last_opcode_pos);
+    try expectLabel(b, 0, 1, 6);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -937,17 +930,14 @@ test "compiler.s2g1: labeled break" {
 
     const b = h.builder();
     try expectV2Stream(b, &.{
-        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
-        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 20), b.code_len);
+    try std.testing.expectEqual(@as(u32, 11), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 20);
-    try expectLabel(b, 1, 1, 17);
+    try expectLabel(b, 0, 1, 11);
+    try expectLabel(b, 1, 1, 11);
     try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
@@ -1123,7 +1113,7 @@ test "compiler.s2g2: classic for empty head" {
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
     try expectLabel(b, 0, 1, 3);
     try expectLabel(b, 1, 1, 17);
-    try expectLabel(b, 2, 0, 12);
+    try expectLabel(b, 2, 0, 9);
     try expectLabel(b, 3, 0, 17);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(?u32, 17), b.last_opcode_pos);
@@ -1157,7 +1147,7 @@ test "compiler.s2g2: classic for test break" {
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
     try expectLabel(b, 0, 1, 3);
     try expectLabel(b, 1, 1, 22);
-    try expectLabel(b, 2, 0, 17);
+    try expectLabel(b, 2, 0, 14);
     try expectLabel(b, 3, 1, 22);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(?u32, 22), b.last_opcode_pos);
@@ -1888,7 +1878,7 @@ test "compiler.s2g4: classic for splices update after body" {
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
     try expectLabel(b, 0, 1, 3);
     try expectLabel(b, 1, 1, 19);
-    try expectLabel(b, 2, 0, 12);
+    try expectLabel(b, 2, 0, 9);
     try expectLabel(b, 3, 0, 19);
     // continue label binds BEFORE the spliced update block.
     try std.testing.expect(b.label_slots[0].flags.backward_target);
@@ -1930,7 +1920,7 @@ test "compiler.s2g4: classic for shifts detached conditional labels" {
     try expectLabel(b, 1, 1, 31);
     try expectLabel(b, 2, 1, 24);
     try expectLabel(b, 3, 1, 25);
-    try expectLabel(b, 4, 0, 12);
+    try expectLabel(b, 4, 0, 9);
     try expectLabel(b, 5, 0, 31);
     // Both conditional-expression binds move by the splice base of six bytes.
     // continue label binds BEFORE the spliced conditional update block.
@@ -1968,7 +1958,7 @@ test "compiler.s2g4: classic for splices update after break" {
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
     try expectLabel(b, 0, 1, 3);
     try expectLabel(b, 1, 1, 24);
-    try expectLabel(b, 2, 0, 17);
+    try expectLabel(b, 2, 0, 14);
     try expectLabel(b, 3, 1, 24);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
@@ -2135,7 +2125,6 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
@@ -2188,7 +2177,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
     try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
-    try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
+    try expectClassFieldsInitBinding(h.rt, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[22..24], .little));
     try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
@@ -2201,7 +2190,6 @@ test "compiler.s2g4: class declaration stores local binding" {
     defer h.deinit();
 
     const class_atom = try h.rt.atoms.internString("C");
-    const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
@@ -2258,7 +2246,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
     try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
-    try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
+    try expectClassFieldsInitBinding(h.rt, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
@@ -2271,7 +2259,6 @@ test "compiler.s2g4: named class method splices runtime definition" {
 
     const empty_atom = try h.rt.atoms.internString("");
     const method_atom = try h.rt.atoms.internString("m");
-    const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
@@ -2345,7 +2332,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
     try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
-    try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
+    try expectClassFieldsInitBinding(h.rt, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
@@ -2420,7 +2407,6 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
@@ -2472,7 +2458,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
     try expectLabel(ctor, 0, 1, 27);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
-    try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
+    try expectClassFieldsInitBinding(h.rt, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[25..27], .little));
     try std.testing.expectEqual(@as(?u32, 31), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
@@ -3524,14 +3510,6 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
     try std.testing.expect(owners.child_functions >= 1);
 }
 
-fn s3bDrainGc(rt: *core.JSRuntime) void {
-    var polls: usize = 0;
-    while (rt.gc.morgue.pending) : (polls += 1) {
-        std.debug.assert(polls < 100_000);
-        _ = rt.pollGC(null, .safepoint) catch break;
-    }
-}
-
 /// Every GC-typed cpool slot in the def tree must be marked by the major that
 /// just ran. `undefined` placeholders (a nested function's reserved slot,
 /// filled only by `installChildFunctionBytecodes`) carry no header and are
@@ -3563,7 +3541,6 @@ fn s3bMajorBeforeFinalize(h: *ExecHarness) anyerror!void {
     // `[]JSValue` that neither the conservative stack scan nor any tracer edge
     // reaches. Only `State.traceCompileValueRoots` can keep them.
     _ = try h.rt.forceGC(null);
-    s3bDrainGc(h.rt);
     var counted: usize = 0;
     try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
     // The RegExp literal's pattern string and its compiled-bytecode string.
@@ -3611,7 +3588,6 @@ test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" 
 
 fn s3bExpectTemplateArraysMarked(h: *ExecHarness) anyerror!void {
     _ = try h.rt.forceGC(null);
-    s3bDrainGc(h.rt);
     var counted: usize = 0;
     try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
     // The frozen cooked array (the raw array hangs off its `raw` property).
@@ -3739,11 +3715,6 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     // in FunctionDef var tables and the Builder's atom-operand ledger, both
     // plain `u32` arrays on the Zig heap that no scan can read.
     _ = try rt.forceGC(null);
-    var polls: usize = 0;
-    while (rt.gc.morgue.pending) : (polls += 1) {
-        std.debug.assert(polls < 100_000);
-        _ = rt.pollGC(null, .safepoint) catch break;
-    }
     const epoch = rt.gc.block_heap.mark_epoch;
 
     for (idents) |name| {
@@ -3819,4 +3790,10 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
 
     ctx.destroy();
     rt.destroy();
+}
+
+/// A class's `<class_fields_init>` binding is a fresh symbol per class.
+fn expectClassFieldsInitBinding(rt: *core.JSRuntime, name: core.atom.Atom) !void {
+    try std.testing.expectEqual(core.atom.AtomKind.symbol, rt.atoms.kind(name));
+    try std.testing.expectEqualStrings("<class_fields_init>", rt.atoms.name(name).?);
 }

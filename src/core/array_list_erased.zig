@@ -215,7 +215,7 @@ test "array_list_erased append matches std ArrayList growth" {
     );
 }
 
-test "array_list_erased append matches Runtime allocation helpers allocator ledger" {
+test "array_list_erased append matches the runtime allocation ledger" {
     const Sample = struct { a: u64, b: u64, c: u32 };
 
     for ([_]bool{ false, true }) |slab_enabled| {
@@ -240,7 +240,7 @@ test "array_list_erased append matches Runtime allocation helpers allocator ledg
             const item = Sample{ .a = i, .b = i + 1, .c = i };
             try std_list.append(typed_gpa, item);
             try append(&erased, erased_gpa, item);
-            try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes, erased_account.diagnostics.allocations.allocated_bytes);
+            try std.testing.expectEqual(typed.allocation_diagnostics.allocated_bytes, erased_account.allocation_diagnostics.allocated_bytes);
             try std.testing.expectEqual(std_list.capacity, erased.capacity);
             try std.testing.expectEqual(std_list.items.len, erased.items.len);
         }
@@ -289,7 +289,7 @@ test "array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit" {
     }
 }
 
-test "array_list_erased toOwnedSlice matches Runtime allocation helpers allocator ledger" {
+test "array_list_erased toOwnedSlice matches the runtime allocation ledger" {
     const Sample = struct { a: u64, b: u64, c: u32 };
 
     for ([_]bool{ false, true }) |slab_enabled| {
@@ -320,7 +320,7 @@ test "array_list_erased toOwnedSlice matches Runtime allocation helpers allocato
         defer typed_gpa.free(std_owned);
         const erased_owned = try toOwnedSlice(&erased, erased_gpa);
         defer erased_gpa.free(erased_owned);
-        try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes, erased_account.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(typed.allocation_diagnostics.allocated_bytes, erased_account.allocation_diagnostics.allocated_bytes);
         try std.testing.expectEqual(std_owned.len, erased_owned.len);
         try std.testing.expectEqualSlices(Sample, std_owned, erased_owned);
         try std.testing.expectEqual(@as(usize, 0), std_list.capacity);

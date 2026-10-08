@@ -240,6 +240,12 @@ const max_format_digits = [radix_max - 1]u8{
     14, 14, 13, 13, 13, 13, 13, 13, 13, 12, 12, 12, 12, 12, 12, 12, 12,
 };
 
+/// Significant digits `scanNumber` keeps. Past the limit, power-of-two radixes
+/// fold the rest into a sticky bit (exact). Other radixes drop them: radix 10
+/// is allowed to by RoundMVResult (more than 20 significant digits; the
+/// result is one of its two permitted roundings) and parseInt's
+/// implementation-approximated cases, the others by parseInt's approximation
+/// clause. V8 rounds exactly, so 40+ digit inputs can differ from node.
 const max_parse_digits = [radix_max - 1]u8{
     64, 80, 32, 55, 49, 45, 21, 40, 38, 37, 35, 34,
     33, 32, 16, 31, 30, 30, 29, 29, 28, 28, 27, 27,

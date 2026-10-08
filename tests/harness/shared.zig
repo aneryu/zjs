@@ -44,6 +44,20 @@ pub fn expectPrints(source: []const u8, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, output.buffered());
 }
 
+/// `expectPrints` for a TypeScript script (`f<T>(x)` and `x!` take their
+/// TypeScript meaning only in `.ts` sources).
+pub fn expectPrintsTs(source: []const u8, expected: []const u8) !void {
+    const js = sharedTestEngine();
+    defer endSharedTest();
+
+    var output_buffer: [8192]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileWithOutputMode(source, &output, .script, "test.ts");
+
+    try std.testing.expect(result.is(.undefined_value));
+    try std.testing.expectEqualStrings(expected, output.buffered());
+}
+
 var shared_engine_storage: ?TestEngine = null;
 var shared_engine_baseline_property_count: usize = 0;
 var shared_engine_baseline_shape_prop_count: usize = 0;
@@ -138,9 +152,9 @@ pub fn sharedTestEngine() *TestEngine {
             }
         }
         _ = eng.runtime.collectForTest();
-        shared_engine_baseline_allocation_count = eng.runtime.diagnostics.allocations.allocation_count;
-        shared_engine_baseline_allocated_bytes = eng.runtime.diagnostics.allocations.allocated_bytes;
-        shared_engine_baseline_module_count = eng.context.modules.count;
+        shared_engine_baseline_allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
+        shared_engine_baseline_allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
+        shared_engine_baseline_module_count = eng.context.modules.count();
         registerSharedEngineProcessTeardown();
     }
     return &shared_engine_storage.?;
@@ -197,9 +211,9 @@ pub fn endSharedTest() void {
     const eng = if (shared_engine_storage) |*e| e else return;
     resetSharedEngineAfterTest(eng);
 
-    const allocation_count = eng.runtime.diagnostics.allocations.allocation_count;
-    const allocated_bytes = eng.runtime.diagnostics.allocations.allocated_bytes;
-    const module_count = eng.context.modules.count;
+    const allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
+    const allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
+    const module_count = eng.context.modules.count();
     const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
     const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
     const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
@@ -289,17 +303,9 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         // state and trace the wrong union arm. Making the restore atomic
         // w.r.t. GC keeps the slot/flag pair consistent throughout.
         const budget = &eng.runtime.gc.heap_budget;
-        const saved_probe = budget.probe;
-        const saved_probe_ctx = budget.probe_ctx;
         const saved_suspend = budget.suspend_alloc_notify;
-        budget.probe = null;
-        budget.probe_ctx = null;
         budget.suspend_alloc_notify = true;
-        defer {
-            budget.probe = saved_probe;
-            budget.probe_ctx = saved_probe_ctx;
-            budget.suspend_alloc_notify = saved_suspend;
-        }
+        defer budget.suspend_alloc_notify = saved_suspend;
 
         // Property compaction may have shifted live baseline entries and shrunk
         // the global's value buffer. Restore capacity, then rebuild both

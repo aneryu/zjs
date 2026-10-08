@@ -4,17 +4,16 @@
 //! that read window, and returned JSValues follow the caller's root contract. Realm-aware
 //! paths perform observable ToString and create named URI errors, while the
 //! narrow primitive helpers remain usable without a realm. The algorithms map
-//! to QuickJS URIError/decoder/encoder code at quickjs.c,
+//! to QuickJS URIError/decoder/encoder code.
 
 const core = @import("../core/root.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const exceptions = @import("exception_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const string_ops = @import("string_ops.zig");
 
-const HostError = exceptions.HostError;
+const HostError = exception_ops.HostError;
 
 /// Domain-local ids for the legacy `escape`/`unescape` globals, shared through
 /// `core/uri.zig`. The four
@@ -29,13 +28,12 @@ const AppendStringError = core.value_string.AppendStringError;
 /// Throw a `URIError` with `message` (mirrors qjs `js_throw_URIError`,
 /// quickjs.c): construct the error value, set the context exception, and
 /// return the `error.URIError` sentinel. The exception value is preserved by the
-/// host-call boundary's `hasException()` check, so the specific message survives
-/// rather than being replaced by the coarse "expecting hex digit" fallback. On
-/// the bare-runtime path (no realm global) there is no error prototype to build
+/// host-call boundary's `hasException()` check, so the specific message survives.
+/// On the bare-runtime path (no realm global) there is no error prototype to build
 /// against, so the bare `error.URIError` sentinel is returned unchanged.
 fn throwUriErrorMessage(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) HostError {
     const active_global = global orelse return error.URIError;
-    const error_value = exception_ops.createNamedError(ctx, active_global, "URIError", message) catch |err| return err;
+    const error_value = try exception_ops.createNamedError(ctx, active_global, "URIError", message);
     _ = ctx.throwValue(error_value);
     return error.URIError;
 }
@@ -147,12 +145,8 @@ fn uriBody(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.J
     };
 }
 
-// `FourByteEscapeUnits` + the single-four-byte-escape probe relocated to
-// engine core (`core/uri.zig`) in Phase 6b-3 STEP 5B so exec's
-// `decodeURI(...) === String.fromCharCode(...)` fusion can reach it without
-// naming this builtin; re-exported here for the decode bodies below.
-pub const FourByteEscapeUnits = core.uri.FourByteEscapeUnits;
-pub const decodeSingleFourByteEscapeUnits = core.uri.decodeSingleFourByteEscapeUnits;
+// The single-four-byte-escape probe lives in engine core (`core/uri.zig`) so
+// exec's `decodeURI(...) === String.fromCharCode(...)` fusion can reach it.
 const decodeSingleFourByteEscapeUnitsFromAscii = core.uri.decodeSingleFourByteEscapeUnitsFromAscii;
 const fastHexPair = core.uri.fastHexPair;
 
@@ -161,22 +155,13 @@ const fastHexPair = core.uri.fastHexPair;
 // STEP 2; re-exported here unchanged.
 pub const methodId = core.host_function.builtin_method_id_lookup.uri.methodId;
 
-fn uriHexDigitValue(unit: u32) ?u8 {
-    return switch (unit) {
-        '0'...'9' => @intCast(unit - '0'),
-        'a'...'f' => @intCast(unit - 'a' + 10),
-        'A'...'F' => @intCast(unit - 'A' + 10),
-        else => null,
-    };
-}
-
 fn uriUnitCount(bytes: []const u8, unit_size: u8) usize {
     std.debug.assert(unit_size == 1 or unit_size == 2);
     std.debug.assert(bytes.len % @as(usize, unit_size) == 0);
     return bytes.len / unit_size;
 }
 
-inline fn uriUnitAt(bytes: []const u8, unit_size: u8, index: usize) u32 {
+inline fn uriUnitAt(bytes: []const u8, unit_size: u8, index: usize) u16 {
     if (unit_size == 1) return bytes[index];
     const ptr: *const u16 = @ptrCast(@alignCast(bytes.ptr + index * 2));
     return ptr.*;
@@ -199,8 +184,8 @@ fn uriHexDecodeAt(
     const n = uriUnitCount(bytes, unit_size);
     if (k >= n or uriUnitAt(bytes, unit_size, k) != '%') return throwUriErrorMessage(ctx, global, "expecting %");
     if (k + 3 > n) return throwUriErrorMessage(ctx, global, "expecting hex digit");
-    const hi = uriHexDigitValue(uriUnitAt(bytes, unit_size, k + 1)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
-    const lo = uriHexDigitValue(uriUnitAt(bytes, unit_size, k + 2)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const hi = unicode.asciiHexDigitValueUnit(uriUnitAt(bytes, unit_size, k + 1)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const lo = unicode.asciiHexDigitValueUnit(uriUnitAt(bytes, unit_size, k + 2)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
     return (hi << 4) | lo;
 }
 
@@ -289,8 +274,7 @@ noinline fn decodeUriUnits(
     return (try core.string.String.createUtf16(rt, out.items)).value();
 }
 
-/// QuickJS source map: global URI encode/decode functions in quickjs.c. This
-/// is the current narrow URI subset used by transitional `uri_call` bytecode.
+/// QuickJS source map: global URI encode/decode functions in quickjs.c.
 /// `global` is the realm global used to build specific `URIError` messages
 /// (`js_throw_URIError`); on bare runtimes it is null and the bare
 /// `error.URIError` sentinel is surfaced instead.
@@ -423,7 +407,7 @@ fn decodeAsciiBytes(ctx: *core.JSContext, global: ?*core.Object, bytes: []const 
 }
 
 fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSValue {
-    const units = try decodeSingleFourByteEscapeUnitsFromAscii(bytes) orelse return null;
+    const units = decodeSingleFourByteEscapeUnitsFromAscii(bytes) orelse return null;
     const cached = try rt.recentTwoUnitString(units.high, units.low);
     return cached.value();
 }
@@ -517,6 +501,7 @@ fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.Arra
         var high: ?u16 = null;
         while (iterator.next()) |chunk| {
             for (0..chunk.len()) |index| {
+                try rt.pollNativeWork();
                 const unit: u16 = switch (chunk) {
                     .latin1 => |bytes| bytes[index],
                     .utf16 => |units| units[index],
@@ -605,6 +590,7 @@ fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(
     const rt = ctx.runtime;
     var index: usize = 0;
     while (index < bytes.len) {
+        try ctx.runtime.pollNativeWork();
         if (bytes[index] != '%') {
             try out.append(rt.nativeAllocator(), bytes[index]);
             index += 1;
@@ -677,6 +663,7 @@ fn decodeBytesInto(ctx: *core.JSContext, global: ?*core.Object, dest: []u8, byte
     var index: usize = 0;
     var len: usize = 0;
     while (index < bytes.len) {
+        try ctx.runtime.pollNativeWork();
         if (bytes[index] != '%') {
             dest[len] = bytes[index];
             len += 1;
@@ -749,7 +736,7 @@ fn isSurrogate(codepoint: u21) bool {
 }
 
 fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) AppendStringError!void {
-    if (value.is(.symbol)) return error.TypeError;
+    if (value.is(.symbol)) return error.SymbolToString;
     if (value.isString()) return appendStringCodeUnits(rt, out, value);
     if (value.is(.object)) {
         const header = value.refHeader() orelse return;

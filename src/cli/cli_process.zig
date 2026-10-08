@@ -1,7 +1,7 @@
 //! Process-boundary helpers shared by the two CLI roots.
 //!
-//! `zjs.zig` and `run_test262.zig` are separate binaries with separate roots,
-//! which is how they ended up with byte-identical copies of both of these.
+//! `zjs.zig` and `run_test262.zig` are separate binaries with separate roots;
+//! both use these.
 
 const std = @import("std");
 
@@ -20,10 +20,13 @@ pub fn printError(io: std.Io, message: []const u8) !void {
 }
 
 /// Same flush contract as `printError`, with the pieces already rendered.
+/// An unwritable stderr is not an error of its own: there is nowhere left to
+/// report it, and the caller's exit status must not turn into stdout's
+/// SIGPIPE status.
 pub fn printErrorJoin(io: std.Io, parts: []const []const u8) !void {
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    for (parts) |part| try stderr.writeAll(part);
-    try stderr.flush();
+    for (parts) |part| stderr.writeAll(part) catch return;
+    stderr.flush() catch return;
 }

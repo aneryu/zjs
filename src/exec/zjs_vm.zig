@@ -1,11 +1,6 @@
-//! QuickJS-aligned VM dispatcher for bytecode produced by
-//! `parser.zig`, tracked by the current semantic
-//! alignment plans.
-//!
-//! This is the only VM dispatcher after the parser-rewrite M2 swap.
-//!
-//! The dispatcher handles QuickJS-format opcodes emitted by the parser after
-//! the bytecode pipeline has removed temporary opcodes.
+//! VM entry points: build the root frame and call environment for a
+//! FunctionBytecode and hand it to the dispatch loop (`tailcall_dispatch.zig`).
+//! The bytecode is QuickJS-format, after the pipeline removed temporary opcodes.
 
 const builtin = @import("builtin");
 const atomics_ops = @import("atomics_ops.zig");
@@ -16,31 +11,15 @@ const core = @import("../core/root.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
-const vm_call = @import("vm_opcodes.zig");
+const vm_opcodes = @import("vm_opcodes.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const exceptions = @import("exception_ops.zig");
-const vm_gen_async = @import("vm_opcodes.zig");
 const inline_calls = @import("inline_calls.zig");
-const active_invocation_trace = if (core.runtime.value_root_frames_enabled)
-    @import("inline_calls.zig")
-else
-    struct {};
-const vm_property_globals = @import("vm_property.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
 const array_ops = @import("array_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const HostError = exceptions.HostError;
-
-/// Execute QuickJS-format bytecode.
-pub fn run(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-) !core.JSValue {
-    return runWithOutput(ctx, stack, function, null);
-}
+const HostError = exception_ops.HostError;
 
 pub fn runWithOutput(
     ctx: *core.JSContext,
@@ -48,12 +27,11 @@ pub fn runWithOutput(
     function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
 ) !core.JSValue {
-    // Modules keep their explicit owner/state machine. Every ordinary FB,
-    // including a borrowed embedding/test input, enters through a real root
-    // function object. A borrowed caller duplicates at this outer boundary;
-    // the closure2 attach itself still consumes exactly one owned reference
-    // without an internal dup/free round trip.
-    if (!function.isModule()) {
+    // Every ordinary FB, including a borrowed embedding/test input, enters
+    // through a real root function object. Modules run through their record's
+    // owner/state machine (module.zig), never through here.
+    if (function.isModule()) return error.InvalidBytecode;
+    {
         const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
         const global_object = try contextGlobal(realm);
         const owned_function = core.JSValue.functionBytecode(@constCast(&function.header));
@@ -84,27 +62,8 @@ pub fn runWithOutput(
             return err;
         };
     }
-
-    const global_object = try contextGlobal(ctx);
-    const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(.{
-        .ctx = ctx,
-        .stack = stack,
-        .function = function,
-        .initial_this_value = this_value,
-        .output = output,
-        .global = global_object,
-        .break_var_ref_cycles_on_exit = true,
-    });
 }
 
-/// Lazily build and cache the per-context global object. Subsequent
-/// eval calls reuse this object, matching QuickJS semantics where
-/// `JS_Eval` shares the per-context globals across invocations.
-/// Building the global object eagerly installs every standard
-/// constructor (Object, Array, String, ..., 43 specs and ~362
-/// methods) plus generic host helpers such as `print` and `console`;
-/// keeping it cached avoids paying that cost on every eval call.
 /// Register-only fast arm of `contextGlobal` for the embedder call path: a
 /// live context's global needs no bootstrap check.
 pub inline fn contextGlobalFast(ctx: *core.JSContext) !*core.Object {
@@ -114,6 +73,12 @@ pub inline fn contextGlobalFast(ctx: *core.JSContext) !*core.Object {
     return contextGlobal(ctx);
 }
 
+/// Lazily build and cache the per-context global object. Subsequent
+/// eval calls reuse this object, matching QuickJS semantics where
+/// `JS_Eval` shares the per-context globals across invocations.
+/// Building the global object eagerly installs every standard
+/// constructor plus generic host helpers such as `print` and `console`;
+/// keeping it cached avoids paying that cost on every eval call.
 pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     if (ctx.global) |existing| {
         if (!ctx.isLive()) try ctx.publishLive();
@@ -123,7 +88,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ctx.runtime,
         core.class.ids.global_object,
         null,
-        call_mod.contextGlobalOwnPropertyCapacity(ctx.runtime),
+        call_mod.contextGlobalOwnPropertyCapacity(),
     );
     _ = try global_object.ensureGlobalPayload(ctx.runtime);
     // Associate the global while the Realm remains construction-only. Bootstrap
@@ -198,10 +163,9 @@ fn resolveSuppliedRootCapture(
     return supplied.cells[index];
 }
 
-/// Compatibility entry for embedders/tests that execute a borrowed canonical
-/// FB with explicit args/captures. It now constructs the same real root
-/// function/current-function used by parser.Result consumers; the bare-frame
-/// cell builder remains reachable only through the W1e legacy adapter.
+/// Entry for embedders/tests that execute a borrowed canonical FB with
+/// explicit args/captures. It constructs the same real root
+/// function/current-function used by parser.Result consumers.
 fn runCanonicalRootWithArgs(env: CallEnv) HostError!core.JSValue {
     const ctx = env.ctx;
     const function = env.function;
@@ -250,8 +214,7 @@ fn runCanonicalRootWithArgs(env: CallEnv) HostError!core.JSValue {
 
 const argumentsNeedsOriginalSnapshot = frame_mod.argumentsNeedsOriginalSnapshot;
 
-/// Per-invocation interpreter entry state. Replaces the former 30-parameter
-/// `runWithArgsState` surface; eval/generator/module-await flags live here.
+/// Per-invocation frame storage prepared before entry.
 pub const PreparedEntryFrame = struct {
     slab: frame_mod.FrameSlab,
     need_original_args: bool,
@@ -280,9 +243,6 @@ pub const CallEnv = struct {
     /// but false in nested ordinary function calls.
     direct_eval_vars_reach_global: bool = false,
     is_eval_code: bool = false,
-    /// The real root function object already completed closure2 pass 1 and
-    /// installed its final GLOBAL_DECL cells. Legacy bare-root entries leave
-    /// this false and perform both steps inside runWithArgsState.
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
     prepared_entry_frame: ?*const PreparedEntryFrame = null,
@@ -325,7 +285,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         // resident entries that do not already carry an outer guard.
         var precharged = env;
         precharged.global = env.ctx.global orelse env.global;
-        const call_depth_guard = try vm_call.enterCallDepth(
+        const call_depth_guard = try vm_opcodes.enterCallDepth(
             precharged.ctx,
             precharged.global,
             0,
@@ -353,14 +313,14 @@ pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
     const planned_stack_bytes = if (env.generator_state != null)
         0
     else
-        vm_call.bytecodeFrameAllocaSize(
+        vm_opcodes.bytecodeFrameAllocaSize(
             env.function,
             env.args.len,
             env.copy_argv,
         );
-    var call_depth_guard: ?vm_call.CallDepthGuard = null;
+    var call_depth_guard: ?vm_opcodes.CallDepthGuard = null;
     if (!env.call_depth_precharged) {
-        call_depth_guard = try vm_call.enterCallDepth(
+        call_depth_guard = try vm_opcodes.enterCallDepth(
             env.ctx,
             env.global,
             planned_stack_bytes,
@@ -387,7 +347,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
     if (env.generator_state == null and
         env.current_function_value.is(.undefined_value)) return error.InvalidBytecode;
 
-    // Frame storage (locals/env.args/env.var_refs) may be carved from the VM stack
+    // Frame storage (locals/args/var_refs) may be carved from the VM stack
     // arena; reclaim the watermark after the frame has released its values.
     const frame_arena_mark = env.ctx.runtime.vm_stack.mark();
     defer env.ctx.runtime.vm_stack.restore(frame_arena_mark);
@@ -415,7 +375,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         // Runtime teardown and host-explicit cycle removal keep the
         // declared-roots contract; this exit seam is the engine-active case.
         if (env.break_var_ref_cycles_on_exit)
-            _ = env.ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+            _ = env.ctx.runtime.collectFull(null, .engine_active) catch {};
     }
     defer {
         if (env.generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
@@ -453,10 +413,8 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         .machine = &machine,
         .current_backtrace_view = &root_backtrace_view,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        invocation.header = .{ .traceRoots = active_invocation_trace.traceRoots };
-        invocation.previous = inline_calls.activeInvocation(env.ctx.runtime);
-    }
+    invocation.header = .{ .traceRoots = inline_calls.traceRoots };
+    invocation.previous = inline_calls.activeInvocation(env.ctx.runtime);
     const previous_invocation = env.ctx.runtime.active_invocation;
     env.ctx.runtime.active_invocation = &invocation;
     defer env.ctx.runtime.active_invocation = previous_invocation;
@@ -472,8 +430,8 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         });
     }
     // A generator/async resume with a resident frame immediately frees any slab built
-    // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig), so
-    // allocating + initializing a throwaway slab + re-duping env.args + rebuilding env.var_refs is
+    // here and swaps in the generator's PRESERVED buffers (vm_opcodes.zig), so
+    // allocating + initializing a throwaway slab + copying args + rebuilding var_refs is
     // pure waste — qjs allocates the generator frame ONCE at creation and resumes on it
     // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c). `has_frame`, not pc, is the
     // discriminator: internal marker-less generators have a valid resident frame at pc 0.
@@ -483,7 +441,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
     // parks it in the hidden arguments local, which is part of the preserved locals window.
     // Rebuilding `original_args` on every started resume therefore created a second snapshot
     // only for resumeExecutionStateRaw to release it immediately. The preserved buffers cover
-    // locals/env.args/env.var_refs for every started resume; the only remaining initArguments env.output
+    // locals/args/var_refs for every started resume; the only remaining initArguments output
     // is the mapped-arguments count (frame.args is already the preserved buffer), which we
     // set directly — identical to what initArguments would store (`actual_arg_count = env.args.len`).
     const skip_resume_slab = if (env.generator_state) |gen| gen.generatorExecutionState().has_frame else false;
@@ -492,22 +450,21 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
     }
 
     frame_storage.pc = env.initial_pc;
-    const resume_state = try vm_gen_async.resumeExecutionState(env.ctx, env.stack, env.function, &frame_storage, env.generator_state, env.resume_value);
+    const resume_state = try vm_opcodes.resumeExecutionState(env.ctx, env.stack, env.function, &frame_storage, env.generator_state, env.resume_value);
     // If execution completes or fails, clear the payload's non-owning aliases
     // before the live Frame/Stack defers release their buffers. A yield/await
     // republished ownership already, so this is a no-op on suspension.
-    defer vm_gen_async.finishExecutionStateRun(env.ctx.runtime, env.stack, &frame_storage, env.generator_state);
+    defer vm_opcodes.finishExecutionStateRun(env.ctx.runtime, env.stack, &frame_storage, env.generator_state);
     // A parked frame already passed this full-capacity guard on its creation
     // run, and GeneratorExecutionState retains (or grows) that same backing.
     // QuickJS likewise resumes its preallocated stack directly.
     if (!skip_resume_slab) try reserveEntryFrameCapacity(env.stack, env.function);
-    catch_target_storage = try vm_gen_async.completeResumeState(env.ctx, env.output, env.global, env.stack, env.function, &frame_storage, resume_state, env.resume_value);
+    catch_target_storage = try vm_opcodes.completeResumeState(env.ctx, env.output, env.global, env.stack, env.function, &frame_storage, resume_state, env.resume_value);
     // Markerless internal generator bytecode has no OP_initial_yield boundary to
     // execute toward. Park its fully initialized frame before dispatch at pc 0.
     if (env.stop_before_pc) |stop_pc| {
-        if (frame_storage.pc == stop_pc) {
-            if (try vm_gen_async.stopBeforePc(env.ctx, env.stack, &frame_storage, env.generator_state, catch_target_storage, stop_pc)) |stopped| return stopped;
-        }
+        // stopBeforePc itself returns null unless frame.pc == stop_pc.
+        if (try vm_opcodes.stopBeforePc(env.ctx, env.stack, &frame_storage, env.generator_state, catch_target_storage, stop_pc)) |stopped| return stopped;
     }
 
     while (true) {
@@ -598,12 +555,12 @@ noinline fn initFreshEntryFrame(
         .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
     };
     if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.vm_stack_frame_storage, slab.stack);
+        entry_stack.* = stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.stack.frame_storage, slab.stack);
     }
-    try vm_call.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
+    try vm_opcodes.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
     try frame_storage.initArguments(ctx.runtime, frame_arena, args, need_original_args, frame_windows);
     if (frame_windows.open_var_refs) |open_refs| try frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(ctx.runtime, frame_arena);
-    try vm_call.initFrameVarRefs(ctx, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
+    try vm_opcodes.initFrameVarRefs(ctx, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
 }
 
 /// Tail-call dispatcher entry: publish the Machine's current level into its
@@ -719,14 +676,7 @@ fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *con
 
 // ---- Helpers ----
 // ---- Shared helper aliases ----
-pub const arraySortCall = array_ops.arraySortCall;
-pub const arrayByCopyCall = array_ops.arrayByCopyCall;
 pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
 pub const cleanupAtomicsWaitersForContext = atomics_ops.cleanupAtomicsWaitersForContext;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 pub const getValueProperty = object_ops.getValueProperty;
-
-// `engine eval host globals and throw intrinsic tear down cleanly` was relocated
-// to `tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
-// standard globals through `rt.installStandardGlobals`, with the installer
-// registered through the runtime bootstrap seam.

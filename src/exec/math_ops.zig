@@ -8,14 +8,12 @@ const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");
 const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const exceptions = @import("exception_ops.zig");
 const value_ops = @import("value_ops.zig");
 
-const HostError = exceptions.HostError;
-const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
-const toUint32Number = coercion_ops.toUint32Number;
+const HostError = exception_ops.HostError;
+const toPrimitiveForNumber = value_ops.toPrimitiveForNumber;
+const toUint32Number = value_ops.toUint32Number;
 
 pub const PI = std.math.pi;
 pub const E = std.math.e;
@@ -26,7 +24,7 @@ pub const LOG10E = std.math.log10e;
 pub const SQRT1_2 = std.math.sqrt1_2;
 pub const SQRT2 = std.math.sqrt2;
 
-pub const sum_precise_method_id: u32 = 37;
+const sum_precise_method_id: u32 = 37;
 
 /// Declaration table: one entry per `Math.*` method. `id` doubles as the
 /// dispatch `magic` for the shared numeric handler (QuickJS uses the same
@@ -113,7 +111,7 @@ noinline fn mathMinMaxDirect(
 /// `js_fmin` signed-zero rules, returning through `JS_NewFloat64` (int-valued
 /// doubles collapse back to int32, as `numberToValue` does). Any other
 /// argument type returns null so the caller takes the ToNumber path.
-pub fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSValue {
+fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSValue {
     if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
     var index: usize = 1;
     var result: f64 = undefined;
@@ -146,21 +144,7 @@ pub fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSVa
     return value_ops.numberToValue(result);
 }
 
-fn mathEntryWithHandler(
-    comptime name: []const u8,
-    comptime length: u8,
-    comptime id: u32,
-    comptime handler: anytype,
-) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = id,
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(handler),
-    };
-}
+const mathEntryWithHandler = builtin_dispatch.entryWithHandler;
 
 fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
@@ -190,15 +174,21 @@ fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
     // Keep the illegal-id check at the table site so a new unary entry
     // still fails at compile time. The outlined walk takes `id` at
     // runtime so the leftover typed copies can share one body.
-    _ = switch (id) {
-        1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 => {},
-        else => @compileError("unsupported unary Math cproto id"),
-    };
+    if (comptime !isUnaryId(id)) @compileError("unsupported unary Math cproto id");
     return &struct {
         fn invoke(value: f64) f64 {
             return mathUnaryInvoke(id, value);
         }
     }.invoke;
+}
+
+/// Ids whose Math function takes one number and has no other effect; the
+/// single table for them is `mathUnaryInvoke`.
+fn isUnaryId(id: u32) bool {
+    return switch (id) {
+        1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 => true,
+        else => false,
+    };
 }
 
 noinline fn mathUnaryInvoke(id: u32, value: f64) f64 {
@@ -215,11 +205,11 @@ noinline fn mathUnaryInvoke(id: u32, value: f64) f64 {
         14 => std.math.acos(value),
         15 => std.math.asin(value),
         16 => std.math.atan(value),
-        18 => std.math.acosh(value),
+        18 => mathAcosh(value),
         19 => std.math.asinh(value),
         20 => std.math.atanh(value),
         21 => @log(value),
-        22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
+        22 => @trunc(value),
         23 => std.math.cbrt(value),
         25 => std.math.cosh(value),
         26 => std.math.expm1(value),
@@ -247,10 +237,6 @@ fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
     }.invoke;
 }
 
-/// Shared record handler for the numeric `Math.*` methods (ids 1..36).
-/// With a realm global the arguments take the full spec ToNumber coercion
-/// path; without one (bare-runtime callers) the primitive-only `call`
-/// fallback below preserves the legacy host-path behavior.
 /// qjs `xorshift64star`.
 fn xorshift64star(state: *u64) u64 {
     var x = state.*;
@@ -269,6 +255,10 @@ fn mathRandom(ctx: *core.JSContext) f64 {
     return @as(f64, @bitCast(bits)) - 1.0;
 }
 
+/// Shared record handler for the numeric `Math.*` methods (ids 1..36).
+/// With a realm global the arguments take the full spec ToNumber coercion
+/// path; without one (bare-runtime callers) the primitive-only `call`
+/// fallback below preserves the legacy host-path behavior.
 fn mathOpCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -280,14 +270,14 @@ fn mathOpCall(
         // Explicit bare-runtime algorithmic reuse. It has no callable whose
         // realm could provide coercion or exception intrinsics.
         if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx));
-        const number = call(host_call.magic, host_call.args) catch return error.TypeError;
+        const number = try call(host_call.magic, host_call.args);
         return value_ops.numberToValue(number);
     }
     const global = if (host_call.func_obj != null) blk: {
         const realm = try builtin_dispatch.callableRealm(host_call);
         std.debug.assert(realm.realm == host_call.ctx);
         break :blk realm.global;
-    } else host_call.global orelse return error.TypeError;
+    } else host_call.global.?; // both null returned above
     return preparedOpCall(host_call.ctx, host_call.output, global, host_call.magic, host_call.args);
 }
 
@@ -301,7 +291,7 @@ fn mathOpCall(
 /// `pub` for that opcode-helper contract, not for a current out-of-file caller.
 /// Always invoked with a realm `global`; the bare-runtime fallback stays in
 /// `mathOpCall`.
-pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, id: u32, args: []const core.JSValue) HostError!core.JSValue {
+fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, id: u32, args: []const core.JSValue) HostError!core.JSValue {
     const number = switch (id) {
         1 => @abs(try mathArg(ctx, output, global, args, 0)),
         2 => @floor(try mathArg(ctx, output, global, args, 0)),
@@ -312,61 +302,35 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         7 => try mathMinMax(ctx, output, global, args, false),
         8 => try mathMinMax(ctx, output, global, args, true),
         9 => mathRandom(ctx),
-        10 => exp(try mathArg(ctx, output, global, args, 0)),
-        11 => @sin(try mathArg(ctx, output, global, args, 0)),
-        12 => @cos(try mathArg(ctx, output, global, args, 0)),
-        13 => @tan(try mathArg(ctx, output, global, args, 0)),
-        14 => std.math.acos(try mathArg(ctx, output, global, args, 0)),
-        15 => std.math.asin(try mathArg(ctx, output, global, args, 0)),
-        16 => std.math.atan(try mathArg(ctx, output, global, args, 0)),
         17 => std.math.atan2(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
-        18 => std.math.acosh(try mathArg(ctx, output, global, args, 0)),
-        19 => std.math.asinh(try mathArg(ctx, output, global, args, 0)),
-        20 => std.math.atanh(try mathArg(ctx, output, global, args, 0)),
-        21 => @log(try mathArg(ctx, output, global, args, 0)),
-        22 => blk: {
-            const a = try mathArg(ctx, output, global, args, 0);
-            break :blk if (std.math.isNan(a) or a == 0 or !std.math.isFinite(a)) a else if (a < 0) -@floor(@abs(a)) else @floor(a);
-        },
-        23 => std.math.cbrt(try mathArg(ctx, output, global, args, 0)),
         24 => @as(f64, @floatFromInt(@clz(toUint32Number(try mathArg(ctx, output, global, args, 0))))),
-        25 => std.math.cosh(try mathArg(ctx, output, global, args, 0)),
-        26 => std.math.expm1(try mathArg(ctx, output, global, args, 0)),
-        27 => @as(f64, @floatCast(@as(f16, @floatCast(try mathArg(ctx, output, global, args, 0))))),
-        28 => @as(f64, @floatCast(@as(f32, @floatCast(try mathArg(ctx, output, global, args, 0))))),
         29 => try mathHypot(ctx, output, global, args),
         30 => @as(f64, @floatFromInt(mathImul(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)))),
-        31 => std.math.log1p(try mathArg(ctx, output, global, args, 0)),
-        32 => log2(try mathArg(ctx, output, global, args, 0)),
-        33 => @log10(try mathArg(ctx, output, global, args, 0)),
-        34 => mathSign(try mathArg(ctx, output, global, args, 0)),
-        35 => std.math.sinh(try mathArg(ctx, output, global, args, 0)),
-        36 => std.math.tanh(try mathArg(ctx, output, global, args, 0)),
-        else => return error.TypeError,
+        else => if (isUnaryId(id)) mathUnaryInvoke(id, try mathArg(ctx, output, global, args, 0)) else return error.TypeError,
     };
     return value_ops.numberToValue(number);
 }
 
-pub fn mathArg(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, index: usize) !f64 {
+fn mathArg(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, index: usize) !f64 {
     if (index >= args.len) return std.math.nan(f64);
     return toMathNumber(ctx, output, global, args[index]);
 }
 
-pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
+fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
     if (primitive.isBigInt()) {
-        _ = exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
         return error.TypeError;
     }
     if (primitive.is(.symbol)) {
-        _ = exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert symbol to number") catch |err| return err;
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert symbol to number");
         return error.TypeError;
     }
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    return value_ops.numberValue(number_value) orelse std.math.nan(f64);
+    return value_ops.numberValue(number_value).?;
 }
 
-pub fn mathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, is_max: bool) !f64 {
+fn mathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, is_max: bool) !f64 {
     if (args.len == 2) {
         const a_val = args[0];
         const b_val = args[1];
@@ -401,7 +365,7 @@ pub fn mathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.O
     return result;
 }
 
-pub fn mathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
+fn mathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
     var result = if (is_max) -std.math.inf(f64) else std.math.inf(f64);
     for (args) |arg| {
         const number = primitiveMathNumber(arg) orelse return null;
@@ -417,7 +381,7 @@ pub fn mathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
     return result;
 }
 
-pub fn primitiveMathNumber(value: core.JSValue) ?f64 {
+fn primitiveMathNumber(value: core.JSValue) ?f64 {
     if (value.is(.int)) return @floatFromInt(value.as(.int).?);
     if (value.is(.float64)) return value.as(.float64).?;
     if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
@@ -426,22 +390,19 @@ pub fn primitiveMathNumber(value: core.JSValue) ?f64 {
     return null;
 }
 
-pub fn fmin(a: f64, b: f64) f64 {
+fn fmin(a: f64, b: f64) f64 {
     if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) | @as(u64, @bitCast(b)));
     return if (a < b) a else b;
 }
 
-pub fn fmax(a: f64, b: f64) f64 {
+fn fmax(a: f64, b: f64) f64 {
     if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) & @as(u64, @bitCast(b)));
     return if (a < b) b else a;
 }
 
-pub fn mathPow(a: f64, b: f64) f64 {
-    if (!std.math.isFinite(b) and @abs(a) == 1) return std.math.nan(f64);
-    return std.math.pow(f64, a, b);
-}
+const mathPow = core.number.exponentiate;
 
-pub fn mathRound(a: f64) f64 {
+fn mathRound(a: f64) f64 {
     var bits: u64 = @bitCast(a);
     const exponent = (bits >> 52) & 0x7ff;
     if (exponent < 1023) {
@@ -460,23 +421,23 @@ pub fn mathRound(a: f64) f64 {
     return @bitCast(bits);
 }
 
-pub fn mathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue) !f64 {
+fn mathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue) !f64 {
     if (args.len == 0) return 0;
     var result = try toMathNumber(ctx, output, global, args[0]);
     if (args.len == 1) return @abs(result);
     for (args[1..]) |arg| {
         const number = try toMathNumber(ctx, output, global, arg);
-        result = std.math.hypot(result, number);
+        result = core.number.hypot2(result, number);
     }
     return result;
 }
 
-pub fn mathImul(lhs: f64, rhs: f64) i32 {
+fn mathImul(lhs: f64, rhs: f64) i32 {
     const product = toUint32Number(lhs) *% toUint32Number(rhs);
     return @bitCast(product);
 }
 
-pub fn mathSign(value: f64) f64 {
+fn mathSign(value: f64) f64 {
     if (std.math.isNan(value) or value == 0) return value;
     return if (value < 0) -1 else 1;
 }
@@ -502,7 +463,7 @@ fn mathSumPreciseCall(
     );
 }
 
-pub fn mathSumPrecise(
+fn mathSumPrecise(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -511,7 +472,7 @@ pub fn mathSumPrecise(
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
     if (args.len < 1) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot read property 'Symbol.iterator' of undefined");
-    const iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const iterator = try iterator_ops.getIterator(ctx, output, global, args[0], caller_function, caller_frame);
 
     var finite_values = std.ArrayList(f64).empty;
     defer finite_values.deinit(ctx.runtime.nativeAllocator());
@@ -522,10 +483,10 @@ pub fn mathSumPrecise(
     var saw_negative_zero = false;
 
     while (true) {
-        const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator);
         if (step.done) break;
         const number = value_ops.numberValue(step.value) orelse {
-            try iterator_ops.iteratorCloseValue(ctx, output, global, iterator_value, caller_function, caller_frame);
+            try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator.iterator);
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a number");
         };
         if (std.math.isNan(number)) {
@@ -553,11 +514,10 @@ pub fn mathSumPrecise(
     }
 
     const rounded = try exactF64Sum(ctx.runtime.nativeAllocator(), finite_values.items);
-    if (rounded == 0 and !saw_positive_zero and saw_negative_zero) return core.JSValue.float64(-0.0);
     return value_ops.numberToValue(rounded);
 }
 
-pub fn exactF64Sum(allocator: std.mem.Allocator, values: []const f64) !f64 {
+fn exactF64Sum(allocator: std.mem.Allocator, values: []const f64) !f64 {
     var total = bignum.BigInt{ .allocator = allocator };
     defer total.deinit();
 
@@ -572,7 +532,7 @@ pub fn exactF64Sum(allocator: std.mem.Allocator, values: []const f64) !f64 {
     return try scaledIntegerToF64(allocator, total);
 }
 
-pub fn exactF64ScaledInteger(allocator: std.mem.Allocator, number: f64) !bignum.BigInt {
+fn exactF64ScaledInteger(allocator: std.mem.Allocator, number: f64) !bignum.BigInt {
     const bits: u64 = @bitCast(number);
     const sign_bit = (bits >> 63) != 0;
     const exponent_bits: u16 = @intCast((bits >> 52) & 0x7ff);
@@ -587,7 +547,7 @@ pub fn exactF64ScaledInteger(allocator: std.mem.Allocator, number: f64) !bignum.
     return shifted;
 }
 
-pub fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f64 {
+fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f64 {
     if (value.isZero()) return 0;
     var magnitude = try value.cloneWithAllocator(allocator);
     defer magnitude.deinit();
@@ -596,7 +556,8 @@ pub fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f
 
     const bit_len = magnitude.bitLengthAbs();
     if (bit_len <= 52) {
-        const fraction: u64 = @intCast(magnitude.toUsize() orelse return error.TypeError);
+        // At most 52 bits: always fits one limb.
+        const fraction: u64 = @intCast(magnitude.toUsize().?);
         const bits = (@as(u64, @intFromBool(negative)) << 63) | fraction;
         return @bitCast(bits);
     }
@@ -610,7 +571,8 @@ pub fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f
     else
         try magnitude.shr(allocator, shift);
     defer top_int.deinit();
-    var significand: u64 = @intCast(top_int.toUsize() orelse return error.TypeError);
+    // Exactly 53 bits after the shift: always fits one limb.
+    var significand: u64 = @intCast(top_int.toUsize().?);
 
     if (shift > 0 and shouldRoundScaledIntegerUp(magnitude, shift, significand)) {
         significand += 1;
@@ -627,7 +589,7 @@ pub fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f
     return @bitCast(bits);
 }
 
-pub fn shouldRoundScaledIntegerUp(magnitude: bignum.BigInt, shift: usize, significand: u64) bool {
+fn shouldRoundScaledIntegerUp(magnitude: bignum.BigInt, shift: usize, significand: u64) bool {
     if (!magnitude.testBit(shift - 1)) return false;
     if ((significand & 1) != 0) return true;
     var bit: usize = 0;
@@ -658,35 +620,19 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
         // Random requires per-runtime state and is handled by mathOpCall before
         // this bare-runtime scalar fallback. Never return a fake constant.
         9 => error.TypeError,
-        10 => exp(a),
-        11 => @sin(a),
-        12 => @cos(a),
-        13 => @tan(a),
-        14 => std.math.acos(a),
-        15 => std.math.asin(a),
-        16 => std.math.atan(a),
         17 => std.math.atan2(a, b),
-        18 => std.math.acosh(a),
-        19 => std.math.asinh(a),
-        20 => std.math.atanh(a),
-        21 => @log(a),
-        22 => if (std.math.isNan(a) or a == 0 or !std.math.isFinite(a)) a else if (a < 0) -@floor(@abs(a)) else @floor(a),
-        23 => std.math.cbrt(a),
         24 => @floatFromInt(@clz(toUint32Number(a))),
-        25 => std.math.cosh(a),
-        26 => std.math.expm1(a),
-        27 => @floatCast(@as(f16, @floatCast(a))),
-        28 => @floatCast(@as(f32, @floatCast(a))),
         29 => mathHypotPrimitive(args),
         30 => @floatFromInt(mathImul(a, b)),
-        31 => std.math.log1p(a),
-        32 => log2(a),
-        33 => @log10(a),
-        34 => mathSign(a),
-        35 => std.math.sinh(a),
-        36 => std.math.tanh(a),
-        else => error.TypeError,
+        else => if (isUnaryId(id)) mathUnaryInvoke(id, a) else error.TypeError,
     };
+}
+
+/// Math.acosh (§21.3.2.3): NaN below 1. std.math.acosh picks its formula by
+/// |x| and returns finite values for many negative inputs.
+fn mathAcosh(value: f64) f64 {
+    if (!(value >= 1)) return std.math.nan(f64);
+    return std.math.acosh(value);
 }
 
 pub fn exp(value: f64) f64 {
@@ -704,7 +650,7 @@ fn mathHypotPrimitive(args: []const core.JSValue) !f64 {
     if (args.len == 0) return 0;
     var result = try numberValue(args[0]);
     if (args.len == 1) return @abs(result);
-    for (args[1..]) |arg| result = std.math.hypot(result, try numberValue(arg));
+    for (args[1..]) |arg| result = core.number.hypot2(result, try numberValue(arg));
     return result;
 }
 

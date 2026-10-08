@@ -15,11 +15,9 @@ const collection_id_lookup = core.host_function.builtin_method_id_lookup.collect
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
-const iterator_slots = @import("iterator_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
-const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -27,13 +25,8 @@ const string_ops = @import("string_ops.zig");
 // Helpers that remain in call_runtime.zig (generic utilities outside the builtin
 // glue cluster).
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
-const constructorNameEqlLocal = call_runtime.constructorNameEqlLocal;
-const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
-const getIteratorMethod = call_runtime.getIteratorMethod;
 const getValueProperty = object_ops.getValueProperty;
-const isCallableValue = call_runtime.isCallableValue;
 const iteratorCloseWithCompletionAndPropagate = iterator_ops.iteratorCloseWithCompletionAndPropagate;
 const iteratorStepValue = iterator_ops.iteratorStepValue;
 const lengthIndexValue = array_ops.lengthIndexValue;
@@ -41,14 +34,10 @@ const objectFromValue = object_ops.objectFromValue;
 const arrayBufferAccessor = array_ops.arrayBufferAccessor;
 const arrayBufferIsView = array_ops.arrayBufferIsView;
 const arrayBufferPrototypeNativeRecord = array_ops.arrayBufferPrototypeNativeRecord;
-pub const arrayPushNativeRecord = array_ops.arrayPushCallImpl;
-pub const tryFastArrayPush = array_ops.tryFastArrayPush;
-pub const arrayPopNativeRecord = array_ops.arrayPopCallImpl;
-pub const arraySpliceNativeRecord = array_ops.arraySpliceCallImpl;
 const sharedArrayBufferAccessor = array_ops.sharedArrayBufferAccessor;
 const typedArrayAccessor = array_ops.typedArrayAccessor;
 const typedArrayConstructToIndex = array_ops.typedArrayConstructToIndex;
-const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toPrimitiveForNumber = value_ops.toPrimitiveForNumber;
 const toStringBytesForSymbol = string_ops.toStringBytesForSymbol;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 
@@ -104,18 +93,9 @@ pub fn bigIntAsN(
     _ = caller_frame;
     const bits_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const bits_primitive = try toPrimitiveForNumber(ctx, output, global, bits_input);
-    if (bits_primitive.isBigInt() or bits_primitive.is(.symbol)) return error.TypeError;
-    const bits_number_value = try value_ops.toNumberValue(ctx.runtime, bits_primitive);
-    const bits_number = value_ops.numberValue(bits_number_value) orelse 0;
-    const bits: usize = if (std.math.isNan(bits_number))
-        0
-    else blk: {
-        if (!std.math.isFinite(bits_number)) return error.RangeError;
-        const truncated = @trunc(bits_number);
-        if (truncated < 0) return error.RangeError;
-        if (truncated > 9007199254740991.0) return error.RangeError;
-        break :blk @intFromFloat(truncated);
-    };
+    if (bits_primitive.isBigInt()) return error.BigIntToNumber;
+    if (bits_primitive.is(.symbol)) return error.SymbolToNumber;
+    const bits = try value_ops.toIndexUsize(ctx.runtime, bits_primitive);
 
     const bigint_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const bigint_primitive = try toPrimitiveForNumber(ctx, output, global, bigint_input);
@@ -131,28 +111,20 @@ pub fn toBigIntFromPrimitive(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
         defer bigint.deinit();
         return value_ops.createBigIntValue(rt, bigint);
     }
-    return error.TypeError;
+    return error.CannotConvertToBigInt;
 }
 
 pub fn globalIsNaNOrFinite(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.JSValue,
     args: []const core.JSValue,
     is_nan: bool,
 ) !core.JSValue {
-    if (objectFromValue(this_value)) |receiver| {
-        if (try constructorNameEqlLocal(ctx.runtime, receiver, "Number")) {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const number = value_ops.numberValue(value);
-            if (is_nan) return core.JSValue.boolean(value.isNumber() and std.math.isNan(number orelse std.math.nan(f64)));
-            return core.JSValue.boolean(value.isNumber() and std.math.isFinite(number orelse std.math.nan(f64)));
-        }
-    }
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
-    if (primitive.is(.symbol) or primitive.isBigInt()) return error.TypeError;
+    if (primitive.is(.symbol)) return error.SymbolToNumber;
+    if (primitive.isBigInt()) return error.BigIntToNumber;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
@@ -165,7 +137,7 @@ pub fn toNumberLikeArgument(
     value: core.JSValue,
 ) !core.JSValue {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isBigInt()) return error.TypeError;
+    if (primitive.isBigInt()) return error.BigIntToNumber;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     return value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
 }
@@ -217,11 +189,8 @@ pub fn globalParseFloat(
     return value_ops.numberToValue(try core.number.parseFloatValue(ctx.runtime, string_value));
 }
 
-/// `.array` domain VM-op dispatch glue. Mirrors the retired `call.zig`
-/// `callArrayNativeFunctionRecord`: resolve the Array static methods
-/// (`from`/`of`/`isArray`) and the Array.prototype method record hub against
-/// the realm-aware exec ops, which stay in exec because they are also reached
-/// by the VM fast-call path (`arrayMethodFastCall`).
+/// `.array` domain record glue: resolve the Array and %TypedArray% static
+/// methods and hand every prototype id to the Array.prototype record hub.
 ///
 /// Push/pop now use dedicated record functions and bypass this shared glue,
 /// including on the prepared no-function-object path. The Array statics and
@@ -244,61 +213,40 @@ pub fn arrayNativeRecord(
         @intFromEnum(method_ids.array.StaticMethod.from) => array_ops.arrayFromCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         @intFromEnum(method_ids.array.StaticMethod.from_async) => array_ops.arrayFromAsyncCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         @intFromEnum(method_ids.array.StaticMethod.of) => array_ops.arrayOfCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
+        @intFromEnum(method_ids.array.TypedArrayMethod.from) => try array_ops.typedArrayFromStaticCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.array.TypedArrayMethod.of) => try array_ops.typedArrayOfStaticCall(ctx, output, global, this_value, args, caller_function, caller_frame),
         else => array_ops.arrayPrototypeNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame),
     };
 }
 
 pub fn bufferNativeRecord(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     receiver: core.JSValue,
     id: u32,
     args: []const core.JSValue,
 ) !?core.JSValue {
     if (id == @intFromEnum(method_ids.buffer.StaticMethod.is_view)) return arrayBufferIsView(args);
     if (buffer_id_lookup.arrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try arrayBufferAccessor(ctx, receiver, accessor_name));
+        return @as(?core.JSValue, try arrayBufferAccessor(receiver, accessor_name));
     }
     if (buffer_id_lookup.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try sharedArrayBufferAccessor(receiver, accessor_name));
     }
     if (buffer_id_lookup.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try dataViewAccessor(ctx, receiver, accessor_name));
+        return @as(?core.JSValue, try dataViewAccessor(receiver, accessor_name));
     }
     if (buffer_id_lookup.typedArrayAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try typedArrayAccessor(ctx, receiver, accessor_name));
     }
-    if (try arrayBufferPrototypeNativeRecord(ctx, receiver, id, args)) |value| return value;
+    if (try arrayBufferPrototypeNativeRecord(ctx, output, receiver, id, args)) |value| return value;
     if (buffer_id_lookup.dataViewGetKindFromRecordId(id)) |method_id| {
-        const global = ctx.global orelse {
-            const value = try (core.typed_array.dataViewGet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            });
-            return @as(?core.JSValue, value);
-        };
-        const value = try (dataViewGetCall(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            error.RangeError => error.RangeError,
-            else => err,
-        });
-        return @as(?core.JSValue, value);
+        const global = ctx.global orelse return error.InvalidBuiltinRegistry;
+        return try dataViewGetCall(ctx, output, global, receiver, method_id, args);
     }
     if (buffer_id_lookup.dataViewSetKindFromRecordId(id)) |method_id| {
-        const global = ctx.global orelse {
-            const value = try (core.typed_array.dataViewSet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            });
-            return @as(?core.JSValue, value);
-        };
-        const value = try (dataViewSetCall(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            error.RangeError => error.RangeError,
-            else => err,
-        });
-        return @as(?core.JSValue, value);
+        const global = ctx.global orelse return error.InvalidBuiltinRegistry;
+        return try dataViewSetCall(ctx, output, global, receiver, method_id, args);
     }
     return null;
 }
@@ -315,17 +263,26 @@ pub fn dataViewConstructorArgs(
     global: *core.Object,
     args: []const core.JSValue,
 ) !DataViewConstructorArgs {
-    if (args.len < 1) return error.TypeError;
-    try core.typed_array.dataViewRequireArrayBuffer(args[0]);
+    if (args.len < 1) return error.NotAnArrayBuffer;
+    const buffer = try core.typed_array.expectArrayBufferObject(args[0]);
     const byte_offset = if (args.len >= 2)
         try typedArrayConstructToIndex(ctx, output, global, args[1])
     else
         @as(usize, 0);
+    // DataView steps 4-6 (detached, offset range) precede ToIndex(byteLength),
+    // whose range check uses the buffer length read in step 5.
+    try core.typed_array.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, null);
+    const buffer_length = core.typed_array.arrayBufferByteLength(buffer);
     const view_length = if (args.len >= 3 and !args[2].is(.undefined_value))
         try typedArrayConstructToIndex(ctx, output, global, args[2])
     else
         null;
-    try core.typed_array.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, view_length);
+    if (view_length) |length| {
+        if (length > buffer_length - byte_offset) {
+            _ = try exception_ops.throwRangeErrorMessage(ctx, global, "invalid byteLength");
+            unreachable;
+        }
+    }
     return .{
         .byte_offset = byte_offset,
         .view_length = view_length,
@@ -333,17 +290,17 @@ pub fn dataViewConstructorArgs(
     };
 }
 
-pub fn dataViewAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.dataview) return error.TypeError;
+pub fn dataViewAccessor(receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+    const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
+    if (object.class_id != core.class.ids.dataview) return error.IncompatibleReceiver;
     if (std.mem.eql(u8, accessor, "buffer")) {
         return (object.typedArrayBuffer() orelse return error.TypeError);
     }
     if (std.mem.eql(u8, accessor, "byteLength")) {
-        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(ctx.runtime, object)));
+        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(object)));
     }
     if (std.mem.eql(u8, accessor, "byteOffset")) {
-        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(ctx.runtime, object)));
+        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(object)));
     }
     return error.TypeError;
 }
@@ -372,7 +329,7 @@ pub fn dataViewSetCall(
     method_id: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
-    try core.typed_array.dataViewRejectImmutable(ctx.runtime, receiver);
+    try core.typed_array.dataViewRequire(receiver);
     const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const index = try typedArrayConstructToIndex(ctx, output, global, index_arg);
     const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -401,28 +358,19 @@ pub fn dataViewSetCoerceValue(
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
     // BigInt64/BigUint64 skip ToNumber: `dataViewSet` runs ToBigInt itself.
     if (method_id == data_view_set_kind_big_int64 or method_id == data_view_set_kind_big_uint64) return primitive;
-    if (primitive.isBigInt()) return error.TypeError;
+    if (primitive.isBigInt()) return error.BigIntToNumber;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     return number_value;
-}
-
-pub fn errorIsError(args: []const core.JSValue) core.JSValue {
-    if (args.len < 1) return core.JSValue.boolean(false);
-    const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
-    return core.JSValue.boolean(object.class_id == core.class.ids.error_);
 }
 
 const WeakRefPrototypeMethod = method_ids.weak_ref.PrototypeMethod;
 
 /// Declaration + dispatch table for the `.weak_ref` native-builtin domain:
-/// qjs `js_weakref_proto_funcs` and `js_finrec_proto_funcs`
-///. In qjs these are ordinary `JS_CFUNC_DEF` entries reached
-/// by `js_call_c_function` like any other builtin method; without records here
-/// they were the only weak-collection methods left on zjs's compatibility
-/// name-cascade (`call_runtime.callNativeCallableByName`), which made
-/// `WeakRef.prototype.deref` an order of magnitude more expensive per call than
-/// `Date.prototype.getTime`. One shared handler switches on the per-record
-/// `magic` (== domain-local id), mirroring the other domain tables.
+/// qjs `js_weakref_proto_funcs` and `js_finrec_proto_funcs`.
+/// In qjs these are ordinary `JS_CFUNC_DEF` entries reached
+/// by `js_call_c_function` like any other builtin method. One shared handler
+/// switches on the per-record `magic` (== domain-local id), mirroring the
+/// other domain tables.
 pub const internal_entries = [_]core.host_function.InternalEntry{
     weakRefEntry("deref", 0, @intFromEnum(WeakRefPrototypeMethod.deref)),
     weakRefEntry("register", 2, @intFromEnum(WeakRefPrototypeMethod.finrec_register)),
@@ -441,9 +389,8 @@ fn weakRefEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
 }
 
 /// Shared record handler for the `.weak_ref` domain. The bodies below keep
-/// their existing receiver-class checks, so a stolen method applied to a
-/// foreign receiver still throws TypeError exactly as the name cascade did
-/// (qjs `JS_GetOpaque2`, quickjs.c).
+/// their receiver-class checks, so a stolen method applied to a foreign
+/// receiver throws TypeError (qjs `JS_GetOpaque2`, quickjs.c).
 fn weakRefCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -463,20 +410,20 @@ fn weakRefCall(
 }
 
 pub fn weakRefDerefCall(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.weak_ref) return error.TypeError;
-    return object.weakRefDeref(rt);
+    const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
+    if (object.class_id != core.class.ids.weak_ref) return error.IncompatibleReceiver;
+    return try object.weakRefDeref(rt);
 }
 
 pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
+    const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
+    if (object.class_id != core.class.ids.finalization_registry) return error.IncompatibleReceiver;
     const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    if (!core.symbol.canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-    if (target.sameValue(held_value)) return error.TypeError;
-    if (!unregister_token.is(.undefined_value) and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
+    if (!core.symbol.canBeHeldWeakly(ctx.runtime, target)) return error.InvalidWeakTarget;
+    if (target.sameValue(held_value)) return error.HeldValueIsTarget;
+    if (!unregister_token.is(.undefined_value) and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.InvalidUnregisterToken;
     // No self-target exclusion: qjs js_finrec_register appends
     // the entry unconditionally after the three checks above — a registry may
     // register itself as target (the cell holds only a weak ref to it).
@@ -485,10 +432,10 @@ pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue
 }
 
 pub fn finalizationRegistryUnregister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
+    const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
+    if (object.class_id != core.class.ids.finalization_registry) return error.IncompatibleReceiver;
     const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!core.symbol.canBeHeldWeakly(ctx.runtime, token)) return error.TypeError;
+    if (!core.symbol.canBeHeldWeakly(ctx.runtime, token)) return error.InvalidUnregisterToken;
     return core.JSValue.boolean(object.unregisterFinalizationRegistryCells(ctx.runtime, token));
 }
 
@@ -521,7 +468,7 @@ pub fn symbolFor(
 
 pub fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const atom_id = value.asSymbolAtom() orelse return error.TypeError;
+    const atom_id = value.asSymbolAtom() orelse return error.NotASymbol;
     const key = core.symbol.registryKey(rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, key);
 }
@@ -529,21 +476,8 @@ pub fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVal
 /// C_FUNCTION_DATA analogue for internal callbacks whose semantics explicitly
 /// use the caller realm rather than the realm in which the carrier was made.
 pub fn createDataFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
+    const function_proto = functionPrototypeFromGlobal(global) orelse return error.InvalidBuiltinRegistry;
     return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
-}
-
-pub fn constructCollectionFromVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor: core.JSValue,
-    kind: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    var prototype = try constructorPrototypeObject(ctx.runtime, constructor);
-    defer prototype.deinit(ctx.runtime);
-    return constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
 }
 
 pub fn addCollectionEntriesFromIterator(
@@ -555,9 +489,8 @@ pub fn addCollectionEntriesFromIterator(
     iterable_value: core.JSValue,
     adder: core.JSValue,
 ) !void {
-    const iterator_method = try getIteratorMethod(ctx, output, global, iterable_value);
-    if (!isCallableValue(iterator_method)) return error.TypeError;
-    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
+    const record = try iterator_ops.getIterator(ctx, output, global, iterable_value, null, null);
+    const iterator_value = record.iterator;
     const iterator = try property_ops.expectObject(iterator_value);
 
     // Dense bulk fill, taken ONLY when the default Array iteration protocol is
@@ -575,12 +508,10 @@ pub fn addCollectionEntriesFromIterator(
     // without running the iterator's `return`. A builtin adder runs no user
     // code, which is what makes the whole batch unobservable.
     fast: {
-        const next_key = core.atom.ids.next;
-        const next_method = try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-        const next_obj = objectFromValue(next_method) orelse break :fast;
+        const next_obj = objectFromValue(record.next) orelse break :fast;
         if (!next_obj.isArrayIteratorNextFunction()) break :fast;
         if (iterator.class_id != core.class.ids.array_iterator) break :fast;
-        if (iterator_slots.arrayIteratorKind(iterator) != .value) break :fast;
+        if (iterator_ops.arrayIteratorKind(iterator) != .value) break :fast;
         if (iterator.iteratorIndexSlot().* != 0) break :fast; // partially drained
         const adder_obj = objectFromValue(adder) orelse break :fast;
         const adder_ref = core.function.decodeNativeBuiltinId(adder_obj.nativeFunctionId()) orelse break :fast;
@@ -593,24 +524,24 @@ pub fn addCollectionEntriesFromIterator(
         if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
         const elements = target_obj.arrayElements();
         if (@as(usize, @intCast(target_obj.arrayLength())) != elements.len) break :fast;
-        // A builtin adder only fails on allocation, but `return` is still the
+        // Entry reads can run user code and fail; `return` is still the
         // user's, and IteratorClose has to run before the failure propagates.
-        array_ops.addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, target_obj, adder) catch |err| {
+        array_ops.addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, target_obj, adder, iterator) catch |err| {
             return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
         };
-        iterator.iteratorIndexSlot().* = elements.len;
         return;
     }
 
     while (true) {
-        const step = iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-        };
+        // Failures inside IteratorStepValue propagate without closing.
+        const step = try iteratorStepValue(ctx, output, global, record);
         if (step.done) return;
 
         if (kind == 1 or kind == 3) {
             const entry = core.value_semantics.objectFromValue(step.value) orelse {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, error.TypeError, null, null);
+                _ = exception_ops.throwTypeErrorMessage(ctx, global, "iterator value is not an entry object") catch |err|
+                    return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+                unreachable;
             };
             const key = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), null, null) catch |err| {
                 return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
@@ -656,12 +587,8 @@ pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.obj
     try global.setCachedRealmValue(rt, slot, value);
 }
 
-/// Leftover native data-method define. candidate91 still compiled two
-/// leftover copies (`defineNativeDataMethod` 387,
-/// `defineNativeDataMethodWithNativeId` 584, extra 387, 37.5% match).
-/// The leftover is nativeFunctionForGlobal + defineOwnProperty; comptime
-/// identity is only whether a native-builtin id is stamped. Take that id
-/// as `?i32` on one walk. Both public names stay as `inline` wrappers.
+/// Define a native data method on `object`. Shares the outlined
+/// `defineNativeDataMethodMaybeId` walk with the native-id variant.
 pub inline fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
     return defineNativeDataMethodMaybeId(rt, global, object, atom_id, length, null);
 }
@@ -691,47 +618,9 @@ noinline fn defineNativeDataMethodMaybeId(
     values[1] = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
     if (native_builtin_id) |id| {
         const method_object = try property_ops.expectObject(values[1]);
-        method_object.setNativeBuiltinIdAndRecord(rt, id);
+        method_object.setNativeBuiltinIdAndRecord(id);
     }
     try (try property_ops.expectObject(values[0])).defineOwnProperty(rt, atom_id, core.Descriptor.data(values[1], .method));
-}
-
-/// Rare-payload stamp after minting a native data method. This is a
-/// leftover of `defineAsyncGeneratorDataMethod` /
-/// `installIteratorHelperMethod` (candidate99: 463 / 518, extra 463,
-/// 32.6% match). It is **not** an extension of
-/// `defineNativeDataMethodMaybeId` (knife 93: do not fold the
-/// async-generator stamp into that walk).
-pub const NativeDataMethodRareStamp = enum { async_generator, iterator_helper };
-
-pub noinline fn defineStampedNativeDataMethod(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    object: *core.Object,
-    atom_id: core.Atom,
-    length: i32,
-    stamp: NativeDataMethodRareStamp,
-    helper_id: i32,
-) !void {
-    const borrowed = [_]core.JSValue{ global.value(), object.value() };
-    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
-    var slots: []core.JSValue = &values;
-    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &slots } };
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(rt);
-    defer roots.deactivate(rt);
-    values[0] = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = try property_ops.expectObject(values[0]);
-    switch (stamp) {
-        .async_generator => {
-            if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
-        },
-        .iterator_helper => {
-            if (helper_id < 1 or helper_id > 2) return error.TypeError;
-            if (!try method_object.addIteratorHelperMethod(rt, @intCast(helper_id))) return error.TypeError;
-        },
-    }
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(values[0], .method));
 }
 
 /// Bytes-taking form for the one caller whose method name comes out of a table
@@ -754,42 +643,8 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
     defer rt.atoms.unpinForHost(atom_id);
     values[1] = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     const method_object = try property_ops.expectObject(values[1]);
-    method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
+    method_object.setNativeBuiltinIdAndRecord(native_builtin_id);
     try (try property_ops.expectObject(values[0])).defineOwnProperty(rt, atom_id, core.Descriptor.data(values[1], .method));
 }
 
-// --- Primitive coercion moved to coercion_ops.zig ---
-
-// ----- merged from performance_ops.zig -----
-// Typed standard-native record for the `performance` namespace.
-//
-// QuickJS does not provide this Web-compatible namespace, but zjs still routes
-// its native method through the same cproto/magic/function-pointer boundary as
-// the ECMAScript standard globals.
-pub const now_id: u32 = 1;
-pub const performance_internal_entries = [_]core.host_function.InternalEntry{
-    .{
-        .name = "now",
-        .length = 0,
-        .id = now_id,
-        .magic = now_id,
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&performanceNowCall),
-    },
-};
-fn performanceNowCall(
-    native_ctx: *core.JSContext,
-    native_this: core.JSValue,
-    native_args: []const core.JSValue,
-    native_magic: i32,
-) HostError!core.JSValue {
-    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (host_call.magic != now_id) return error.TypeError;
-    return core.JSValue.float64(performanceNowMs() - host_call.ctx.runtime.performance_time_origin_ms);
-}
-
-fn performanceNowMs() f64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
-    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
-}
+// --- Primitive coercion moved to value_ops.zig ---

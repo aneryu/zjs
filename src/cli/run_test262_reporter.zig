@@ -84,7 +84,7 @@ pub const Reporter = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         var stderr_buf: [4096]u8 = undefined;
-        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+        var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
         const writer = &stderr_writer.interface;
         try writer.print(fmt, args);
         try writer.flush();

@@ -3,12 +3,8 @@
 //! never index `opcode_info` with a raw id.
 
 const std = @import("std");
-const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
-const runtime = @import("../runtime.zig");
-const compiler = @import("../compiler/root.zig");
 const opcode_logical = @import("../opcode_logical.zig");
-const PropSiteCache = bytecode.PropSiteCache;
 const opcode = @This();
 
 pub const Format = opcode_logical.Format;
@@ -58,10 +54,7 @@ comptime {
 /// Flags byte (operand offset 9) of `dyn_env_probe`, the single opcode
 /// covering all five dynamic-environment binding operations.  `kind`
 /// selects what runs once the binding is found; `is_with` selects whether
-/// @@unscopables participates.  These used to be five opcodes, and the
-/// with/var-object axis was spelled two different ways depending on which
-/// one it was (a bool for four of them, a three-valued enum for the put
-/// form whose third value had no emitter).
+/// @@unscopables participates.
 pub const dyn_env = struct {
     pub const ProbeKind = enum(u3) {
         read = 0,
@@ -132,6 +125,9 @@ pub const dyn_env = struct {
 /// zjs extension carried by the existing `throw_error` opcode for
 /// Annex-B runtime errors on CallExpression assignment targets.
 pub const throw_error_invalid_assignment_target: u8 = 5;
+
+/// zjs extension: reading a private accessor that has only a setter.
+pub const throw_error_private_without_getter: u8 = 6;
 
 pub const op = struct {
     pub const invalid: u8 = 0;
@@ -451,11 +447,6 @@ pub const op = struct {
     pub const set_class_name: u8 = 195;
     pub const line_num: u8 = 196;
 
-    /// Parser-phase label references use the ordinary 32-bit jump operand
-    /// with this tag until `resolve_variables` binds them to absolute PCs.
-    /// Real parser byte offsets are constrained below 2 GiB.
-    pub const parser_label_tag: u32 = 0x8000_0000;
-
     /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
     pub const op_count: u16 = 255;
     /// First id of the temp/short overlap range (OP_nop + 1).
@@ -507,6 +498,9 @@ pub const ext0_sub = struct {
     /// id 75 survives only as the lowered-direct byte the builder
     /// rewrite emits.
     pub const set_name_computed: u8 = 20;
+    /// Array-pattern elision: IteratorStep on the record at depth 0
+    /// without reading the result's `value`.
+    pub const iterator_step: u8 = 21;
 
     /// Add-resource hints occupy everything from here up, so the free
     /// sub-slots are the gap below it. Raised from 16 to 64 to open that
@@ -611,8 +605,7 @@ pub const opcode_info: [op_info_len]Info = blk: {
 };
 
 /// The <300 form claiming a final id, if any. The enum IS the slot
-/// map: this replaces the row-name-prefix classification as the
-/// authority (stateOf still reads the generated names, and the ledger
+/// map (stateOf still reads the generated names, and the ledger
 /// assertions prove the two agree).
 fn formForId(comptime id: u8) ?logical.LogicalOpcode {
     comptime {
@@ -797,21 +790,10 @@ pub fn nPushOf(op_id: u8) u8 {
     return if (finalInfo(op_id)) |info| info.n_push else 0;
 }
 
-/// F0a0 (§11.7 D9): the physical half of the declaration source — a
-/// derived mirror of the id space, a mechanically generated ledger, and
-/// comptime assertions that both agree with `opcode_info`.
-///
-/// **Scope boundary, and it is checkable**: everything here must stay
-/// expressible in the vocabulary the table already has. The moment this
-/// needs a `LogicalOpcode` it has crossed into F0a1, which is blocked on
-/// the §10.8 freeze. `PhysicalSlotState` from the design carries a
-/// `LogicalOpcode` payload for exactly that reason and is deliberately
-/// NOT used here.
-///
-/// The ledger exists because the id budget was previously a number
-/// people re-derived by hand and quoted from memory. It is now a single
-/// derived fact that cannot drift from the table without failing to
-/// compile.
+/// The physical half of the declaration source: a derived mirror of the
+/// id space, a mechanically generated ledger, and comptime assertions that
+/// both agree with `opcode_info`. The id budget is a derived fact that
+/// cannot drift from the table without failing to compile.
 pub const physical = struct {
     /// Slot classification in today's terms only.
     pub const SlotState = enum {
@@ -920,8 +902,8 @@ pub const physical = struct {
             // own id>` is self-consistent and compiles clean, silently
             // marking an id free while its handler and emit sites are
             // still there. The shape is the only physical-layer signal
-            // available at F0a0 scope -- whether an opcode is still
-            // emitted is logical-layer knowledge (F0a1).
+            // available here -- whether an opcode is still emitted is
+            // logical-layer knowledge.
             if (info.size != 1 or info.n_pop != 0 or info.n_push != 0 or info.fmt != .none)
                 @compileError("reclaimed row does not carry the canonical dead shape (size 1, 0/0, fmt none)");
         }
@@ -946,9 +928,7 @@ pub const physical = struct {
     /// deleted, which also changes the decode fingerprint pinned in
     /// the tests.
     ///
-    /// This crosses the F0a0 scope boundary documented above by
-    /// design: the 10.8 freeze that blocked LogicalOpcode from this
-    /// namespace has been closed since 2026-08-27.
+    /// Unlike the rest of this namespace it names `LogicalOpcode` forms.
     pub const ExecutableAlias = struct {
         id: u8,
         canonical: opcode_logical.LogicalOpcode,
@@ -1133,7 +1113,7 @@ comptime {
     // than restated: the branch edge of `dyn_env_probe` must equal the
     // fall-through effect plus the declared delta, for every accepted
     // kind. This is the check that would catch the declaration drifting
-    // away from `computeStackSize`.
+    // away from `stack_size.compute`.
     for (0..256) |raw| {
         const byte: u8 = @intCast(raw);
         const flags = dyn_env.decode(byte) orelse continue;
@@ -1684,101 +1664,6 @@ pub const decode = struct {
             t[e.id] = domainRowFor(@intFromEnum(e.form), false);
         break :blk t;
     };
-
-    /// Parser-domain candidate rows: the temp interpretation of the
-    /// overlap range, with atom-less temps marked forced. Everything
-    /// else falls back to `final_parser_row`.
-    pub const parser_temp_row: [256]DomainRow = blk: {
-        @setEvalBranchQuota(20000);
-        var t: [256]DomainRow = undefined;
-        for (0..256) |i| {
-            const id: u8 = @intCast(i);
-            if (id < op.op_temp_start or id >= op.op_temp_end) {
-                t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
-                continue;
-            }
-            const index: u16 = @as(u16, 300) + (id - op.op_temp_start);
-            const side_table = index == @intFromEnum(logical.LogicalOpcode.label) or
-                index == @intFromEnum(logical.LogicalOpcode.line_num);
-            t[i] = domainRowFor(index, side_table);
-        }
-        break :blk t;
-    };
-
-    pub const final_parser_row: [256]DomainRow = blk: {
-        @setEvalBranchQuota(20000);
-        var t: [256]DomainRow = undefined;
-        for (0..256) |i| {
-            const id: u8 = @intCast(i);
-            if (id >= op.op_count) {
-                t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
-                continue;
-            }
-            t[i] = domainRowFor(id, false);
-        }
-        // C0 end state: the parser's mixed stream carries the
-        // lowered-direct byte, and this row set is where a non-temp id
-        // resolves -- so the byte maps to the carrier-plane form here
-        // too, never to the reclaimed final slot.
-        for (logical.lowered_direct) |e|
-            t[e.id] = domainRowFor(@intFromEnum(e.form), false);
-        break :blk t;
-    };
-
-    /// Parser-domain decode, for the MIXED Builder stream (contract 2,
-    /// 2026-08-28 revision). In that stream an id in the temp range may
-    /// be either the temp instruction or an already-selected final
-    /// short opcode, and the only thing that can tell them apart is the
-    /// atom ledger: the temp interpretation of an atom-carrying temp id
-    /// must find its own atom at the ledger cursor. The ledger is
-    /// therefore an INPUT of this domain, not state a caller threads
-    /// around the decoder -- which is why this entry does not share
-    /// `headerAt`'s signature.
-    ///
-    /// Classification is derived from the declaration, not listed:
-    /// a temp form with an atom operand is a candidate (disambiguate),
-    /// `label`/`line_num` are rejected (side-table entities in the v2
-    /// Builder), and every other temp form IS the temp interpretation.
-    /// The retired hand-written tables in cfg.zig enumerated the same
-    /// three classes by id; a comptime assertion there proved the
-    /// derived view identical before they were deleted.
-    pub inline fn headerAtParser(
-        code: []const u8,
-        atoms_ledger: []const atom.Atom,
-        pc: u32,
-        atom_index: u32,
-    ) Error!Header {
-        if (pc >= code.len) return error.BytecodeOverflow;
-        const id = code[pc];
-        const trow = parser_temp_row[id];
-        if (trow.size != 0) {
-            const form: logical.LogicalOpcode = @enumFromInt(trow.form_index);
-            if (trow.flags & FormRow.atom_bit != 0) {
-                // Candidate: the temp interpretation must find its own
-                // atom at the ledger cursor; otherwise fall through to
-                // the final interpretation of the same byte.
-                const end = @as(usize, pc) + trow.size;
-                if (end <= code.len and atom_index < atoms_ledger.len) {
-                    const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                    if (atom.Atom.fromRaw(operand) == atoms_ledger[atom_index])
-                        return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
-                }
-            } else {
-                const end = @as(usize, pc) + trow.size;
-                if (end > code.len) return error.BytecodeOverflow;
-                return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
-            }
-        } else if (id >= op.op_temp_start and id < op.op_temp_end) {
-            // A temp-range id with a zero temp row is a side-table
-            // entity (label/line_num): corruption in this stream.
-            return error.InvalidOpcode;
-        }
-        const row = final_parser_row[id];
-        if (row.size == 0) return error.InvalidOpcode;
-        const next = @as(usize, pc) + row.size;
-        if (next > code.len) return error.BytecodeOverflow;
-        return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
-    }
 
     /// Strict phase-1 decode: temp-range ids are ALWAYS the temp
     /// interpretation (no mixing), and an atom-carrying instruction is
@@ -2435,11 +2320,12 @@ test "logical forms and physical rows are one instruction set" {
         if (counts.final != 243) @compileError(std.fmt.comptimePrint("final form count drifted: expected 243, found {d}", .{counts.final}));
         if (counts.temp != 19) @compileError(std.fmt.comptimePrint("temp form count drifted: expected 19, found {d}", .{counts.temp}));
     }
-    // The `using` carrier's residents: three of its own operations plus
-    // the sixteen opcodes demoted into it. Declaring them is what keeps
-    // the demoted set inside the single source rather than outside it.
+    // The `using` carrier's residents: three of its own operations, the
+    // sixteen opcodes demoted into it, the two late-encoding residents and
+    // the array-pattern elision step. Declaring them is what keeps the
+    // demoted set inside the single source rather than outside it.
     comptime {
-        if (counts.sub != 21) @compileError(std.fmt.comptimePrint("sub form count drifted: expected 21, found {d}", .{counts.sub}));
+        if (counts.sub != 22) @compileError(std.fmt.comptimePrint("sub form count drifted: expected 22, found {d}", .{counts.sub}));
     }
     try std.testing.expectEqual(logical.SemanticFamily.ext0_sub, logical.familyOf(.using_set_proto));
     try std.testing.expect(logical.planeOf(.using_set_proto) == .sub);
@@ -2474,10 +2360,11 @@ test "C0 closed: late-encoding end state, reclaimed id and decode fingerprint" {
             @compileError("direct final encoding drifted");
     }
     // subForm round-trips the residents and stays closed after them:
-    // 21 is the first tag of the reopened gap below the add range.
+    // the tag after the last resident opens the gap below the add range.
     try std.testing.expectEqual(@as(?logical.LogicalOpcode, .to_propkey), logical.subForm(ext0_sub.to_propkey));
     try std.testing.expectEqual(@as(?logical.LogicalOpcode, .set_name_computed), logical.subForm(ext0_sub.set_name_computed));
-    try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), logical.subForm(21));
+    try std.testing.expectEqual(@as(?logical.LogicalOpcode, .using_iterator_step), logical.subForm(ext0_sub.iterator_step));
+    try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), logical.subForm(ext0_sub.iterator_step + 1));
     // End state (11.0): the alias is gone, the final slot is
     // quarantined (reclaimed in ledger terms), and the net id is
     // booked: 244 claimed / 12 free.
@@ -2505,7 +2392,7 @@ test "C0 closed: late-encoding end state, reclaimed id and decode fingerprint" {
     // 10.7 pin: reassigning the quarantined id, moving a resident or
     // changing any slot state must consciously update this number in
     // the same commit that earns it.
-    try std.testing.expectEqual(@as(u64, 0x166cb5a2882d5cd6), decode.fingerprint);
+    try std.testing.expectEqual(@as(u64, 0x1ecb5b83ebecb4e0), decode.fingerprint);
 }
 
 test "physical ledger is derived, not asserted by hand" {

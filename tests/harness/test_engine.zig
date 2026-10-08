@@ -105,8 +105,6 @@ pub const TestEngine = struct {
     event_loop: *event_loop.EventLoop,
     host_globals_installed: bool = false,
 
-    pub const HostHooks = module_graph.HostHooks;
-
     pub fn init(allocator: std.mem.Allocator) !TestEngine {
         return initWithOptions(.{ .allocator = allocator });
     }
@@ -180,7 +178,7 @@ pub const TestEngine = struct {
             .return_completion = mode == .script and std.mem.eql(u8, filename, "<repl>"),
             .discard_script_result = mode == .script and !std.mem.eql(u8, filename, "<repl>"),
             .timing = options.timing,
-        }) catch |err| return @errorCast(moduleResolutionError(err));
+        }) catch |err| return @errorCast(err);
     }
 
     pub fn createPersistentValue(self: *TestEngine, value: core.JSValue) !core.JSValueHandle {
@@ -203,19 +201,22 @@ pub const TestEngine = struct {
         return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename, .runtime_strict = runtime_strict });
     }
 
-    pub fn evalFileModuleGraphWithHostHooks(
+    /// Evaluate a module graph whose sources come from `modules` instead of
+    /// the filesystem, through the same scheduler the bundled programs use.
+    pub fn evalModuleGraphInMemory(
         self: *TestEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         filename: []const u8,
-        host_hooks: module_graph.HostHooks,
+        modules: *@import("memory_modules.zig").MemoryModules,
         allocator: std.mem.Allocator,
     ) !core.JSValue {
         try self.ensureTest262GlobalsInstalled();
-        return module_graph.evalFileModuleGraphWithHostHooks(self.runtime, self.context, source_text, output, filename, host_hooks, allocator);
+        modules.install(self.context);
+        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, std.testing.io, allocator, std.math.maxInt(usize));
     }
 
-    pub fn evalFileModuleGraphWithOutput(
+    pub fn evalModuleGraph(
         self: *TestEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
@@ -225,7 +226,7 @@ pub const TestEngine = struct {
         max_source_size: usize,
     ) !core.JSValue {
         try self.ensureTest262GlobalsInstalled();
-        return module_graph.evalFileModuleGraphWithOutput(self.runtime, self.context, source_text, output, filename, io, allocator, max_source_size);
+        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, io, allocator, max_source_size);
     }
 
     pub fn runJobs(self: *TestEngine) !void {
@@ -288,6 +289,15 @@ pub const TestEngine = struct {
         try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, .method));
     }
 
+    /// Assert that `result` failed with a pending exception of class `name`
+    /// (the public API reports every throw as `error.JSException`), and take
+    /// the exception.
+    pub fn expectThrown(self: *TestEngine, name: []const u8, result: anytype) !void {
+        try std.testing.expectError(error.JSException, result);
+        var wrapper = zjs.borrowContext(self.context);
+        try std.testing.expect(try wrapper.consumePendingExceptionIfErrorName(name));
+    }
+
     pub fn takeException(self: *TestEngine) core.JSValue {
         return self.context.takePendingException();
     }
@@ -298,13 +308,6 @@ pub const TestEngine = struct {
         };
     }
 };
-
-fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
-    return switch (err) {
-        error.MissingExport, error.AmbiguousExport => error.SyntaxError,
-        else => err,
-    };
-}
 
 /// Heap state behind `createExternalHostFunctionValue`: runs the legacy probe
 /// and maps its error exactly as the old external-host seam did.

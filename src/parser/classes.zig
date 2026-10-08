@@ -4,7 +4,6 @@ const std = @import("std");
 const root = @import("../parser.zig");
 const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("../compiler/root.zig");
 const function_def_mod = bytecode.function_def;
@@ -13,14 +12,11 @@ const tok = root.token;
 const Atom = atom_module.Atom;
 const parse_state = @import("parse_state.zig");
 const declarations = @import("declarations.zig");
-const closure = @import("closure.zig");
 const identifiers = @import("identifiers.zig");
 const lookahead = @import("lookahead.zig");
 const emitter = @import("emitter.zig");
 const expressions = @import("expressions.zig");
-const statements = @import("statements.zig");
 const functions = @import("functions.zig");
-const modules = @import("modules.zig");
 const typescript = @import("typescript.zig");
 const atom_this = parse_state.atom_this;
 const atom_class_fields_init = parse_state.atom_class_fields_init;
@@ -31,10 +27,11 @@ const ClassPrivateElementKind = parse_state.ClassPrivateElementKind;
 const ClassPrivateElement = parse_state.ClassPrivateElement;
 const ParseFunctionKind = parse_state.ParseFunctionKind;
 const State = parse_state.State;
+const SourcePosition = parse_state.SourcePosition;
 const Emitter = emitter.Emitter;
 
 /// Parse class heritage (extends clause)
-/// Mirrors `js_parse_class_extends` in quickjs.c
+/// Part of `js_parse_class` in quickjs.c
 fn parseClassHeritage(s: *State) Error!void {
     if (s.peekKind() == .kw_extends) {
         try s.advance();
@@ -47,7 +44,7 @@ fn parseClassHeritage(s: *State) Error!void {
         }
         try expressions.parseLhsExpr(s, ParseFlags.default);
         // TypeScript `extends B<T>`.
-        if (s.peekKind() == .lt and !s.gotLineTerminator()) try typescript.tsParseTypeArguments(s);
+        try typescript.tsParseTypeReferenceArgumentsOpt(s);
     }
     if (s.peekKind() == .kw_implements) {
         // TypeScript `implements I<T>, J`.
@@ -72,14 +69,22 @@ fn parseClassElement(s: *State) Error!void {
 
     const modifiers = try parseClassElementModifiers(s);
     if (modifiers.is_declare) return typescript.tsSkipDeclaredField(s);
+    if (s.peekKind() == .ident and s.isIdent("accessor")) {
+        const next = s.peekNext();
+        if (!next.line_terminator and typescript.tsCanFollowClassModifier(next.kind))
+            return s.failWithMessage(null, "auto-accessors ('accessor') are not supported");
+    }
     if (s.peekKind() == .lbracket and typescript.tsIndexSignatureAhead(s)) return typescript.tsSkipIndexSignature(s);
 
     const element_source_start = s.currentFunctionSourceStart();
     const method_kind_override = try parseClassMethodPrefix(s);
-    if (classAccessorKind(s)) |is_getter| return parseClassAccessor(s, is_getter, modifiers.is_abstract, element_source_start);
+    // After `async` or `*`, `get`/`set` can only be the method name.
+    if (method_kind_override == null) {
+        if (classAccessorKind(s)) |is_getter| return parseClassAccessor(s, is_getter, modifiers.is_abstract, element_source_start);
+    }
     if (s.peekKind() == .private_name) return parseClassPrivateElement(s, modifiers.is_abstract, method_kind_override, element_source_start);
     if (s.peekKind() == .lbracket) {
-        try parseClassComputedElement(s, method_kind_override orelse .method, element_source_start);
+        try parseClassComputedElement(s, method_kind_override orelse .method, modifiers.is_abstract, element_source_start);
         if (s.peekKind() == .semicolon) try s.advance();
         return;
     }
@@ -88,8 +93,9 @@ fn parseClassElement(s: *State) Error!void {
         return parseClassNamedElement(s, prop_name.atom, modifiers.is_abstract, method_kind_override, element_source_start);
     }
     if (s.peekKind() == .lbrace) {
-        // Static block — parseBlock consumes its own opening '{'.
-        if (!s.class.is_static) return s.failUnexpectedToken();
+        // Static block — parseBlock consumes its own opening '{'. A method
+        // prefix (`static async {`, `static * {`) needs a name first.
+        if (!s.class.is_static or method_kind_override != null) return s.failUnexpectedToken();
         return parseClassStaticBlock(s);
     }
     return s.failUnexpectedToken();
@@ -111,6 +117,8 @@ fn parseClassElementModifiers(s: *State) Error!ClassElementModifiers {
         const Word = enum { none, static, access, readonly, abstract, override, declare };
         var word: Word = .none;
         if (modifier_kind == .kw_static) {
+            // A second `static` is the member name (`static static() {}`).
+            if (s.class.is_static) break;
             word = .static;
         } else if (modifier_kind == .kw_public or modifier_kind == .kw_private or modifier_kind == .kw_protected) {
             word = .access;
@@ -147,15 +155,19 @@ fn parseClassElementModifiers(s: *State) Error!ClassElementModifiers {
 /// `async` / `async *` / `*` before a method name.
 fn parseClassMethodPrefix(s: *State) Error!?ParseFunctionKind {
     var method_kind_override: ?ParseFunctionKind = null;
-    const async_is_modifier = s.peekKind() == .ident and s.isIdent("async") and switch (s.peekNextKind()) {
-        // `async` used as the element name itself.
-        .colon, .lparen, .lt, .question, .bang, .assign, .semicolon, .rbrace => false,
-        else => true,
+    const async_is_modifier = s.peekKind() == .ident and s.isIdent("async") and blk: {
+        const next = s.peekNext();
+        // `async [no LineTerminator here]`: after a newline, `async` is a
+        // field name and ASI ends the element.
+        if (next.line_terminator) break :blk false;
+        break :blk switch (next.kind) {
+            // `async` used as the element name itself.
+            .colon, .lparen, .lt, .question, .bang, .assign, .semicolon, .rbrace => false,
+            else => true,
+        };
     };
     if (async_is_modifier) {
         try s.advance();
-        if (s.gotLineTerminator())
-            return s.failWithMessage(null, "line terminator is not allowed after async in a class element");
         if (s.peekKind() == .star) {
             try s.advance();
             method_kind_override = .async_generator;
@@ -201,6 +213,7 @@ fn parseClassAccessor(s: *State, is_getter: bool, is_abstract: bool, element_sou
         }
         try emitStaticClassStackSwap(s);
     } else if (s.peekKind() == .lbracket) {
+        if (try typescript.tsComputedMemberIsErased(s, is_abstract)) return typescript.tsSkipErasedComputedMember(s, is_abstract);
         try parseClassComputedMethod(s, if (is_getter) .get else .set, if (is_getter) 1 else 2, element_source_start);
     } else {
         // Regular getter/setter - parse property name (identifier, string, or number)
@@ -285,12 +298,11 @@ fn parseClassNamedElement(s: *State, prop_atom: Atom, is_abstract: bool, method_
             if (s.class.constructor_cpool_idx != null) return s.failUnexpectedToken();
             s.ctx.in_constructor = true;
         }
-        var ctor_snap: compiler.builder.Snapshot = undefined;
         // qjs js_parse_class: the explicit constructor's closure expression is
         // discarded — the class references the child through push_const. Builder
         // snapshot taken BEFORE the emission it may roll back (no boundary bind
         // is pending here).
-        ctor_snap = s.activeBuilder().snapshot();
+        const ctor_snap = s.activeBuilder().snapshot();
         // Parse parameters with proper function kind for constructor/method
         const kind: ParseFunctionKind = if (is_constructor)
             if (s.class.has_extends) .derived_class_constructor else .class_constructor
@@ -314,6 +326,10 @@ fn parseClassNamedElement(s: *State, prop_atom: Atom, is_abstract: bool, method_
         }
         // Optional ASI semicolon after method
         if (s.peekKind() == .semicolon) try s.advance();
+    } else if (is_abstract) {
+        // An abstract property is a type-only declaration: no field.
+        if (s.peekKind() == .assign) return s.failWithMessage(null, "abstract property cannot have an initializer");
+        _ = try s.expectSemicolon();
     } else if (s.peekKind() == .assign) {
         // Field with initializer
         if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
@@ -339,10 +355,12 @@ fn parseClassNamedElement(s: *State, prop_atom: Atom, is_abstract: bool, method_
 fn classAccessorKind(s: *State) ?bool {
     if (!(s.peekKind() == .ident and (s.isIdent("get") or s.isIdent("set")))) return null;
 
+    // ClassElement has no [no LineTerminator here] after `get`/`set`:
+    // `get\nx(){}` is still an accessor. `get\n*g(){}` cannot be one, so
+    // ASI makes `get` a field followed by a generator method.
     const next_peek = s.peekNext();
     const next = next_peek.kind;
-    const has_line_terminator = next_peek.line_terminator;
-    if (has_line_terminator) return null;
+    if (next_peek.line_terminator and next == .star) return null;
     if (next == .lparen or
         next == .lt or
         next == .question or
@@ -361,7 +379,7 @@ fn registerClassPrivateElement(s: *State, atom_id: Atom, kind: ClassPrivateEleme
     for (s.class_private_elements.items) |entry| {
         if (entry.atom != atom_id) continue;
         if (classPrivateElementsConflict(entry, kind, s.class.is_static)) {
-            return s.failUnexpectedToken();
+            return s.failWithMessage(null, "duplicate private name in class body");
         }
     }
     try s.class_private_elements.append(s.scratch, .{
@@ -445,6 +463,8 @@ fn classNameAtom(s: *State) ?Atom {
     if (kind == .ident) {
         const atom_id = s.token.payload.ident.atom;
         if (escapedIdentifierIsReservedClassName(s, atom_id, s.token.payload.ident.has_escape)) return null;
+        // The class binding is strict code: `eval` / `arguments` are early errors.
+        if (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")) return null;
         return atom_id;
     }
     if (kind == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) {
@@ -455,7 +475,9 @@ fn classNameAtom(s: *State) ?Atom {
 
 fn escapedIdentifierIsReservedClassName(s: *State, atom_id: Atom, has_escape: bool) bool {
     if (!has_escape) return false;
-    return identifiers.escapedIdentifierIsReservedWordForShorthandBinding(s, atom_id, has_escape) or
+    // A class definition is strict code even in a sloppy script.
+    return identifiers.escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape) or
+        identifiers.isStrictModeReservedWord(s.atoms.name(atom_id) orelse "") or
         ((s.lex.is_module or s.ctx.in_async or s.ctx.in_class_static_block) and identifiers.atomNameEquals(s, atom_id, "await"));
 }
 
@@ -499,6 +521,12 @@ fn enterFieldInitFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Err
     s.ctx.allow_super_call = false;
     s.ctx.new_target_allowed = true;
     s.ctx.in_constructor = false;
+    // A field initializer is its own method-like function: no Yield or Await
+    // from the enclosing function (static blocks re-enable await rules).
+    s.ctx.in_generator = false;
+    s.ctx.in_async = false;
+    s.ctx.in_parameter_initializer = false;
+    s.ctx.reject_await_in_parameter_initializer = false;
     return saved;
 }
 
@@ -527,16 +555,6 @@ fn leaveStaticBlockFunction(s: *State, saved: StaticBlockContext) void {
     s.class.is_static = saved.is_static;
 }
 
-/// Leftover class field-initializer emit. candidate100 still compiled
-/// two leftover copies (`emitInstanceFieldInitializer` 1116 /
-/// `emitStaticFieldInitializer` 1326). candidate102 still compiles a
-/// third leftover (`emitInstanceComputedPublicFieldInitializer` 1016
-/// beside this helper 1314, extra 1016, 5.3% match). The leftover is
-/// enter-child + receiver + optional init + define + drop. Comptime
-/// identity is static vs instance vs computed (which child, `this`
-/// opcode, get-key / define_array_el arm). Take those at runtime.
-/// Private names stay `inline` and pass only flags — no leftover setup
-/// at the wrapper (knives 94/98).
 /// Shape of one class field: the four flags that select the initializer
 /// function, the key fetch, and the define opcode.
 const FieldInitOptions = struct {
@@ -546,6 +564,9 @@ const FieldInitOptions = struct {
     is_static: bool = false,
 };
 
+/// One emitter for static, instance, and computed class field initializers:
+/// enter the initializer function, push the receiver, evaluate the optional
+/// initializer, define, drop.
 noinline fn emitFieldInitializer(s: *State, atom_id: Atom, options: FieldInitOptions) Error!void {
     const is_private = options.is_private;
     const is_computed = options.is_computed;
@@ -641,7 +662,7 @@ fn createClassFieldsInitFunction(s: *State, include_instance_brand_prologue: boo
         try v2b.bindLabel(skip);
         v2b.invalidateLastOpcode();
     }
-    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
+    const cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd);
     const child_index: u16 = @intCast(parent_fd.child_list.len - 1);
@@ -675,18 +696,13 @@ fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
 }
 
 fn registerClassPrivateBoundName(s: *State, atom_id: Atom) Error!void {
-    for (s.class_private_bound_names.items) |existing| {
-        if (existing == atom_id) return;
-    }
+    if (classPrivateNameIsBound(s, atom_id)) return;
     // The atom id is borrowed; the enclosing CompileAtomScope is its root.
-    try s.class_private_bound_names.append(s.scratch, atom_id);
+    try s.class_private_bound_names.push(s.scratch, s.atoms, atom_id);
 }
 
 pub fn classPrivateNameIsBound(s: *State, atom_id: Atom) bool {
-    for (s.class_private_bound_names.items) |existing| {
-        if (existing == atom_id) return true;
-    }
-    return false;
+    return s.class_private_bound_names.isBound(s.atoms, atom_id);
 }
 
 fn classPrivateElementsConflict(
@@ -701,11 +717,7 @@ fn classPrivateElementsConflict(
 }
 
 pub fn privateNameAtom(s: *State, atom_id: Atom) Error!Atom {
-    s.features.insert(.private_name);
-    if (findClassPrivateBoundName(s, atom_id, 0)) |private_atom| {
-        return private_atom;
-    }
-    return newClassPrivateAtom(s, atom_id);
+    return privateNameDeclarationAtom(s, atom_id, 0);
 }
 
 fn privateNameDeclarationAtom(s: *State, atom_id: Atom, bound_start: usize) Error!Atom {
@@ -717,23 +729,7 @@ fn privateNameDeclarationAtom(s: *State, atom_id: Atom, bound_start: usize) Erro
 }
 
 pub fn findClassPrivateBoundName(s: *State, atom_id: Atom, bound_start: usize) ?Atom {
-    var i = s.class_private_bound_names.items.len;
-    while (i > bound_start) {
-        i -= 1;
-        const private_atom = s.class_private_bound_names.items[i];
-        if (privateAtomMatchesName(s, private_atom, atom_id)) return private_atom;
-    }
-    return null;
-}
-
-fn privateAtomMatchesName(s: *State, private_atom: Atom, atom_id: Atom) bool {
-    const private_name = s.atoms.name(private_atom) orelse return false;
-    const name = s.atoms.name(atom_id) orelse return false;
-    if (std.mem.eql(u8, private_name, name)) return true;
-    if (name.len > 0 and name[0] == '#') return false;
-    return private_name.len == name.len + 1 and
-        private_name[0] == '#' and
-        std.mem.eql(u8, private_name[1..], name);
+    return s.class_private_bound_names.find(s.atoms, atom_id, bound_start);
 }
 
 fn newClassPrivateAtom(s: *State, atom_id: Atom) Error!Atom {
@@ -796,23 +792,21 @@ fn emitStaticClassStackSwap(s: *State) Error!void {
 }
 
 /// `[key]` method or field of a class, static or instance.
-fn parseClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
+fn parseClassComputedElement(s: *State, kind: ParseFunctionKind, is_abstract: bool, source_start: FunctionSourceStart) Error!void {
+    if (try typescript.tsComputedMemberIsErased(s, is_abstract)) return typescript.tsSkipErasedComputedMember(s, is_abstract);
     try emitStaticClassStackSwap(s);
     try parseClassComputedName(s);
-    if (s.peekKind() == .question or (s.peekKind() == .bang and !s.gotLineTerminator())) try s.advance();
+    const is_optional = s.peekKind() == .question;
+    if (is_optional or (s.peekKind() == .bang and !s.gotLineTerminator())) try s.advance();
+    // A generator or async member is a method: `*[k]` must have its `(`.
+    if (kind != .method and !typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
     if (!typescript.tsIsMethodStart(s)) try typescript.tsParseTypeAnnotationOpt(s);
     if (typescript.tsIsMethodStart(s)) {
-        if (!(try typescript.tsFunctionHasBodyAhead(s))) {
-            try typescript.tsSkipMethodSignature(s, false);
-            try emitStaticClassStackSwap(s);
-            return;
-        }
         try parseClassElementFunction(s, kind, source_start);
         try Emitter.opU8(s, opcode.op.define_method_computed, 0);
         try emitStaticClassStackSwap(s);
         return;
     }
-    if (kind != .method) return Error.ParserInvariant;
 
     // The evaluated key is kept in a synthetic const for the field
     // initializer function.
@@ -863,8 +857,10 @@ fn parseClassStaticBlock(s: *State) Error!void {
 }
 
 /// Parse class body
-/// Mirrors `js_parse_class_body` in quickjs.c
-fn parseClassBodyAfterOpen(s: *State) Error!void {
+/// Part of `js_parse_class` in quickjs.c
+/// `outer_lex_strict`: the token after the closing `}` belongs to the
+/// enclosing code and is lexed with its strictness.
+fn parseClassBodyAfterOpen(s: *State, outer_lex_strict: bool) Error!void {
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         if (s.peekKind() == .semicolon) {
             try s.advance();
@@ -873,10 +869,14 @@ fn parseClassBodyAfterOpen(s: *State) Error!void {
         try parseClassElement(s);
     }
 
+    if (s.peekKind() == .rbrace) s.lex.is_strict_mode = outer_lex_strict;
     try s.expectToken(.rbrace);
 }
 
-fn collectClassPrivateBoundNames(s: *State, bound_start: usize) Error!void {
+/// Pre-scan of a class body (at its `{`): registers the private names it
+/// declares and collects the TypeScript parameter properties of its
+/// constructor, which tsc defines as fields ahead of the declared ones.
+fn prescanClassBody(s: *State, bound_start: usize, parameter_properties: *std.ArrayList(Atom)) Error!void {
     if (s.peekKind() != .lbrace) return;
 
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
@@ -886,22 +886,44 @@ fn collectClassPrivateBoundNames(s: *State, bound_start: usize) Error!void {
     var paren_depth: usize = 0;
     var bracket_depth: usize = 0;
     var prev_kind: tok.Kind = .eof;
+    var prev_line: u32 = 0;
+    var prev_is_static = false;
+    // A `#x` met only after a line break: an element name (the previous
+    // field ended by ASI) unless `in` follows, which makes it a brand check
+    // inside an initializer.
+    var pending_private: ?Atom = null;
+    var ctor: ParameterPropertyScan = .{};
     while (brace_depth > 0) {
         var scan_token = s.lex.next() catch |err| return lookahead.mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&scan_token);
         const k = scan_token.kind;
+        if (pending_private) |name| {
+            if (k != .kw_in) try registerClassPrivateBoundName(s, try privateNameDeclarationAtom(s, name, bound_start));
+            pending_private = null;
+        }
         if (k == .eof) break;
 
-        if (k == .private_name and
-            brace_depth == 1 and
-            paren_depth == 0 and
-            bracket_depth == 0 and
-            prev_kind != .dot and
-            prev_kind != .question_mark_dot)
-        {
-            const private_atom = try privateNameDeclarationAtom(s, scan_token.payload.ident.atom, bound_start);
-            try registerClassPrivateBoundName(s, private_atom);
+        const at_member_level = brace_depth == 1 and paren_depth == 0 and bracket_depth == 0;
+        try ctor.step(s, &scan_token, at_member_level, paren_depth, prev_kind, prev_is_static, parameter_properties);
+        prev_is_static = at_member_level and k == .kw_static;
+
+        // Only a `#x` that starts an element declares it; one inside a field
+        // initializer (`v = #x in o`) names an enclosing class's.
+        if (k == .private_name and at_member_level) {
+            const starts_element = switch (prev_kind) {
+                // Body start, the end of the previous element, or its
+                // modifiers (`static`, `get`/`set`/`async`, TS `readonly`)
+                // and the generator `*`.
+                .eof, .semicolon, .rbrace, .kw_static, .ident, .star => true,
+                else => false,
+            };
+            if (starts_element) {
+                try registerClassPrivateBoundName(s, try privateNameDeclarationAtom(s, scan_token.payload.ident.atom, bound_start));
+            } else if (scan_token.line_num != prev_line and prev_kind != .dot and prev_kind != .question_mark_dot) {
+                pending_private = scan_token.payload.ident.atom;
+            }
         }
+        prev_line = scan_token.line_num;
 
         switch (k) {
             .slash, .div_assign => {
@@ -933,6 +955,72 @@ fn collectClassPrivateBoundNames(s: *State, bound_start: usize) Error!void {
         prev_kind = k;
     }
 }
+
+/// Token-level recognizer for `constructor(public x, readonly y = 1, ...)`
+/// at class-member level: a parameter whose leading words include an
+/// accessibility, `readonly` or `override` modifier is a parameter property.
+const ParameterPropertyScan = struct {
+    state: enum { none, after_name, in_params } = .none,
+    param_start: bool = false,
+    has_modifier: bool = false,
+
+    fn step(
+        self: *ParameterPropertyScan,
+        s: *State,
+        token: *const tok.Token,
+        at_member_level: bool,
+        paren_depth: usize,
+        prev_kind: tok.Kind,
+        prev_is_static: bool,
+        out: *std.ArrayList(Atom),
+    ) Error!void {
+        const k = token.kind;
+        switch (self.state) {
+            .none => if (at_member_level and !prev_is_static and prev_kind != .dot and isConstructorNameToken(token)) {
+                self.state = .after_name;
+            },
+            .after_name => {
+                self.state = if (k == .lparen) .in_params else .none;
+                self.param_start = true;
+                self.has_modifier = false;
+            },
+            .in_params => {
+                if (paren_depth == 1 and k == .rparen) {
+                    self.state = .none;
+                } else if (paren_depth == 1 and k == .comma) {
+                    self.param_start = true;
+                    self.has_modifier = false;
+                } else if (self.param_start) {
+                    if (isParameterPropertyModifier(s, token)) {
+                        self.has_modifier = true;
+                    } else {
+                        if (self.has_modifier and k == .ident) try out.append(s.scratch, token.payload.ident.atom);
+                        self.param_start = false;
+                    }
+                }
+            },
+        }
+    }
+
+    fn isConstructorNameToken(token: *const tok.Token) bool {
+        return switch (token.kind) {
+            .ident => token.payload.ident.atom == atom_module.ids.constructor,
+            .string => std.mem.eql(u8, token.payload.str.bytes, "constructor"),
+            else => false,
+        };
+    }
+
+    fn isParameterPropertyModifier(s: *State, token: *const tok.Token) bool {
+        return switch (token.kind) {
+            .kw_public, .kw_private, .kw_protected => true,
+            .ident => blk: {
+                const name = s.lex.atoms.name(token.payload.ident.atom) orelse break :blk false;
+                break :blk std.mem.eql(u8, name, "readonly") or std.mem.eql(u8, name, "override");
+            },
+            else => false,
+        };
+    }
+};
 
 fn emitClassLocalInitFromClassStack(s: *State, local_idx: u16) Error!void {
     // qjs js_parse_class: initialize the inner class-name binding
@@ -978,18 +1066,18 @@ fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error
     // qjs js_parse_class: invoke the static
     // initializer with the constructor as home object and receiver.
     try Emitter.op(s, opcode.op.dup);
-    try s.emitFClosure(@intCast(cpool_idx));
+    try s.emitFClosure(cpool_idx);
     try Emitter.op(s, opcode.op.set_home_object);
     try Emitter.callOp(s, opcode.op.call_method, 0);
     try Emitter.op(s, opcode.op.drop);
 }
 
+const PrivateBrandNeeds = struct { instance: bool, static_: bool };
+
 /// The class stack is `[constructor, prototype]`. Private instance members
 /// use the prototype as their home object, so pre-create its brand before
 /// user code can make the prototype non-extensible. Static members brand
 /// the constructor itself. Both sequences preserve the class stack.
-const PrivateBrandNeeds = struct { instance: bool, static_: bool };
-
 fn emitClassPrivateBrands(s: *State, needs: PrivateBrandNeeds) Error!void {
     if (needs.instance) {
         // qjs js_parse_class: pre-create the instance brand on the
@@ -1018,11 +1106,12 @@ fn emitClassDefineOperands(s: *State, cpool_idx: u16) Error!void {
 
 /// Parse class declaration or expression
 /// Mirrors `js_parse_class` in quickjs.c
-/// Class declarations return their name as an owned atom; expressions
-/// return null. The caller frees a returned name.
+/// Class declarations return their name (a borrowed id the
+/// `CompileAtomScope` roots); expressions return null.
 pub fn parseClass(s: *State, is_decl: bool) Error!?Atom {
     s.features.insert(.class_);
     const class_source_start = s.currentTokenStartOffset();
+    const class_position = s.currentSourcePosition();
     try s.expectToken(.kw_class);
 
     // Parse class name (required for declarations, optional for expressions)
@@ -1039,7 +1128,7 @@ pub fn parseClass(s: *State, is_decl: bool) Error!?Atom {
     // TypeScript `class C<T>`.
     if (typescript.tsAtLess(s)) try typescript.tsParseTypeParameters(s);
 
-    var parsed = try parseClassTail(s, is_decl, class_name, class_source_start);
+    var parsed = try parseClassTail(s, is_decl, class_name, class_source_start, class_position);
     defer s.activeBuilder().discardSegment(&parsed.runtime_seg);
     if (is_decl) {
         try emitClassDeclaration(s, class_name.?, &parsed);
@@ -1071,13 +1160,13 @@ const ParsedClass = struct {
 /// functions and the constructor. Parses under the class context and
 /// restores the enclosing one; emits nothing into the parent stream except
 /// the constructor's placeholder (its closure is rolled back).
-fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_start: usize) Error!ParsedClass {
+fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_start: usize, class_position: SourcePosition) Error!ParsedClass {
     // Parse heritage (extends clause)
     const outer_class = s.class;
     const saved_is_strict = s.is_strict;
     const saved_lex_is_strict = s.lex.is_strict_mode;
     const saved_class_private_elements_len = s.class_private_elements.items.len;
-    const saved_class_private_bound_names_len = s.class_private_bound_names.items.len;
+    const saved_class_private_bound_names_len = s.class_private_bound_names.len();
     errdefer {
         s.truncateClassPrivateElements(saved_class_private_elements_len);
         s.truncateClassPrivateBoundNames(saved_class_private_bound_names_len);
@@ -1109,11 +1198,14 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
             else => unreachable,
         };
     }
-    try collectClassPrivateBoundNames(s, saved_class_private_bound_names_len);
+    var parameter_properties: std.ArrayList(Atom) = .empty;
+    defer parameter_properties.deinit(s.scratch);
+    try prescanClassBody(s, saved_class_private_bound_names_len, &parameter_properties);
     try s.expectToken(.lbrace);
     var class_private_scope = try s.openScope();
     errdefer class_private_scope.pop(s);
-    const fields_init_local_idx: u16 = switch (try declarations.defineVar(s, atom_class_fields_init, .const_)) {
+    s.class.fields_init = try s.atoms.newSymbol(s.atoms.name(atom_class_fields_init).?, .symbol);
+    const fields_init_local_idx: u16 = switch (try declarations.defineVar(s, s.class.fields_init, .const_)) {
         .local => |idx| idx,
         else => unreachable,
     };
@@ -1122,9 +1214,12 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
     // Parse class body. Constructor parsing records a child FunctionDef;
     // class definition bytecode references that child through push_const /
     // define_class instead of the normal fclosure expression path.
-    var class_mark: compiler.builder.Snapshot = undefined;
-    class_mark = s.activeBuilder().snapshot();
-    try parseClassBodyAfterOpen(s);
+    const class_mark = s.activeBuilder().snapshot();
+    // tsc (class fields as defined): `constructor(public x)` declares a
+    // field `x` before every declared instance field; the constructor
+    // then assigns it.
+    for (parameter_properties.items) |name| try emitPublicFieldNoInitializer(s, name);
+    try parseClassBodyAfterOpen(s, saved_lex_is_strict);
     const class_source_end = s.last_token_end_offset;
     try finishClassFieldsInitFunction(s);
     try finishClassStaticInitFunction(s);
@@ -1140,7 +1235,7 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
     Emitter.discardDetachedSources(s, &runtime_seg);
     const default_constructor_name = class_name orelse if (is_decl) s.root_name else atom_module.ids.empty_string;
     const constructor_cpool_idx = s.class.constructor_cpool_idx orelse
-        try appendDefaultClassConstructor(s, default_constructor_name);
+        try appendDefaultClassConstructor(s, default_constructor_name, class_position);
     const private_scope_level = s.scope_level;
     class_private_scope.pop(s);
     const outer_scope_level = s.scope_level;
@@ -1180,7 +1275,7 @@ fn emitClassDeclaration(s: *State, class_name: Atom, parsed: *ParsedClass) Error
     // lowering still establishes the outer LET's TDZ before runtime
     // evaluation starts.
     if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, class_name)) {
-        return s.failExpectedDescription("non-conflicting declaration");
+        return s.failNamed("redeclaration of '{s}'", "redeclaration", class_name);
     }
     switch (try declarations.defineVar(s, class_name, .let_)) {
         .local => |idx| class_decl_local_idx = idx,
@@ -1296,6 +1391,7 @@ fn emitClassExpression(s: *State, class_name: ?Atom, parsed: *ParsedClass) Error
 }
 fn appendClassFieldInitCallToFunctionDef(
     fd: *function_def_mod.FunctionDef,
+    fields_init: Atom,
     this_idx: u16,
 ) Error!void {
     // qjs emit_class_field_init reads `this`
@@ -1318,7 +1414,7 @@ fn appendClassFieldInitCallToFunctionDef(
     // LabelId bound at the shared drop (legacy absolute base+20). The only
     // callers run after `ensureBuilderForFd`, so the builder always exists.
     const v2b = fd.builder orelse return Error.ParserInvariant;
-    try v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, atom_class_fields_init, @intCast(fd.scope_level));
+    try v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, fields_init, @intCast(fd.scope_level));
     try v2b.emitOp(opcode.op.dup);
     const skip = try v2b.newLabel();
     try v2b.emitJump(opcode.op.if_false, skip);
@@ -1330,9 +1426,11 @@ fn appendClassFieldInitCallToFunctionDef(
     try v2b.emitOp(opcode.op.drop);
 }
 
-fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
+/// The synthesized constructor is attributed to the `class` keyword: it has
+/// no source of its own, and the token after the class body is unrelated.
+fn appendDefaultClassConstructor(s: *State, name_atom: Atom, class_position: SourcePosition) Error!u16 {
     const parent_fd = s.curFunc();
-    const child_fd = try functions.newChildFunctionDef(s, parent_fd, name_atom, s.currentSourcePosition());
+    const child_fd = try functions.newChildFunctionDef(s, parent_fd, name_atom, class_position);
     errdefer s.discardFunctionDef(child_fd);
     child_fd.is_strict_mode = true;
     child_fd.func_type = if (s.class.has_extends) .derived_class_constructor else .class_constructor;
@@ -1371,10 +1469,9 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
         // derived-constructor state and its checked this binding.
         try v2b.emitOp(opcode.op.init_ctor);
         try v2b.emitOpU16(opcode.op.put_loc_check_init, this_idx);
-        try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
-        // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
-        //; the derived arm
-        // reads `this` with scope_get_var_checkthis so an uninitialized
+        try appendClassFieldInitCallToFunctionDef(child_fd, s.class.fields_init, this_idx);
+        // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE);
+        // the derived arm reads `this` with scope_get_var_checkthis so an uninitialized
         // ReferenceError is raised in the caller context, lowered to
         // get_loc_checkthis.
         // qjs js_parse_class_default_ctor: return the initialized
@@ -1382,12 +1479,12 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
         try v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx);
         try v2b.emitOp(opcode.op.@"return");
     } else {
-        try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+        try appendClassFieldInitCallToFunctionDef(child_fd, s.class.fields_init, this_idx);
         // qjs js_parse_class_default_ctor: a base default constructor
         // completes with return_undef after instance field setup.
         try v2b.emitOp(opcode.op.return_undef);
     }
-    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
+    const cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd);
     return cpool_idx;

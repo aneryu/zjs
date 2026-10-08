@@ -1,9 +1,8 @@
 //! Poll routing, growth-threshold reset, and doomed-destruction completion.
 //!
-//! `JSRuntime.pollGC` still checks the owner thread, skips a poll while a
-//! payload finalizer is active, and drains deferred cleanup first. This
+//! `JSRuntime.pollGC` checks the owner thread and tracing reentry. This
 //! module owns the minor/major decision, the threshold write, and finishing
-//! an interrupted destruction. `gc_running` stays separate from `phase`.
+//! an interrupted destruction. `gc.hot.collecting` stays separate from `phase`.
 
 const std = @import("std");
 const gc = @import("gc.zig");
@@ -18,15 +17,6 @@ pub fn continuePoll(
     mode: PollMode,
 ) gc.CollectionError!gc.CollectionResult {
     self.assertGCAllowed();
-    // A morgue can only be non-empty if a collection was interrupted
-    // mid-destruction by an allocation failure; finish it before starting
-    // anything new. Destruction is irreversible.
-    if (self.gc.morgue.pending and !self.gc_running and self.gc.hot.phase == .none) {
-        self.gc_running = true;
-        @import("gc_trace_stw.zig").finishPendingDestruction(self);
-        self.gc_running = false;
-        _ = finishDoomed(self, 0);
-    }
     // Is the whole-heap threshold already crossed? The crossing decides
     // the ORDER of the two collections below, and it is asked TWICE: once
     // here, and again on the account a minor leaves behind.
@@ -66,7 +56,7 @@ pub fn continuePoll(
     const crossing = over_threshold or self.gc.scheduler.pendingAllocationThresholdRequest();
     // §8.5: an automatic poll prefers a minor. A minor only reaches the
     // young set, so allocation churn is reclaimed without a whole-heap
-    // trace -- but only here. An explicit `runObjectCycleRemoval` means
+    // trace -- but only here. An explicit `collectFull` means
     // "collect everything", and answering it with a minor would silently
     // change what that call promises.
     //
@@ -95,9 +85,9 @@ pub fn continuePoll(
         self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
     else
         mode.acceptsMinor() and self.gc.shouldTryMinor();
-    if (offer_minor and !self.gc_running) {
-        self.gc_running = true;
-        defer self.gc_running = false;
+    if (offer_minor and !self.gc.hot.collecting) {
+        self.gc.hot.collecting = true;
+        defer self.gc.hot.collecting = false;
         self.sampleAllocationPeak();
         const started = self.diagnosticNanos();
         if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
@@ -152,7 +142,7 @@ pub fn continuePoll(
             // in the same poll contributes its reclaim to the freed
             // account but never its time to the major's pause ring.
             if (freed > 0) self.gc.recordMinorSuccess(result);
-            // Deliberately NOT `resetGCThreshold()`. That sets the
+            // Deliberately NOT `resetThreshold()`. That sets the
             // major threshold to 1.5x the CURRENT footprint and
             // clears the allocation debt, and a minor has no claim
             // to either: it did not look at the old generation, so
@@ -188,7 +178,7 @@ pub fn continuePoll(
             }
         }
     }
-    if (self.gc_running or self.gc.hot.phase != .none) return .{};
+    if (self.collectorBusy()) return .{};
     const scheduler_point: gc.SchedulerPoint = switch (mode) {
         .normal => .allocation_slow_path,
         .callback_boundary => .callback_boundary,
@@ -209,46 +199,19 @@ pub fn continuePoll(
     else
         gc.RequestReason.manual;
     self.gc.scheduler.beginMajorCycle(reason);
-    return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
-}
-
-pub fn resetThresholdExcludingDoomed(self: *JSRuntime) void {
-    const settled = self.gc.heap_budget.bytes -| self.gc.morgue.bytes;
-    const saved = self.gc.heap_budget.bytes;
-    // Reuse the one rule rather than duplicating it: present the heap
-    // budget net of corpses, compute, restore. Single-threaded.
-    self.gc.heap_budget.bytes = settled;
-    resetThreshold(self);
-    self.gc.heap_budget.bytes = saved;
-}
-
-pub fn finishDoomed(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
-    std.debug.assert(!self.gc.morgue.pending);
-    @import("gc_trace_stw.zig").auditDoomedExitInvariant(self);
-    const result: gc.CollectionResult = .{
-        .freed_objects = self.gc.morgue.destroyed,
-        .duration_ns = last_slice_ns,
-    };
-    self.gc.morgue.destroyed = 0;
-    self.gc.recordCycleSuccess(result);
-    resetThreshold(self);
-    _ = self.gc.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
-    return result;
+    return try self.collectFull(null, mode.rootScan());
 }
 
 pub fn resetThreshold(self: *JSRuntime) void {
-    // Refcounting keeps qjs's rule verbatim (js_trigger_gc after JS_RunGC,
-    // quickjs.c): threshold = malloc_size + (malloc_size >> 1).
-    //
-    // The tracer gets 2x, and the divergence is deliberate: qjs's 1.5x
-    // governs a CYCLE collector running over a heap where refcounting has
-    // already freed every acyclic object, so each round handles residue.
-    // A tracer must trace the whole live set to free anything at all --
-    // the cost of a collection is proportional to what survives, not to
-    // what dies -- so the same constant buys far less allocation per
-    // whole-heap trace. Copying it across that semantic change was
-    // faithfulness to the wrong collector: splay completed in 16 rounds
-    // under rc and paid ~41 whole-heap majors under the tracer at 1.5x.
+    // qjs's rule (js_trigger_gc after JS_RunGC, quickjs.c) is
+    // threshold = malloc_size + (malloc_size >> 1). The tracer uses 2x, and
+    // the divergence is deliberate: qjs's 1.5x governs a CYCLE collector
+    // running over a heap where refcounting has already freed every acyclic
+    // object, so each round handles residue. A tracer must trace the whole
+    // live set to free anything at all -- the cost of a collection is
+    // proportional to what survives, not to what dies -- so the same
+    // constant buys far less allocation per whole-heap trace (splay paid ~41
+    // whole-heap majors at 1.5x).
     // JSC's precedent for a full-tracing heap is a growth factor of 2 on
     // small heaps (smallHeapGrowthFactor, OptionsList.h:219; "small" is
     // heap < 25% of RAM). The factor here was 1.75 while §1.3 capped
@@ -279,12 +242,6 @@ pub fn resetThreshold(self: *JSRuntime) void {
         self.gc.stats.threshold_floor_hits +|= 1;
     } else {
         self.gc.stats.threshold_growth_hits +|= 1;
-    }
-    // A pending morgue uses a provisional threshold net of doomed bytes;
-    // no new cycle may begin before destruction completes, and the final
-    // reset below will publish the actual settled pair.
-    if (!self.gc.morgue.pending) {
-        self.gc.noteCycleEnvelopeBaseline(self.gc.heap_budget.bytes, self.gc.heap_budget.gc_threshold);
     }
     self.gc.resetAllocationDebt();
 }

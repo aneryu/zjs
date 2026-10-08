@@ -75,6 +75,126 @@ pub const InternalCallableTag = enum(u8) {
     }
 };
 
+/// Which standard constructor a native function object is. Bootstrap stamps
+/// it on the constructor objects; IsConstructor, [[Call]] without `new` and
+/// [[Construct]] dispatch on it instead of on the function's name.
+pub const NativeConstructorKind = enum(u8) {
+    none = 0,
+    object,
+    function,
+    async_function,
+    generator_function,
+    async_generator_function,
+    array,
+    string,
+    number,
+    boolean,
+    symbol,
+    bigint,
+    date,
+    regexp,
+    error_,
+    eval_error,
+    range_error,
+    reference_error,
+    syntax_error,
+    type_error,
+    uri_error,
+    internal_error,
+    aggregate_error,
+    suppressed_error,
+    disposable_stack,
+    async_disposable_stack,
+    promise,
+    map,
+    set,
+    weak_map,
+    weak_set,
+    weak_ref,
+    finalization_registry,
+    array_buffer,
+    shared_array_buffer,
+    typed_array,
+    int8_array,
+    uint8_array,
+    uint8_clamped_array,
+    int16_array,
+    uint16_array,
+    int32_array,
+    uint32_array,
+    float16_array,
+    float32_array,
+    float64_array,
+    bigint64_array,
+    biguint64_array,
+    data_view,
+    proxy,
+    iterator,
+
+    /// The constructor's intrinsic name (`%Map%` -> "Map").
+    pub fn name(self: NativeConstructorKind) []const u8 {
+        return switch (self) {
+            .none => "",
+            .object => "Object",
+            .function => "Function",
+            .async_function => "AsyncFunction",
+            .generator_function => "GeneratorFunction",
+            .async_generator_function => "AsyncGeneratorFunction",
+            .array => "Array",
+            .string => "String",
+            .number => "Number",
+            .boolean => "Boolean",
+            .symbol => "Symbol",
+            .bigint => "BigInt",
+            .date => "Date",
+            .regexp => "RegExp",
+            .error_ => "Error",
+            .eval_error => "EvalError",
+            .range_error => "RangeError",
+            .reference_error => "ReferenceError",
+            .syntax_error => "SyntaxError",
+            .type_error => "TypeError",
+            .uri_error => "URIError",
+            .internal_error => "InternalError",
+            .aggregate_error => "AggregateError",
+            .suppressed_error => "SuppressedError",
+            .disposable_stack => "DisposableStack",
+            .async_disposable_stack => "AsyncDisposableStack",
+            .promise => "Promise",
+            .map => "Map",
+            .set => "Set",
+            .weak_map => "WeakMap",
+            .weak_set => "WeakSet",
+            .weak_ref => "WeakRef",
+            .finalization_registry => "FinalizationRegistry",
+            .array_buffer => "ArrayBuffer",
+            .shared_array_buffer => "SharedArrayBuffer",
+            .typed_array => "TypedArray",
+            .int8_array => "Int8Array",
+            .uint8_array => "Uint8Array",
+            .uint8_clamped_array => "Uint8ClampedArray",
+            .int16_array => "Int16Array",
+            .uint16_array => "Uint16Array",
+            .int32_array => "Int32Array",
+            .uint32_array => "Uint32Array",
+            .float16_array => "Float16Array",
+            .float32_array => "Float32Array",
+            .float64_array => "Float64Array",
+            .bigint64_array => "BigInt64Array",
+            .biguint64_array => "BigUint64Array",
+            .data_view => "DataView",
+            .proxy => "Proxy",
+            .iterator => "Iterator",
+        };
+    }
+
+    /// One of the concrete `%TypedArray%` subclasses (not `%TypedArray%`).
+    pub fn isConcreteTypedArray(self: NativeConstructorKind) bool {
+        return @intFromEnum(self) >= @intFromEnum(NativeConstructorKind.int8_array) and
+            @intFromEnum(self) <= @intFromEnum(NativeConstructorKind.biguint64_array);
+    }
+};
+
 /// Atomic call-duration realm view passed across the external-host boundary.
 /// `realm.global` and the realm's global slots must always be read from this
 /// same context; carrying independent aliases made mixed-realm calls possible.
@@ -192,10 +312,8 @@ pub fn isConstructorCProto(cproto: NativeCProto) bool {
     };
 }
 
-/// NB2: the dispatch record is the
-/// unified `NativeEntry` (`native_entry.zig`). The phase-A2 transition
-/// aliases `InternalRecord` / `SparseInternalRecord` / `InternalRecordTable`
-/// are gone; declaration tables still speak `InternalEntry` (below) and
+/// NB2: the dispatch record is the unified `NativeEntry`
+/// (`native_entry.zig`). Declaration tables speak `InternalEntry` (below) and
 /// exec's `native_legacy.entryFromInternal` turns each into an entry.
 const native_entry = @import("native_entry.zig");
 
@@ -242,6 +360,25 @@ pub const InternalEntry = struct {
 // load-bearing: they are baked into the comptime record tables and into already
 // compiled bytecode's native-builtin ids, so they must never change here.
 pub const builtin_method_ids = struct {
+    /// DisposableStack.prototype (1..6) and AsyncDisposableStack.prototype
+    /// (11..16), including the `disposed` getters.
+    pub const disposable = struct {
+        pub const Method = enum(u32) {
+            use = 1,
+            adopt = 2,
+            defer_ = 3,
+            dispose = 4,
+            move = 5,
+            disposed_get = 6,
+            async_use = 11,
+            async_adopt = 12,
+            async_defer = 13,
+            async_dispose_async = 14,
+            async_move = 15,
+            async_disposed_get = 16,
+        };
+    };
+
     pub const array = struct {
         pub const StaticMethod = enum(u32) {
             from = 1,
@@ -304,6 +441,45 @@ pub const builtin_method_ids = struct {
             values = 136,
             entries = 137,
         };
+
+        /// %TypedArray% statics and %TypedArray%.prototype methods. They
+        /// share the Array bodies, which apply the typed-array receiver checks
+        /// when the called function carries one of these ids.
+        /// `%TypedArray%.prototype.toString` is `Array.prototype.toString`.
+        pub const TypedArrayMethod = enum(u32) {
+            from = 300,
+            of = 301,
+            to_locale_string = 302,
+            map = 303,
+            filter = 304,
+            reduce = 305,
+            reduce_right = 306,
+            for_each = 307,
+            some = 308,
+            every = 309,
+            find = 310,
+            find_index = 311,
+            find_last = 312,
+            find_last_index = 313,
+            includes = 314,
+            index_of = 315,
+            last_index_of = 316,
+            at = 317,
+            copy_within = 318,
+            fill = 319,
+            slice = 320,
+            join = 321,
+            reverse = 322,
+            sort = 323,
+            to_reversed = 324,
+            to_sorted = 325,
+            with_ = 326,
+            keys = 327,
+            values = 328,
+            entries = 329,
+            set = 330,
+            subarray = 331,
+        };
     };
 
     pub const json = struct {
@@ -335,8 +511,6 @@ pub const builtin_method_ids = struct {
             resize = 102,
             transfer = 103,
             transfer_to_fixed_length = 104,
-            slice_to_immutable = 105,
-            transfer_to_immutable = 106,
         };
 
         pub const SharedArrayBufferPrototypeMethod = enum(u32) {
@@ -377,7 +551,6 @@ pub const builtin_method_ids = struct {
             detached = 402,
             max_byte_length = 403,
             resizable = 404,
-            immutable = 405,
         };
 
         pub const SharedArrayBufferAccessorMethod = enum(u32) {
@@ -604,13 +777,29 @@ pub const builtin_method_ids = struct {
         /// Intrinsic iterator prototype methods that are not properties of
         /// `Iterator.prototype` itself. QuickJS installs these as direct
         /// `JSCFunction` entries (`JS_ITERATOR_NEXT_DEF`) carrying a function
-        /// pointer plus magic; keep them in the iterator native-record domain
-        /// so calls do not fall back to dispatch-name matching.
+        /// pointer plus magic; they are records in the iterator domain.
         pub const IntrinsicMethod = enum(u32) {
             array_iterator_next = 213,
             generator_next = 214,
             generator_return = 215,
             generator_throw = 216,
+            regexp_string_iterator_next = 217,
+            iterator_helper_next = 218,
+            iterator_helper_return = 219,
+            wrap_for_valid_iterator_next = 220,
+            wrap_for_valid_iterator_return = 221,
+            async_from_sync_iterator_next = 222,
+            async_from_sync_iterator_return = 223,
+            async_from_sync_iterator_throw = 224,
+            async_generator_next = 225,
+            async_generator_return = 226,
+            async_generator_throw = 227,
+            /// `%IteratorPrototype%[@@iterator]`: returns its receiver.
+            iterator = 228,
+            /// `%AsyncIteratorPrototype%[@@asyncIterator]`: returns its receiver.
+            async_iterator = 229,
+            /// `%AsyncIteratorPrototype%[@@asyncDispose]`.
+            async_iterator_async_dispose = 230,
         };
     };
 
@@ -622,6 +811,10 @@ pub const builtin_method_ids = struct {
             is_finite = 4,
             is_integer = 5,
             is_safe_integer = 6,
+            /// Global `isNaN` / `isFinite`: unlike the `Number` statics they
+            /// coerce their argument with ToNumber.
+            global_is_nan = 7,
+            global_is_finite = 8,
         };
 
         pub const PrototypeMethod = enum(u32) {
@@ -810,6 +1003,22 @@ pub const builtin_method_ids = struct {
             match_all = 143,
             iterator_next = 144,
             replace = 145,
+            anchor = 146,
+            big = 147,
+            blink = 148,
+            bold = 149,
+            fixed = 150,
+            fontcolor = 151,
+            fontsize = 152,
+            italics = 153,
+            link = 154,
+            small = 155,
+            strike = 156,
+            sub = 157,
+            substr = 158,
+            sup = 159,
+            /// `String.prototype[Symbol.iterator]`.
+            iterator = 160,
         };
     };
 };
@@ -882,6 +1091,20 @@ pub const builtin_method_id_lookup = struct {
             .{ "matchAll", .match_all },
             .{ "replaceAll", .replace_all },
             .{ "replace", .replace },
+            .{ "anchor", .anchor },
+            .{ "big", .big },
+            .{ "blink", .blink },
+            .{ "bold", .bold },
+            .{ "fixed", .fixed },
+            .{ "fontcolor", .fontcolor },
+            .{ "fontsize", .fontsize },
+            .{ "italics", .italics },
+            .{ "link", .link },
+            .{ "small", .small },
+            .{ "strike", .strike },
+            .{ "sub", .sub },
+            .{ "substr", .substr },
+            .{ "sup", .sup },
         });
 
         pub fn prototypeMethodId(name: []const u8) ?u32 {
@@ -920,6 +1143,20 @@ pub const builtin_method_id_lookup = struct {
                 @intFromEnum(PrototypeMethod.replace_all) => legacy_replace_all_method_id,
                 @intFromEnum(PrototypeMethod.match_all) => legacy_match_all_method_id,
                 @intFromEnum(PrototypeMethod.replace) => legacy_replace_method_id,
+                @intFromEnum(PrototypeMethod.anchor) => 11,
+                @intFromEnum(PrototypeMethod.big) => 12,
+                @intFromEnum(PrototypeMethod.blink) => 13,
+                @intFromEnum(PrototypeMethod.bold) => 14,
+                @intFromEnum(PrototypeMethod.fixed) => 15,
+                @intFromEnum(PrototypeMethod.fontcolor) => 16,
+                @intFromEnum(PrototypeMethod.fontsize) => 17,
+                @intFromEnum(PrototypeMethod.italics) => 18,
+                @intFromEnum(PrototypeMethod.link) => 19,
+                @intFromEnum(PrototypeMethod.small) => 20,
+                @intFromEnum(PrototypeMethod.strike) => 23,
+                @intFromEnum(PrototypeMethod.sub) => 24,
+                @intFromEnum(PrototypeMethod.substr) => 25,
+                @intFromEnum(PrototypeMethod.sup) => 26,
                 else => null,
             };
         }
@@ -1020,14 +1257,6 @@ pub const builtin_method_id_lookup = struct {
             weak_map = 3,
             weak_set = 4,
         };
-
-        pub fn constructorId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "Map")) return @intFromEnum(ConstructorKind.map);
-            if (std.mem.eql(u8, name, "Set")) return @intFromEnum(ConstructorKind.set);
-            if (std.mem.eql(u8, name, "WeakMap")) return @intFromEnum(ConstructorKind.weak_map);
-            if (std.mem.eql(u8, name, "WeakSet")) return @intFromEnum(ConstructorKind.weak_set);
-            return null;
-        }
 
         /// The native-builtin construct id for a given `ConstructorKind` value,
         /// used by the exec construct sites to build the record ref. Pure id
@@ -1195,29 +1424,6 @@ pub const builtin_method_id_lookup = struct {
             return if (is_set) get_id + set_off else get_id;
         }
 
-        pub fn arrayBufferAccessorMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "byteLength")) return @intFromEnum(ArrayBufferAccessorMethod.byte_length);
-            if (std.mem.eql(u8, name, "detached")) return @intFromEnum(ArrayBufferAccessorMethod.detached);
-            if (std.mem.eql(u8, name, "maxByteLength")) return @intFromEnum(ArrayBufferAccessorMethod.max_byte_length);
-            if (std.mem.eql(u8, name, "resizable")) return @intFromEnum(ArrayBufferAccessorMethod.resizable);
-            if (std.mem.eql(u8, name, "immutable")) return @intFromEnum(ArrayBufferAccessorMethod.immutable);
-            return null;
-        }
-
-        pub fn sharedArrayBufferAccessorMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "byteLength")) return @intFromEnum(SharedArrayBufferAccessorMethod.byte_length);
-            if (std.mem.eql(u8, name, "maxByteLength")) return @intFromEnum(SharedArrayBufferAccessorMethod.max_byte_length);
-            if (std.mem.eql(u8, name, "growable")) return @intFromEnum(SharedArrayBufferAccessorMethod.growable);
-            return null;
-        }
-
-        pub fn dataViewAccessorMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "buffer")) return @intFromEnum(DataViewAccessorMethod.buffer);
-            if (std.mem.eql(u8, name, "byteLength")) return @intFromEnum(DataViewAccessorMethod.byte_length);
-            if (std.mem.eql(u8, name, "byteOffset")) return @intFromEnum(DataViewAccessorMethod.byte_offset);
-            return null;
-        }
-
         pub fn typedArrayAccessorMethodId(name: []const u8) ?u32 {
             if (std.mem.eql(u8, name, "buffer")) return @intFromEnum(TypedArrayAccessorMethod.buffer);
             if (std.mem.eql(u8, name, "byteLength")) return @intFromEnum(TypedArrayAccessorMethod.byte_length);
@@ -1267,7 +1473,6 @@ pub const builtin_method_id_lookup = struct {
                 @intFromEnum(ArrayBufferAccessorMethod.detached) => "detached",
                 @intFromEnum(ArrayBufferAccessorMethod.max_byte_length) => "maxByteLength",
                 @intFromEnum(ArrayBufferAccessorMethod.resizable) => "resizable",
-                @intFromEnum(ArrayBufferAccessorMethod.immutable) => "immutable",
                 else => null,
             };
         }

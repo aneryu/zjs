@@ -1,8 +1,5 @@
 const std = @import("std");
-const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
-const FunctionBytecode = bytecode.FunctionBytecode;
-const module = @This();
 
 pub const Request = struct {
     module_name: atom.Atom,
@@ -58,6 +55,30 @@ pub const Record = struct {
         return .{ .memory = allocator, .atoms = atoms };
     }
 
+    /// Root every name this record holds in `scope`: the record keeps its
+    /// atoms in plain fields no collector sees, from the end of the compile
+    /// that built it until the module record that copies them is installed.
+    pub fn noteAtoms(self: *const Record, scope: *atom.CompileAtomScope) void {
+        for (self.requests) |entry| scope.note(entry.module_name);
+        for (self.imports) |entry| {
+            scope.note(entry.import_name);
+            scope.note(entry.local_name);
+        }
+        for (self.exports) |entry| {
+            scope.note(entry.export_name);
+            scope.note(entry.local_name);
+        }
+        for (self.indirect_exports) |entry| {
+            scope.note(entry.export_name);
+            scope.note(entry.import_name);
+        }
+        for (self.star_exports) |entry| scope.note(entry.export_name);
+        for (self.import_attributes) |entry| {
+            scope.note(entry.key);
+            scope.note(entry.value);
+        }
+    }
+
     pub fn deinit(self: *Record) void {
         const requests = self.requests;
         const imports = self.imports;
@@ -109,6 +130,16 @@ pub const Record = struct {
             .export_name = export_name,
             .local_name = local_name,
         });
+    }
+
+    /// Drops `exports[index]` (a TypeScript export naming only a type).
+    pub fn removeExport(self: *Record, index: usize) !void {
+        const old = self.exports;
+        const next = try self.memory.alloc(Export, old.len - 1);
+        @memcpy(next[0..index], old[0..index]);
+        @memcpy(next[index..], old[index + 1 ..]);
+        self.memory.free(old);
+        self.exports = next;
     }
 
     pub fn addIndirectExport(

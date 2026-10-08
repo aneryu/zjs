@@ -4,7 +4,6 @@
 //! APIs return caller-owned buffers or explicitly deinitialized ranges.
 const std = @import("std");
 const array_list_erased = @import("../core/array_list_erased.zig");
-pub const regexp_properties = @This();
 
 const blob = @embedFile("unicode_tables.bin");
 
@@ -893,7 +892,11 @@ pub fn derived(prop: Prop) ?Derived {
     };
 }
 
+/// Whether `\p{prop}` is valid: ECMA-262's binary property table lists it
+/// and the data backs it. IDS_Unary_Operator and Modifier_Combining_Mark
+/// have tables but are not in that table.
 pub fn isSupported(prop: Prop) bool {
+    if (prop == .IDS_Unary_Operator or prop == .Modifier_Combining_Mark) return false;
     return propTable(prop) != null or derived(prop) != null;
 }
 
@@ -1382,8 +1385,9 @@ pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
     return isEcmaWhitespaceOrLineTerminatorCodePoint(@intCast(unit));
 }
 
+/// Infra "ASCII whitespace": TAB, LF, FF, CR, SPACE (not VT).
 pub fn isAsciiWhitespaceByte(byte: u8) bool {
-    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == 0x0b or byte == 0x0c;
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == 0x0c;
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
@@ -1655,6 +1659,8 @@ fn propertyRangeSet(allocator: std.mem.Allocator, expr: []const u8) UnicodeError
     const name = if (equals) |pos| expr[0..pos] else expr;
     const value = if (equals) |pos| expr[pos + 1 ..] else "";
     if (name.len == 0 or name.len >= 64 or value.len >= 64) return error.InvalidProperty;
+    // `\p{Name=}`: an `=` needs a value.
+    if (equals != null and value.len == 0) return error.InvalidProperty;
 
     return if (std.mem.eql(u8, name, "Script") or std.mem.eql(u8, name, "sc"))
         scriptRanges(allocator, value, false)
@@ -2240,7 +2246,9 @@ fn composePair(c0: u32, c1: u32) u32 {
     if (c0 >= 0x1100 and c0 < 0x1100 + 19 and c1 >= 0x1161 and c1 < 0x1161 + 21) {
         return 0xac00 + (c0 - 0x1100) * 588 + (c1 - 0x1161) * 28;
     }
-    if (c0 >= 0xac00 and c0 < 0xac00 + 11172 and (c0 - 0xac00) % 28 == 0 and c1 >= 0x11a7 and c1 < 0x11a7 + 28) {
+    // LV + T: T ranges over TBase+1 .. TBase+27 (UAX #15); TBase itself
+    // (U+11A7) is not a trailing consonant and does not compose.
+    if (c0 >= 0xac00 and c0 < 0xac00 + 11172 and (c0 - 0xac00) % 28 == 0 and c1 > 0x11a7 and c1 < 0x11a7 + 28) {
         return c0 + c1 - 0x11a7;
     }
     return unicodeComposePair(c0, c1);
@@ -2705,6 +2713,7 @@ fn unicodePropOps(allocator: std.mem.Allocator, ops: []const Op) UnicodeError!Ra
 
 fn unicodeProp(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
     const prop = propIndex(name) orelse return error.InvalidProperty;
+    if (!isSupported(prop)) return error.InvalidProperty;
 
     if (derived(prop)) |derived_prop| {
         switch (derived_prop) {
@@ -3286,7 +3295,7 @@ test "unicode ascii whitespace byte helper covers source scanners" {
     try std.testing.expect(isAsciiWhitespaceByte('\t'));
     try std.testing.expect(isAsciiWhitespaceByte('\n'));
     try std.testing.expect(isAsciiWhitespaceByte('\r'));
-    try std.testing.expect(isAsciiWhitespaceByte(0x0b));
+    try std.testing.expect(!isAsciiWhitespaceByte(0x0b));
     try std.testing.expect(isAsciiWhitespaceByte(0x0c));
     try std.testing.expect(!isAsciiWhitespaceByte('a'));
     try std.testing.expect(!isAsciiWhitespaceByte(0x85));

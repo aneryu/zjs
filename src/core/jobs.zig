@@ -44,7 +44,7 @@ pub const PromiseReactionPayload = struct {
     phase: PromiseReactionPhase = .invoke,
 
     /// Replace the job-owned handler input with an already-owned completion.
-    /// Symbol values are refcounted, so the JSValue itself is the new root.
+    /// The job is traced, so storing the JSValue is the whole transfer.
     pub fn replaceValueOwned(self: *PromiseReactionPayload, _: *core.JSRuntime, value: core.JSValue) void {
         self.value = value;
     }
@@ -126,6 +126,10 @@ pub const AtomicsWaiterPayload = struct {
 pub const FinalizationPayload = struct {
     callback: core.JSValue,
     held_value: core.JSValue,
+    /// The registry and the queued cell the job cleans up; the job runs the
+    /// callback only if `unregister` has not removed that cell meanwhile.
+    registry: core.JSValue,
+    cell_id: u32,
 };
 
 pub const Payload = union(enum) {
@@ -159,27 +163,11 @@ pub const Job = struct {
                 .argc = @intCast(args.len),
             } },
         };
-        errdefer job.deinit();
-        const payload = &job.payload.generic;
-        for (args, 0..) |arg, index| {
-            payload.argv[index] = arg;
-        }
+        @memcpy(job.payload.generic.argv[0..args.len], args);
         return job;
     }
 
     pub fn initPromise(context: *core.JSContext, value: core.JSValue) Job {
-        return .{
-            .runtime = context.runtime,
-            .realm = core.RealmRef.retain(context),
-            .payload = .{ .promise = .{ .value = value } },
-        };
-    }
-
-    /// Build a no-fail commit entry from a caller-owned object value after the
-    /// queue storage has already been reserved. Ownership of `value` moves into
-    /// the returned entry.
-    pub fn initOwnedPromiseObject(context: *core.JSContext, value: core.JSValue) Job {
-        std.debug.assert(value.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
@@ -306,6 +294,8 @@ pub const Job = struct {
         realm: *core.JSContext,
         callback: core.JSValue,
         held_value: core.JSValue,
+        registry: core.JSValue,
+        cell_id: u32,
     ) Job {
         return .{
             .runtime = realm.runtime,
@@ -313,6 +303,8 @@ pub const Job = struct {
             .payload = .{ .finalization = .{
                 .callback = callback,
                 .held_value = held_value,
+                .registry = registry,
+                .cell_id = cell_id,
             } },
         };
     }
@@ -363,6 +355,7 @@ pub const Job = struct {
             .finalization => |*payload| {
                 payload.callback = core.JSValue.undefinedValue();
                 payload.held_value = core.JSValue.undefinedValue();
+                payload.registry = core.JSValue.undefinedValue();
             },
         }
         self.realm.deinit();
@@ -374,9 +367,8 @@ pub const Job = struct {
     }
 
     pub fn traceRoots(self: *Job, visitor: anytype) !void {
-        // A queued job's RealmRef is ownership, not membership. Default `rc`
-        // erases `constHeader`. Tracing must shade the realm from the job,
-        // not from `context_head`.
+        // A queued job's RealmRef is ownership, not membership. Tracing must
+        // shade the realm from the job, not from `contexts.live_head`.
         if (self.realm.borrow()) |ctx| try visitor.constHeader(&ctx.header);
         switch (self.payload) {
             .generic => |*payload| for (payload.argv[0..payload.argc]) |*arg| try visitor.value(arg),
@@ -412,6 +404,7 @@ pub const Job = struct {
             .finalization => |*payload| {
                 try visitor.value(&payload.callback);
                 try visitor.value(&payload.held_value);
+                try visitor.value(&payload.registry);
             },
         }
     }
@@ -546,20 +539,6 @@ pub const Queue = struct {
         self.unlinked_head_slots -= 1;
     }
 
-    /// Spend the pinned head slot on a tail append instead of a head reinsert.
-    /// A retriable runner that reached its commit point can no longer fail, so
-    /// the one promised slot is free to change position. No-fail: reclaiming
-    /// the drained prefix moves the pinned storage into appendable range.
-    pub fn enqueueUnlinkedEntrySlot(self: *Queue, job: Job) void {
-        std.debug.assert(self.unlinked_head_slots != 0);
-        self.unlinked_head_slots -= 1;
-        if (self.head + self.jobs.len + self.reserved_entries == self.capacity) {
-            std.debug.assert(self.head > self.unlinked_head_slots);
-            self.reclaimDrainedPrefix();
-        }
-        self.append(job);
-    }
-
     /// Commit one already-prepared entry without allocation. The caller must
     /// reserve enough queue storage before entering its visible state-change
     /// phase.
@@ -585,19 +564,12 @@ pub const Queue = struct {
 
     pub fn enqueueFunc(self: *Queue, context: *core.JSContext, func: Func, args: []const core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.init(context, func, args);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(try Job.init(context, func, args));
     }
 
     pub fn enqueuePromise(self: *Queue, context: *core.JSContext, value: core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
         self.enqueuePrepared(Job.initPromise(context, value));
-    }
-
-    /// Transfer an owned object payload into an already-reserved Promise job.
-    pub fn enqueueOwnedPromiseObjectPrepared(self: *Queue, context: *core.JSContext, value: core.JSValue) void {
-        self.enqueueReserved(Job.initOwnedPromiseObject(context, value));
     }
 
     pub fn preparePromiseReaction(
@@ -669,14 +641,9 @@ pub const Queue = struct {
         self.enqueuePrepared(Job.initAtomicsWaiter(context, waiter, promise.*, runner, destroyer));
     }
 
-    pub fn enqueueFinalization(
-        self: *Queue,
-        realm: *core.JSContext,
-        callback: core.JSValue,
-        held_value: core.JSValue,
-    ) !void {
+    pub fn enqueueFinalization(self: *Queue, job: Job) !void {
         try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(Job.initFinalization(realm, callback, held_value));
+        self.enqueuePrepared(job);
     }
 
     pub fn hasJobs(self: Queue) bool {
@@ -747,14 +714,23 @@ pub const Queue = struct {
     }
 };
 
-/// WeakRef [[KeptAlive]]. Cleared at job end, not at an arbitrary safepoint.
-/// Allocation failure drops the keep-alive.
-pub fn keepAliveWeakRef(rt: *core.JSRuntime, value: core.JSValue) void {
-    rt.weakref_kept_alive.append(rt.nativeAllocator(), value) catch return;
+/// WeakRef [[KeptAlive]] (AddToKeptObjects), cleared when the microtask
+/// checkpoint ends. A target already kept is not appended again (keyed by
+/// its weak identity, which a moving collection does not change), so a long
+/// checkpoint of `deref()` calls grows the list by one entry per distinct
+/// target. Allocation failure is an error: dropping the keep-alive would let
+/// a later `deref()` in the same job observe the target dead.
+pub fn keepAliveWeakRef(rt: *core.JSRuntime, identity: usize, value: core.JSValue) error{OutOfMemory}!void {
+    const allocator = rt.nativeAllocator();
+    const entry = try rt.weakref_kept_identities.getOrPut(allocator, identity);
+    if (entry.found_existing) return;
+    errdefer _ = rt.weakref_kept_identities.remove(identity);
+    try rt.weakref_kept_alive.append(allocator, value);
 }
 
 pub fn clearKeptAlive(rt: *core.JSRuntime) void {
     rt.weakref_kept_alive.clearAndFree(rt.nativeAllocator());
+    rt.weakref_kept_identities.clearAndFree(rt.nativeAllocator());
 }
 
 const std = @import("std");
@@ -884,8 +860,8 @@ test "runtime takes typed Promise jobs without allocation" {
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
 
-    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const old_allocations = rt.diagnostics.allocations.allocation_count;
+    const old_bytes = rt.allocation_diagnostics.allocated_bytes;
+    const old_allocations = rt.allocation_diagnostics.allocation_count;
     rt.setNativeBytesLimitForTest(old_bytes);
     var first = rt.job_queue.takeFirst().?;
     rt.setNativeBytesLimitForTest(null);
@@ -895,8 +871,8 @@ test "runtime takes typed Promise jobs without allocation" {
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
     try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.as(.int));
-    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(old_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.allocation_diagnostics.allocation_count);
 
     var second = rt.job_queue.takeFirst().?;
     defer second.deinit();
@@ -925,7 +901,7 @@ test "typed job reservations preserve capacity without claiming a FIFO position"
     try std.testing.expectEqual(@as(usize, 8), rt.job_queue.capacity);
 
     const reserved_value = try core.Object.create(rt, core.class.ids.object, null);
-    rt.job_queue.enqueueOwnedPromiseObjectPrepared(ctx, reserved_value.value());
+    rt.job_queue.enqueueReserved(Job.initPromise(ctx, reserved_value.value()));
 
     const expected = [_]i32{ 10, 11, 12, 20 };
     for (expected) |value| {
@@ -944,7 +920,7 @@ test "typed job reservations preserve capacity without claiming a FIFO position"
 // below; the D1a before-values it replaced are history, not live numbers.
 comptime {
     std.debug.assert(@sizeOf(core.JSValue) == 8);
-    const pins = .{ 80, 56, 8, 24, 56, 48, 16 };
+    const pins = .{ 80, 56, 8, 24, 56, 48, 32 };
     if (@sizeOf(Job) != pins[0]) @compileError("Job size drifted from the D1a pin");
     if (@sizeOf(GenericPayload) != pins[1]) @compileError("GenericPayload size drifted from the D1a pin");
     if (@sizeOf(PromisePayload) != pins[2]) @compileError("PromisePayload size drifted from the D1a pin");
@@ -983,10 +959,10 @@ fn discardTerminatedJobs(rt: *core.JSRuntime) void {
 /// scheduler. The latter retains its existing interleaving with TLA work.
 pub fn reportException(rt: *core.JSRuntime) core.errors.HostError!void {
     const state = &rt.microtasks;
-    if (rt.current_exception_out_of_memory) return error.OutOfMemory;
-    if (rt.current_exception_uncatchable) return error.Interrupted;
+    if (rt.exception.out_of_memory) return error.OutOfMemory;
+    if (rt.exception.uncatchable) return error.Interrupted;
     const handler = state.handler orelse return error.JSException;
-    var values = [_]core.JSValue{@import("exception.zig").take(rt)};
+    var values = [_]core.JSValue{rt.exception.take()};
     const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &values }};
     var root = core.runtime.ValueRootFrame{ .slices = &slices };
     root.activate(rt);
@@ -998,13 +974,13 @@ pub fn reportException(rt: *core.JSRuntime) core.errors.HostError!void {
             discardTerminatedJobs(rt);
             return error.Interrupted;
         }
-        if (rt.current_exception.is(.uninitialized)) @import("exception.zig").install(rt, values[0]);
+        if (rt.exception.value.is(.uninitialized)) rt.exception.install(values[0]);
         return err;
     };
     try checkTermination(rt);
-    if (rt.current_exception_out_of_memory) return error.OutOfMemory;
-    if (rt.current_exception_uncatchable) return error.Interrupted;
-    if (!rt.current_exception.is(.uninitialized)) return error.JSException;
+    if (rt.exception.out_of_memory) return error.OutOfMemory;
+    if (rt.exception.uncatchable) return error.Interrupted;
+    if (!rt.exception.value.is(.uninitialized)) return error.JSException;
 }
 
 /// Shared execution boundary for the ordinary checkpoint and the module

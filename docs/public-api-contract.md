@@ -26,7 +26,14 @@ The public names are:
   `RealmContext` / `JSValue`; `JSContext` remains its compatibility alias);
 - `zjs.Call` for a host-function invocation;
 - option types nested on their owner: `Runtime.Options`, `Context.Options` /
-  `EvalMode` / `EvalOptions` / `EvalTiming` / `FunctionOptions`.
+  `EvalMode` / `EvalOptions` / `EvalTiming` / `FunctionOptions`;
+- `zjs.ModuleSourceLoader`, installed with `Context.setModuleSourceLoader`.
+
+The root module also exports engine internals for the in-tree tools and tests
+(`zjs.core`, `zjs.exec`, `zjs.parser`, `zjs.bytecode`, `zjs.compiler`,
+`zjs.libs`, `zjs.Object`, `zjs.RuntimeError` and similar). They are not part
+of this contract and may change without notice; embedders use only the names
+above.
 
 `Context.Options.math_random_seed` optionally fixes the initial state of that
 Context's Realm-local `Math.random` generator. If omitted, Realm construction
@@ -62,9 +69,9 @@ Value constructors live on `Value`; handles are the types returned by
 `run-test262` are the in-tree consumers. Repeated native → JS calls use
 `Context.callFunction`; property IC lives only in the VM `PropSiteCache`.
 
-The intended names above are the contract. The embedding snapshot test
-lists the current public declarations. Update the list when the surface
-changes.
+The intended names above are the contract. `tests/embedding_examples.zig`
+spot-checks the public declarations with `@hasDecl`; extend it when the
+surface changes.
 
 Removed 2026-09-06 (NB2 phase A3, design ruling D8, no adapter): the host
 callback family `zjs.host.Call` / `Function` / `Finalizer` /
@@ -86,8 +93,8 @@ callback family `zjs.host.Call` / `Function` / `Finalizer` /
   carry ownership, allocation, or runtime policy.
 
 Current public spellings matter. String and byte views are nested on
-`zjs.Value` (`Value.String`, `Value.Bytes`). Root spellings such as
-`zjs.JSBytes` are intentionally not part of the current contract.
+`zjs.Value` (`Value.String`, `Value.Bytes`). The root aliases `zjs.JSString`
+and `zjs.JSBytes` exist for in-tree tests and are not part of the contract.
 
 ## Known surface deviations
 
@@ -107,6 +114,9 @@ hidden:
 - `zjs.JSRuntime` / `JSContext` / `JSValue` are aliases of `Runtime` /
   `Context` / `Value`. `zjs.core`, `zjs.exec`, `zjs.parser`, and `zjs.native`
   are in-tree layer re-exports.
+- `zjs.borrowContext`, `zjs.globalObjectPtr`, `zjs.sort_erased`,
+  `zjs.simple_token`, and `zjs.printSmallInlineProbe` are in-tree hooks for
+  tests, tools, and the CLI; embedders should not depend on them.
 - `zjs.opcode_profile_build_enabled` reports whether the binary was built
   with per-opcode profiling. The CLI uses it to fail closed on
   `--profile-opcodes`.
@@ -135,11 +145,10 @@ Release the Runtime with `destroy()`. Runtime has no public in-place
 initialization or copied ownership state.
 
 The engine's call-budget, native-stack guard, and active-backtrace fields are
-internal `JSRuntime` state. They are direct fields; the former
-`Runtime.hot.<field>` paths have moved to `Runtime.<field>`, and no old nested
-container or binary layout is retained. `native_stack_size` is the configured
-byte budget below the captured `native_stack_top`; the derived
-`native_stack_limit` is the lower address bound. Zero disables that bound. The
+internal `JSRuntime` state, grouped in `Runtime.stack` (`StackBudget`); no
+binary layout is promised. `stack.native_size` is the configured byte budget
+below the captured `stack.native_top`; the derived `stack.native_limit` is the
+lower address bound. Zero disables that bound. The
 operating system owns each thread's call stack; Runtime records its base and
 configured budget but does not allocate the stack. Embedders should configure
 limits through `stackSize` / `setStackSize` and `nativeStackSize` /
@@ -171,7 +180,7 @@ on access and needs no address binding. Class and atom tables remain alive
 through managed-heap finalization; the collector remains alive through native
 cleanup. Instrumented allocation totals include all five owner allocations.
 Temporary parser/compiler atom tables retain value-based `init/deinit`.
-`Runtime.diagnostics` owns allocation counters and the test-only allocation
+`Runtime.allocation_diagnostics` owns allocation counters and the test-only allocation
 limit used for failure injection.
 `Runtime.setMemoryLimit` / `memoryUsage().memory_limit` cap the JS heap
 budget (published non-nursery cells). They do not cap ordinary native
@@ -188,16 +197,18 @@ returns the current dynamic threshold, including adjustments made while
 creating a Context. `forceGC` propagates collection errors; silent collection
 is restricted to internal teardown and test fixtures.
 
-`stack_size` / `setStackSize` bound active VM frame bytes. The separate
-`native_stack_size` / `setNativeStackSize` bound how many bytes below
-the current thread-stack base execution may descend; zero disables that
-address bound. Existing depth safeguards remain in place. Setting the native
+`stackSize` / `setStackSize` bound active VM frame bytes. The separate
+`nativeStackSize` / `setNativeStackSize` bound how many bytes below
+the current thread-stack base execution may descend (4 MiB by default in
+release builds), never past the thread's own stack less 256 KiB; zero
+disables that address bound. Existing depth safeguards remain in place. Setting the native
 stack budget while idle refreshes the base; setting it during execution
 preserves the active entry's base.
 
 `terminateExecution` can be called from another thread while the caller keeps
-the Runtime alive. Execution observes the atomic request at interrupt polls;
-it does not interrupt blocking host code. `cancelTerminateExecution` requires
+the Runtime alive. Execution observes the atomic request at interrupt polls
+(C8), including those of the engine's own long native work and of a blocked
+`Atomics.wait`; it does not interrupt blocking host code. `cancelTerminateExecution` requires
 the owner thread and an idle Runtime. Requests ordered after its atomic reset
 remain pending. A checkpoint observing termination discards its remaining jobs;
 recovery does not revive them. Live finalization reservations remain valid.
@@ -264,16 +275,19 @@ Who owns that host reference:
   the duration of the call only; never `destroy` / `deinit` it and never
   store it.
 
-`Runtime.contextForGlobal`, `firstContext`, and the `context_head` list are
-lookups, not ownership transfers. Do not walk `context_head` or resolve a
+`Runtime.contextForGlobal`, `firstContext`, and the `contexts` lists are
+lookups, not ownership transfers. Do not walk `contexts` or resolve a
 global to a context and `destroy` it unless that pointer is the host
-reference you created and still own. A second host `destroy` (the createRealm
-child, or `destroy` twice on a `create` realm) undercounts remaining realm
-edges. Cycle GC then hits `gcDecrefChildInline` (`rc > 0`) on `visitRealm`.
+reference you created and still own. Destroying a realm twice (the
+createRealm child, or `destroy` twice on a `create` realm) releases the
+host reference a second time.
 
-`RealmRef.retain` / `deinit` is the explicit extra host-reference pair
-(`JS_DupContext` / `JS_FreeContext`). Use that when you need another owner,
-not `contextForGlobal` plus `destroy`.
+`RealmRef` is a traced edge, not a host reference: `retain` copies the
+pointer and owns nothing. A `RealmRef` keeps its realm alive only while
+the holder is itself reachable from a root provider or a traced parent
+(see [GC invariants](gc-invariants.md), "Realm holders"). A host that
+needs to keep a realm alive keeps the `Context` it created and destroys
+it once.
 
 Some low-level runtime helper APIs still accept the public context's `.core`
 field while the adapter layer is being completed. Do not add new public
@@ -284,13 +298,20 @@ core-typed APIs without documenting the migration shape.
 `Value` is the public value representation and remains a small tagged value.
 Its layout is not promised as a long-term binary-stable plugin ABI.
 
+A `Value` belongs to the Runtime that created it (property keys and heap
+cells are per-Runtime). Passing it to another Runtime's Context, or
+returning it from a host function of another Runtime, is a contract
+violation: it is not checked, reads may silently return wrong results, and
+writes can trip collector assertions. Contexts of one Runtime may share
+values freely.
+
 Callback `this` and argument values are borrowed for the duration of the call.
 Host state that keeps JavaScript values across callbacks, ticks, or object
 lifetimes must use one of the documented handle types:
 
 ```zig
 rt.enterHandleScope()           // HandleScope
-scope.localDup(value)           // LocalHandle
+scope.local(value)           // LocalHandle
 rt.createPersistentValue(value) // persistent handle
 ```
 
@@ -300,8 +321,8 @@ protected by a persistent handle or another documented public root.
 The rooting rules of the native boundary (design contract C2) are:
 
 - a `JSValue` that lives in native stack memory -- a local, a stack array
-  passed as `args`, a value returned from `eval` / `callFunction` /
-  `CallSite.call` and held in a local -- is covered by the conservative
+  passed as `args`, a value returned from `eval` / `callFunction` and held
+  in a local -- is covered by the conservative
   native-stack scan for as long as it is there;
 - a `JSValue` array that the host keeps in **heap** memory is not scanned.
   Pin every element in a `Persistent`, or keep the values in a JS Array that
@@ -310,6 +331,15 @@ The rooting rules of the native boundary (design contract C2) are:
 - cross-call retention (a callback stored for later, a cached object, host
   object state) uses `Persistent` (or `Weak` when the host must not keep the
   object alive).
+
+Test builds (`builtin.is_test`) scan precisely on host-initiated
+collections: `forceGC` and other urgent/idle polls trace only declared
+roots (handle scopes, persistents, linked root frames), not the native
+stack. An unrooted local held across `forceGC` in an embedder test is
+therefore reclaimed. This is deliberate: it surfaces a missing root in
+tests instead of letting the conservative scan hide it. Engine-internal
+collections (allocation threshold, safepoints) stay conservative in every
+build, and release builds keep the native-stack rule above.
 
 ## Ownership verbs
 
@@ -323,12 +353,14 @@ Public lifetime methods use three verbs:
   spelling on `JSValue.Bytes.Store`.
 
 `HandleScope.deinit` is idempotent: an early `scope.deinit()` before a
-`defer scope.deinit()` is the supported way to close a scope early.
+`defer scope.deinit()` is the supported way to close a scope early. Scopes
+close innermost first, and `local` must be called on the innermost open
+scope; either misuse panics in every build mode.
 
-A persistent handle's `destroy(rt)` is a by-value compatibility wrapper. It
-asserts that `rt` matches the handle's runtime, then drops the root. Prefer
-`deinit` on a mutable handle. It is not a transfer (`take`) and is not
-equivalent to `deinit` as a method signature.
+A weak handle's callback runs after the full collection that found its
+target dead, never inside the collector: it may release any weak handle
+(its own included) and allocate. Releasing a handle whose callback has not
+run yet cancels that callback.
 
 `NativePin` exposes only `deinit`. The previous `NativePin.release`
 self-destruct spelling is gone.
@@ -382,12 +414,24 @@ property. Both take `Context.FunctionOptions`:
 
 - `length`: JS `length`. Defaults to `0` for managed functions;
 - `state`: opaque pointer handed back as `Call.state(T)`;
-- `finalize`: `fn (*anyopaque) void`, run once with `state` when the
+- `finalize`: `fn (*anyopaque) void`, run with `state` when the
   **runtime** is destroyed (not when a context is destroyed, not when the
-  function object is collected). Requires `state`;
+  function object is collected), once per successful registration: the
+  same `state` registered by two functions is finalized twice. Requires
+  `state`;
 - `with_prototype`: also create a `prototype` object whose `constructor`
-  points back to the function;
+  points back to the function, and make the function a constructor;
+- `constructor`: register a constructor-only function. A plain call throws
+  `TypeError` before the body runs; inside the body `Call.newTarget()` is
+  the `new.target` (including a derived class). Returning an object
+  replaces the instance the construct path created;
 - `realm_global`: optional `Value` for the realm to create the function in.
+
+Whether a host function is a constructor is fixed when it is created
+(§10.3, QuickJS `JS_CFUNC_constructor`): exactly the functions created with
+`with_prototype` or `constructor`. Assigning or deleting `prototype` later
+does not change it; a construct whose `prototype` is not an object creates
+the instance from `%Object.prototype%`.
 
 Leaf signatures (`leaf` / `leafWithState`) and `native.Class` are engine
 private. They are not part of the public embedder surface.
@@ -398,7 +442,8 @@ private. They are not part of the public embedder surface.
 the call. It carries `ctx` (non-owning realm facade), `this`, `argv` /
 `argc`, plus the helpers `arg(i)` (`undefined` past `argc`), `args()`,
 `state(T)`, `runtime()`, `output()` (the host writer of the current
-invocation, if any), and `throwError(name, message)` / `throwTypeError` /
+invocation, if any), `newTarget()` (`new.target` for a `constructor`
+function, otherwise `undefined`), and `throwError(name, message)` / `throwTypeError` /
 `throwRangeError`, which install the JS exception and return
 `error.JSException`.
 
@@ -407,23 +452,38 @@ function returning `Value` cannot fail; a function returning `E!Value`
 may return any error set. `error.JSException` means "already thrown" and
 propagates the pending exception. `OutOfMemory`, `Interrupted`, `Timeout`,
 `StackOverflow`, `ProcessExit` and `UnhandledPromiseRejection` are engine
-sentinels and are materialized by the engine. `TypeError`, `RangeError`,
-`SyntaxError`, `ReferenceError`, `EvalError` and `URIError` become an error
-of that class with an empty message; any other error name becomes
-`Error: <name>`. If an exception is already pending when a non-sentinel
+sentinels and are materialized by the engine. Any other error name the
+engine knows (`exception_ops.runtimeErrorInfo`: `TypeError`, `RangeError`,
+`SyntaxError`, `ReferenceError`, `URIError` and the engine's own names such
+as `NotExtensible` or `InvalidUtf8`) becomes an error of the class and with
+the message the engine uses for it; `EvalError` becomes an `EvalError` with
+an empty message; any other error name becomes `Error: <name>`. If an
+exception is already pending when a non-sentinel
 error is returned, the pending exception wins. A native function must never
 unwind through the VM in any other way.
 
 Managed calls are visible in `Error().stack` as `at name (native)`
-(contract C7). A native call does not poll the interrupt handler by itself
-(C8); JS loops and function entries do.
+(contract C7).
+
+Interrupt polls (C8): JS loops and function entries poll the interrupt
+handler on a tick count. The engine's own long-running native work polls it
+too, without running a GC safepoint: native loops over elements, keys, code
+units or digits poll every 4096 iterations; bulk copies, fills, scans and
+quadratic BigInt arithmetic charge their size to the same countdown, so a JS
+loop of large calls also polls; the parser and compiler poll per token and
+per instruction; `Atomics.wait` waits in short slices. An interruption there
+is the same uncatchable `InternalError: interrupted`. An embedder's own
+native function is not polled while it runs; a long one should return
+`error.Interrupted` itself when it observes a stop request.
 
 ### Ownership and lifetimes
 
 - `state` is embedder-owned and must stay valid until the runtime is
   destroyed (or, without `finalize`, until the last call has returned and
   the function can no longer be reached from JS). `finalize` is the
-  ownership hand-off for `state`; it runs on the runtime thread during
+  ownership hand-off for `state`, taken only when `createFunction` /
+  `defineFunction` succeeds (an error leaves `state` with the caller and the
+  finalizer never runs); it runs on the runtime thread during
   `Runtime.destroy` (destroying a context or collecting the function
   object does not run it). If `state` references
   runtime-owned JavaScript values, it must own public handles and release
@@ -445,11 +505,28 @@ Managed calls are visible in `Error().stack` as `at name (native)`
 
 `Context.callFunction(callee, args, .{ .this_value, .output, .realm_global })`
 is the one-shot form: the callee, receiver, and `args` are borrowed for the
-duration of the call, and the result is returned as a plain `Value`. A
-thrown JS exception surfaces as `error.JSException` with the exception
-pending on the context (`takePendingException`,
-`pendingExceptionMatchesErrorName`); an out-of-memory exception surfaces as
-`error.OutOfMemory`. Host -> JS -> native -> JS recursion uses the
+duration of the call, and the result is returned as a plain `Value`.
+
+Every fallible `Context` call fails the same way (QuickJS: `JS_EXCEPTION`
+with a pending exception): it returns `Context.Error`
+(`error{ JSException, OutOfMemory, Interrupted }`) and the exception is
+always pending on the context. `JSException` covers every JavaScript throw
+and every validation failure (a non-callable callee, a primitive receiver,
+a failed `DefinePropertyOrThrow`, a SyntaxError in `eval` source), each as
+a real JS error object; `OutOfMemory` is an allocation failure no
+JavaScript handler consumed; `Interrupted` means the interrupt handler
+stopped execution. Not covered: `Context.create`/`init` (no Context to hold
+an exception yet), `formatException`/`formatExceptionStack` (they fail
+with the caller's allocator, or with `Interrupted` when the interrupt
+handler stops a `name`/`message`/`stack` getter, which then stays pending)
+and the `pendingException*` inspectors. Read
+the exception with `takePendingException`,
+`pendingExceptionMatchesErrorName` or `consumePendingExceptionIfErrorName`;
+`formatException` and `formatExceptionStack` leave it pending. Take the
+exception before the next call: an entry
+made while no JavaScript is running (`eval`, `callFunction`, `runJobs`,
+property and conversion helpers) discards an exception still pending from
+an earlier failure. Host -> JS -> native -> JS recursion uses the
 C stack and is bounded by the runtime's native stack limit.
 
 `CallSite` and `PropertySite` are not public. Repeated host → JS calls use
@@ -472,15 +549,27 @@ The bundled CLI and test262 runner explicitly import the internal
 internal `HostScheduler` contract lets synchronous evaluation request host
 progress without knowing about timers, descriptors, or signals.
 
-The engine no longer installs `print`, `console`, `btoa`, `atob`,
-`queueMicrotask`, or `gc`. Bundled hosts install these explicitly; embedders
-register the functions they need through `Context.defineFunction`. This
-change does not remove Promise jobs or the engine's GC API. Remaining
-compatibility extensions are tracked in [host boundary design](host-boundary-design.md).
+The engine installs no host capabilities. A bare `Context` has the
+ECMAScript globals plus the non-standard `InternalError` and `TypedArray`
+bindings; it has no `print`, `console`, `btoa`, `atob`, `queueMicrotask`,
+`gc`, `navigator`, `performance`, or `DOMException`. The bundled CLI and
+test262 runner install those explicitly (`zjs_host.globals.install`);
+embedders register the functions they need through `Context.defineFunction`.
+Promise jobs and the engine's GC API are unaffected.
 
-File source acquisition and file URL policy live in `src/host/`; graph
-linking, TLA continuations, and import Promise settlement remain in
-`src/exec/module.zig`. A bare engine Context has no filesystem loader.
+Module graphs resolve and read every source through the Context's
+`ModuleSourceLoader`; there is one scheduler for static imports, TLA
+continuations, and dynamic imports. The bundled filesystem loader and file
+URL policy live in `src/host/`; an embedder installs its own loader,
+including an in-memory one, with `Context.setModuleSourceLoader`, after which
+`Context.eval(.module)` loads the module graph through it. A bare engine
+Context has no loader.
+
+A module record is identified by its filename within a Context. Evaluating
+module source under a filename that is already loaded, by an earlier
+`eval(.module)` or as an import, throws a `TypeError` naming the module
+instead of reusing the loaded record. An unnamed (`<eval>`) module gets a
+fresh `<eval>#N` name each time.
 
 ## Evidence
 

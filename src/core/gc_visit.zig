@@ -13,7 +13,6 @@
 const std = @import("std");
 const atom_mod = @import("atom.zig");
 const context_mod = @import("context.zig");
-const gc = @import("gc.zig");
 const module_mod = @import("module.zig");
 const object_payloads = @import("object_payloads.zig");
 const shape_mod = @import("shape.zig");

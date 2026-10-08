@@ -51,7 +51,7 @@ const ExactValueRootFrame = struct {
     fn activate(self: *@This(), rt: *JSRuntime, values: []JSValue) !void {
         rt.assertOwnerThread();
         if (self.runtime != null) return error.RootAlreadyActive;
-        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
         const generation = std.math.add(u64, rt.roots.exact_root_generation, 1) catch return error.RootGenerationExhausted;
         // A deactivated scope can contain pointers reclaimed since its last
         // use. Never publish that old storage on reactivation.
@@ -70,7 +70,7 @@ const ExactValueRootFrame = struct {
     fn deactivate(self: *@This()) void {
         const rt = self.runtime orelse return;
         rt.assertOwnerThread();
-        if (rt.gc_running) @panic("exact root mutation during collection");
+        if (rt.gc.hot.collecting) @panic("exact root mutation during collection");
         rt.roots.assertMutable();
         if (rt.roots.active_exact_roots != self or rt.active_value_roots != &self.frame)
             @panic("exact roots must deactivate in root-frame LIFO order");
@@ -122,12 +122,12 @@ pub const MutableRootedValueRef = struct {
     /// Check an output before a fallible operation, without changing its value.
     pub fn validate(self: @This(), rt: *JSRuntime) RootReferenceError!void {
         _ = try self.reference.slot(rt);
-        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
     }
 
     pub fn set(self: @This(), rt: *JSRuntime, value: JSValue) RootReferenceError!void {
         const destination = try self.reference.slot(rt);
-        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
         destination.* = value;
     }
 
@@ -171,6 +171,8 @@ pub const WeakRootSlot = struct {
     identity: ?usize = null,
     callback: ?WeakPersistentCallback = null,
     callback_context: ?*anyopaque = null,
+    /// Queued in `RootSet.weak_notify_queue` until its callback runs.
+    notify_pending: bool = false,
 };
 
 /// Host handles and declared root providers. Inline storage contains no
@@ -187,8 +189,16 @@ pub const RootSet = struct {
     /// Native owning buffers must be released before Runtime teardown.
     value_root_buffers: usize = 0,
     local_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
+    handle_scope_depth: usize = 0,
     persistent_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     weak_root_slots: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
+    /// Slots the last major cleared whose callbacks have not run yet. Weak
+    /// processing runs inside the collection, where a callback that releases
+    /// a handle or allocates would corrupt the collector; the callbacks run
+    /// once it returns (`JSRuntime.runPendingWeakCallbacks`). Capacity always
+    /// covers `weak_root_slots`, so queueing never allocates.
+    weak_notify_queue: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
+    weak_notify_draining: bool = false,
 
     pub fn beginTrace(self: *RootSet) void {
         self.trace_depth = std.math.add(usize, self.trace_depth, 1) catch @panic("root trace depth exhausted");
@@ -225,7 +235,7 @@ pub const RootSet = struct {
     }
 
     /// Transfer heap storage to the caller and restore the default empty set.
-    pub fn takeHeapProviderStorage(self: *RootSet) []RootProvider {
+    fn takeHeapProviderStorage(self: *RootSet) []RootProvider {
         self.assertMutable();
         const heap: []RootProvider = self.root_providers_heap orelse &.{};
         self.root_providers_heap = null;
@@ -233,11 +243,15 @@ pub const RootSet = struct {
         return heap;
     }
 
-    pub fn deinitSlotLists(self: *RootSet, allocator: std.mem.Allocator) void {
-        self.assertMutable();
+    /// Release provider and slot-list storage at runtime teardown.
+    pub fn deinit(self: *RootSet, rt: *JSRuntime) void {
+        const heap = self.takeHeapProviderStorage();
+        if (heap.len != 0) rt.freeNative(RootProvider, heap);
+        const allocator = rt.nativeAllocator();
         self.local_root_slots.deinit(allocator);
         self.persistent_root_slots.deinit(allocator);
         self.weak_root_slots.deinit(allocator);
+        self.weak_notify_queue.deinit(allocator);
     }
 
     pub fn register(self: *RootSet, rt: *JSRuntime, provider: RootProvider) !void {
@@ -338,7 +352,16 @@ pub const RootSet = struct {
             .callback_context = callback_context,
         };
         try self.weak_root_slots.append(rt.nativeAllocator(), slot);
+        errdefer _ = self.weak_root_slots.pop();
+        try self.weak_notify_queue.ensureTotalCapacity(rt.nativeAllocator(), self.weak_root_slots.items.len);
         return slot;
+    }
+
+    /// Collector side: queue a cleared slot's callback without allocating.
+    pub fn queueWeakNotify(self: *RootSet, slot: *WeakRootSlot) void {
+        if (slot.callback == null or slot.notify_pending) return;
+        slot.notify_pending = true;
+        self.weak_notify_queue.appendAssumeCapacity(slot);
     }
 
     fn createStrong(rt: *JSRuntime, value: JSValue, slots: *std.ArrayListUnmanaged(*RootSlot)) !*RootSlot {
@@ -358,7 +381,7 @@ pub const RootSet = struct {
     pub fn destroyWeak(self: *RootSet, rt: *JSRuntime, slot: *WeakRootSlot) void {
         self.assertMutable();
         self.removeWeak(rt, slot);
-        rt.clearWeakRootSlot(slot, false);
+        rt.clearWeakRootSlot(slot);
         slot.* = .{};
         rt.destroyNative(WeakRootSlot, slot);
     }
@@ -373,7 +396,16 @@ pub const RootSet = struct {
         }
         const index = found.?;
         _ = self.weak_root_slots.orderedRemove(index);
-        if (self.weak_root_slots.items.len == 0) self.weak_root_slots.clearAndFree(rt.nativeAllocator());
+        // A handle released before its callback ran cancels the callback.
+        if (slot.notify_pending) {
+            const queued = std.mem.indexOfScalar(*WeakRootSlot, self.weak_notify_queue.items, slot).?;
+            _ = self.weak_notify_queue.orderedRemove(queued);
+            slot.notify_pending = false;
+        }
+        if (self.weak_root_slots.items.len == 0) {
+            self.weak_root_slots.clearAndFree(rt.nativeAllocator());
+            self.weak_notify_queue.clearAndFree(rt.nativeAllocator());
+        }
     }
 
     pub fn takePersistent(self: *RootSet, rt: *JSRuntime, slot: *RootSlot) JSValue {
@@ -443,11 +475,6 @@ pub const JSValueHandle = struct {
         };
     }
 
-    /// Same operation as `init`. The name stays for callers that still say "dup".
-    pub fn initDup(runtime: *JSRuntime, value: JSValue) !JSValueHandle {
-        return init(runtime, value);
-    }
-
     pub fn get(self: JSValueHandle) JSValue {
         const slot = self.slot orelse return JSValue.undefinedValue();
         return slot.value;
@@ -460,14 +487,6 @@ pub const JSValueHandle = struct {
         self.runtime = null;
         self.slot = null;
         _ = runtime.roots.takePersistent(runtime, slot);
-    }
-
-    /// Compatibility spelling: by-value wrapper that asserts `rt` matches the
-    /// handle's runtime, then drops the root. Prefer `deinit` on a mutable handle.
-    pub fn destroy(self: JSValueHandle, rt: *JSRuntime) void {
-        if (self.runtime) |runtime| std.debug.assert(runtime == rt);
-        var owned = self;
-        owned.deinit();
     }
 
     /// Transfer ownership of the rooted value out of the handle.
@@ -496,41 +515,41 @@ pub const LocalHandle = struct {
     pub fn get(self: LocalHandle) JSValue {
         return self.slot.value;
     }
-
-    pub fn valueSlot(self: LocalHandle) *JSValue {
-        return &self.slot.value;
-    }
 };
 
 pub const HandleScope = struct {
     runtime: *JSRuntime,
     start: usize,
+    /// Nesting depth; scopes must close innermost first.
+    depth: usize,
     active: bool = true,
 
     pub fn enter(runtime: *JSRuntime) HandleScope {
+        runtime.roots.handle_scope_depth += 1;
         return .{
             .runtime = runtime,
             .start = runtime.roots.local_root_slots.items.len,
+            .depth = runtime.roots.handle_scope_depth,
         };
     }
 
+    /// Closing an outer scope first would free the inner scope's slots
+    /// under live `LocalHandle`s, so misordering panics in every build.
     pub fn deinit(self: *HandleScope) void {
         if (!self.active) return;
-        std.debug.assert(self.start <= self.runtime.roots.local_root_slots.items.len);
+        const roots = &self.runtime.roots;
+        if (roots.handle_scope_depth != self.depth) @panic("HandleScope closed out of LIFO order");
         self.runtime.roots.clearLocalFrom(self.runtime, self.start);
+        roots.handle_scope_depth -= 1;
         self.active = false;
     }
 
     /// Stores `value` in a new strong slot owned by this scope.
     pub fn local(self: *HandleScope, value: JSValue) !LocalHandle {
-        std.debug.assert(self.active);
+        if (!self.active) @panic("HandleScope.local after deinit");
+        if (self.runtime.roots.handle_scope_depth != self.depth) @panic("HandleScope.local on an enclosing scope");
         const slot = try self.runtime.roots.createLocal(self.runtime, value);
         return .{ .slot = slot };
-    }
-
-    /// Same operation as `local`.
-    pub fn localDup(self: *HandleScope, value: JSValue) !LocalHandle {
-        return self.local(value);
     }
 };
 
@@ -575,15 +594,7 @@ pub const WeakPersistentValue = struct {
         self.slot = null;
         runtime.roots.destroyWeak(runtime, slot);
     }
-
-    pub fn destroy(self: WeakPersistentValue, rt: *JSRuntime) void {
-        if (self.runtime) |runtime| std.debug.assert(runtime == rt);
-        var owned = self;
-        owned.deinit();
-    }
 };
-
-pub const WeakPersistent = WeakPersistentValue;
 
 pub const NativePin = struct {
     runtime: ?*JSRuntime = null,

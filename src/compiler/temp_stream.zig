@@ -2,7 +2,6 @@
 //! stream: the bind index rows, the phase-1 instruction view, and the source
 //! point used to dedupe markers.
 
-const std = @import("std");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 
@@ -31,8 +30,7 @@ pub const TempInstruction = packed struct(u16) {
     size: u8,
     is_temp: bool = false,
     has_atom: bool = false,
-    has_label: bool = false,
-    reserved: u5 = 0,
+    reserved: u6 = 0,
 };
 
 /// Decode and validate one instruction from the parser-owned phase-1 Builder.
@@ -52,7 +50,6 @@ pub inline fn phase1Instruction(
         .size = h.size,
         .is_temp = h.isLowered(),
         .has_atom = h.hasAtom(),
-        .has_label = h.hasLabel(),
     };
 }
 

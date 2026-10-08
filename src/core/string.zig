@@ -4,7 +4,7 @@
 //! trace both children and materialize a stable flat
 //! body on first borrowed-content read. Allocation and release always go
 //! through the originating Runtime. QuickJS source map:
-//! `JSString`/`JSStringRope` at quickjs.c. Core and higher layers may
+//! `JSString`/`JSStringRope`. Core and higher layers may
 //! import this module; it has no exec/binding dependency.
 
 const atom_mod = @import("atom.zig");
@@ -18,7 +18,7 @@ const roots_mod = @import("roots.zig");
 const JSValue = @import("value.zig").JSValue;
 const ValueTag = @import("value.zig").Tag;
 
-pub const StringError = error{
+const StringError = error{
     InvalidUtf8,
 };
 
@@ -87,8 +87,8 @@ pub const StringRope = struct {
     len: u32,
     /// Maximum child depth plus one, matching QuickJS `JSStringRope.depth`.
     /// Generic concatenation rebalances once this exceeds
-    /// `String.rope_max_depth`, keeping reads and recursive destruction
-    /// bounded. Zero is reserved for an already-linearized rope.
+    /// `String.rope_max_depth`, keeping reads (StringValueIterator's fixed
+    /// stack) bounded. Zero is reserved for an already-linearized rope.
     depth: u8,
     wide: bool,
     /// TGC S2-i: append rights on `buffer`. At most ONE live node per buffer
@@ -174,8 +174,7 @@ pub const StringRope = struct {
 
     /// Materializes this rope into a flat `*String`, caching its owned value in
     /// `left` and releasing the former children and tail. Returns a BORROWED
-    /// pointer to the cached flat string (the rope keeps ownership; callers
-    /// that need to own it must retain). Idempotent. On allocation failure the
+    /// pointer to the cached flat string, kept alive by the rope. Idempotent. On allocation failure the
     /// rope is left untouched.
     pub fn flatten(self: *StringRope) !*String {
         if (self.flatString()) |flat| return flat;
@@ -209,9 +208,6 @@ pub const StringRope = struct {
         self.buffer = null;
         self.extensible = false;
         self.depth = 0;
-        // Release the former tree only after publishing the new owned flat
-        // child. String destruction has no user callback, but this ordering
-        // also keeps the rope internally valid under force-GC diagnostics.
         return flat;
     }
 
@@ -220,7 +216,7 @@ pub const StringRope = struct {
     /// memory and retries once; a second failure is fatal.
     pub fn flattenInfallible(self: *StringRope) *String {
         return self.flatten() catch {
-            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
+            _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
             return self.flatten() catch @panic("zjs: out of memory while flattening string rope");
         };
     }
@@ -319,7 +315,7 @@ fn stringBufferAllocSize(is_wide: bool, capacity: usize) ?usize {
 /// funnel, block cell under the small-class ceiling and a heap extent above
 /// it. The units are left undefined; the caller fills `[0, used)` before any
 /// view can name them.
-pub fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*StringBuffer {
+fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*StringBuffer {
     if (capacity > max_length) return error.StringTooLong;
     const total = stringBufferAllocSize(is_wide, capacity) orelse return error.OutOfMemory;
     // Same allocation-threshold boundary flat bodies and rope nodes take
@@ -339,7 +335,7 @@ pub fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*Stri
 
 /// Sweep-time return of a condemned `.string_buffer` BLOCK CELL. Pure memory:
 /// a buffer owns no edges, no atom entry and no external resource.
-pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.Header) void {
+fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.Header) void {
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const buf: *StringBuffer = @ptrCast(@alignCast(header));
     const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
@@ -413,7 +409,7 @@ pub const String = struct {
     /// TGC S4-d spec 2.4: bind a materialized-string back-pointer.
     ///
     /// A DYNAMIC atom id makes this body's death owe the atom-table handshake
-    /// (`destroyCellFromHeader` -> `onSymbolBodyDead`), so the sweep has to
+    /// (`destroyCellFromHeader` -> `onStringBodyDead`), so the sweep has to
     /// visit the cell: stamp `needs_finalizer`. Predefined and tagged-int ids
     /// are never recycled, the handshake skips them, and such a body stays in
     /// the bitmap-only population. The bit only ever goes on (D-S4-4).
@@ -522,9 +518,8 @@ pub const String = struct {
     /// The atom name uses the same UTF-8/WTF-8 encoding the lexer and the
     /// JSON parser produce, so keys built from runtime strings unify with
     /// keys interned from source text. The string is then bound into the
-    /// atom table's per-atom string cache (`AtomTable.cacheString`): the
-    /// table traces the cached string and `atom_id` becomes a weak
-    /// back-pointer; the reverse direction (`AtomTable.toStringValue`) reuses
+    /// atom table's weak per-atom string cache (`AtomTable.cacheString`) and
+    /// `atom_id` becomes a back-pointer; the reverse direction (`AtomTable.toStringValue`) reuses
     /// the same string with zero conversion.
     pub fn internAtom(self: *String, rt: *JSRuntime) !atom_mod.Atom {
         if (self.atom_id != no_atom_id) return self.atom_id;
@@ -614,93 +609,6 @@ pub const String = struct {
         return self;
     }
 
-    /// Concatenate already-measured latin1 pieces into one freshly allocated
-    /// latin1 string. Mirrors qjs `JS_ConcatString1`: one
-    /// `js_alloc_string`, then each source memcpy lands in the result payload.
-    /// Compatibility entry for owned native or explicitly pinned storage.
-    /// Bare heap borrows must use createConcatParts to rederive after GC.
-    pub fn createLatin1Parts(rt: *JSRuntime, parts: []const []const u8, total: usize) !*String {
-        const self = try createUninitialized(rt, .latin1, total);
-        errdefer destroyFlat(rt, self);
-        const out = self.latin1Mut();
-        var offset: usize = 0;
-        for (parts) |part| {
-            std.debug.assert(offset + part.len <= total);
-            @memcpy(out[offset..][0..part.len], part);
-            offset += part.len;
-        }
-        std.debug.assert(offset == total);
-        writeLatin1Terminator(out);
-        return self;
-    }
-
-    /// Concatenate already-flattened mixed-width pieces into one freshly
-    /// allocated string. Mirrors qjs `JS_ConcatString1`: the
-    /// result is wide iff any part is wide (`p1->is_wide_char ||
-    /// p2->is_wide_char`), one `js_alloc_string`, then each part copies into
-    /// the result payload — same-width parts memcpy, latin1 parts widen per
-    /// code unit into a wide result. `wide` must be the OR of the part widths
-    /// and `total` the sum of their unit lengths (both from the caller's
-    /// measure pass).
-    /// Compatibility entry: every source slice must have owned native or
-    /// explicitly pinned backing across allocation; prefer createConcatParts.
-    pub fn createResolvedParts(rt: *JSRuntime, parts: []const ResolvedData, total: usize, wide: bool) !*String {
-        if (!wide) {
-            const self = try createUninitialized(rt, .latin1, total);
-            errdefer destroyFlat(rt, self);
-            const out = self.latin1Mut();
-            var offset: usize = 0;
-            for (parts) |part| {
-                switch (part) {
-                    .latin1 => |bytes| {
-                        @memcpy(out[offset..][0..bytes.len], bytes);
-                        offset += bytes.len;
-                    },
-                    // A wide part forces `wide` at the caller's measure pass.
-                    .utf16 => unreachable,
-                }
-            }
-            std.debug.assert(offset == total);
-            writeLatin1Terminator(out);
-            return self;
-        }
-        const self = try createUninitialized(rt, .utf16, total);
-        errdefer destroyFlat(rt, self);
-        const out = self.utf16Mut();
-        var offset: usize = 0;
-        for (parts) |part| {
-            switch (part) {
-                .latin1 => |bytes| {
-                    for (bytes, 0..) |byte, i| out[offset + i] = byte;
-                    offset += bytes.len;
-                },
-                .utf16 => |units| {
-                    @memcpy(out[offset..][0..units.len], units);
-                    offset += units.len;
-                },
-            }
-        }
-        std.debug.assert(offset == total);
-        return self;
-    }
-
-    /// Concatenate two utf16 unit buffers into a single freshly allocated
-    /// utf16 string. The runtime owns the result.
-    pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
-        const total = a.len + b.len;
-        const self = try createUninitialized(rt, .utf16, total);
-        errdefer destroyFlat(rt, self);
-        const out = self.utf16Mut();
-        @memcpy(out[0..a.len], a);
-        @memcpy(out[a.len..], b);
-        return self;
-    }
-
-    /// Append an ASCII literal to an already-resolved string with one final
-    /// allocation. This is the storage operation behind qjs
-    /// `JS_ConcatString3(ctx, "", value, suffix)`: a narrow input stays
-    /// narrow, while a wide input remains wide and receives widened ASCII code
-    /// units directly in its inline payload.
     /// Append caller-owned native ASCII storage without borrowing heap data
     /// across allocation. The source may be flat, cached, or a rope tree.
     pub fn createValueAsciiSuffix(rt: *JSRuntime, input: JSValue, suffix: []const u8) !*String {
@@ -762,6 +670,9 @@ pub const String = struct {
     /// Case-map an ASCII string value directly into the final narrow result.
     /// Registers the source and rederives its leaves after allocation; ropes
     /// need not materialize. Non-ASCII input returns null without allocating.
+    /// Code units `createValueAsciiCaseMapped` maps between interrupt polls.
+    const ascii_case_slice = 1 << 16;
+
     pub fn createValueAsciiCaseMapped(rt: *JSRuntime, input: JSValue, to_lower: bool) !?*String {
         if (!input.isString()) return error.TypeError;
         const runtime_mod = @import("../runtime.zig");
@@ -776,10 +687,17 @@ pub const String = struct {
             var borrow = runtime_mod.NoGcScope{};
             borrow.activate(rt);
             defer borrow.deactivate();
+            // Both passes go in slices that poll the interrupt handler.
             var iterator = StringRangeIterator.init(values[0], 0, length);
             while (iterator.next()) |data| switch (data) {
-                inline else => |units| for (units) |unit| {
-                    if (unit >= 0x80) return null;
+                inline else => |units| {
+                    var rest = units;
+                    while (rest.len != 0) {
+                        const slice = rest[0..@min(rest.len, ascii_case_slice)];
+                        for (slice) |unit| if (unit >= 0x80) return null;
+                        try rt.pollNativeBulkWork(slice.len);
+                        rest = rest[slice.len..];
+                    }
                 },
             };
         }
@@ -791,32 +709,21 @@ pub const String = struct {
         const out = self.latin1Mut();
         var offset: usize = 0;
         while (iterator.next()) |data| switch (data) {
-            inline else => |units| for (units) |unit| {
-                const byte: u8 = @intCast(unit);
-                out[offset] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
-                offset += 1;
+            inline else => |units| {
+                var rest = units;
+                while (rest.len != 0) {
+                    const slice = rest[0..@min(rest.len, ascii_case_slice)];
+                    for (slice) |unit| {
+                        const byte: u8 = @intCast(unit);
+                        out[offset] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
+                        offset += 1;
+                    }
+                    try rt.pollNativeBulkWork(slice.len);
+                    rest = rest[slice.len..];
+                }
             },
         };
         std.debug.assert(offset == length);
-        writeLatin1Terminator(out);
-        return self;
-    }
-
-    /// Compatibility entry for caller-owned or explicitly pinned backing.
-    /// Heap values should use createValueAsciiCaseMapped to rederive after GC.
-    /// If `bytes` is ASCII, allocate the final narrow string and case-map the
-    /// source directly into its inline payload. A non-ASCII source returns null
-    /// without allocating so the caller can use the full Unicode converter.
-    pub fn createAsciiCaseMapped(rt: *JSRuntime, bytes: []const u8, to_lower: bool) !?*String {
-        for (bytes) |byte| {
-            if (byte >= 0x80) return null;
-        }
-        const self = try createUninitialized(rt, .latin1, bytes.len);
-        errdefer destroyFlat(rt, self);
-        const out = self.latin1Mut();
-        for (bytes, 0..) |byte, index| {
-            out[index] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
-        }
         writeLatin1Terminator(out);
         return self;
     }
@@ -877,10 +784,7 @@ pub const String = struct {
         const rope_value = node.value();
         if (node.depth <= rope_max_depth) return rope_value;
 
-        const balanced = rebalanceRope(rt, rope_value) catch |err| {
-            return err;
-        };
-        return balanced;
+        return rebalanceRope(rt, rope_value);
     }
 
     /// Legacy spelling; tracing construction neither consumes nor releases inputs.
@@ -914,13 +818,6 @@ pub const String = struct {
 
     pub fn isWide(self: *const String) bool {
         return self.len_meta.is_wide;
-    }
-
-    /// Cached content hash accessor (qjs `JSString.hash`). Computes on first
-    /// demand through `contentHash`; the raw stored value uses `0` as the
-    /// "not computed" sentinel.
-    pub fn hash(self: *const String) u32 {
-        return self.contentHash();
     }
 
     /// Inline character pointer, computed from the byte immediately after the
@@ -1310,7 +1207,7 @@ const StringRangeIterator = struct {
 };
 
 /// QJS `string_rope_get`: return one UTF-16 code unit without flattening.
-pub fn stringValueCodeUnitAt(value: JSValue, index: usize) ?u16 {
+fn stringValueCodeUnitAt(value: JSValue, index: usize) ?u16 {
     if (!value.isString() or index >= stringValueLen(value)) return null;
     return stringValueCodeUnitAtUnchecked(value, index);
 }
@@ -1344,8 +1241,6 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
     }
 }
 
-/// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
-/// a time. `eq_only` permits the same early length mismatch used by equality.
 /// QJS `js_string_eq`: length test, pointer identity, then
 /// one body comparison through `js_string_memcmp`.
 ///
@@ -1397,6 +1292,8 @@ fn flatStringsEqMixedWidth(a: *const String, b: *const String) bool {
     return true;
 }
 
+/// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
+/// a time. `eq_only` permits the same early length mismatch used by equality.
 pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     if (a.same(b)) return 0;
@@ -1442,8 +1339,8 @@ pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
 /// Append `value`'s text to `buffer` as UTF-8. Non-string values append
 /// nothing — callers coerce first when they need ToString.
 ///
-/// This is the single owner of the operation qjs spells `JS_ToCStringLen2`
-///. Eight hand-written copies of it existed, and their
+/// This is the single owner of the operation qjs spells `JS_ToCStringLen2`.
+/// Eight hand-written copies of it existed, and their
 /// comments record the same defect being repaired independently six times:
 /// latin1 0x80-0xFF must WIDEN to UTF-8 rather than land as raw bytes, and
 /// UTF-16 surrogate pairs must combine into one 4-byte sequence rather than
@@ -1518,15 +1415,15 @@ test "string boundary UTF8 streaming does not flatten ropes" {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.nativeAllocator());
     try bytes.ensureTotalCapacity(rt.nativeAllocator(), 64);
-    const before = rt.diagnostics.allocations.allocation_count;
+    const before = rt.allocation_diagnostics.allocation_count;
     const epoch = rt.gc.collection_epoch;
     try appendValueUtf8(rt, &bytes, try input.get(rt));
     try std.testing.expectEqualStrings("\xc3\xa9\xf0\x9f\x98\x80z\xed\xa0\x80", bytes.items);
     try std.testing.expect(!rope.isLinearized());
-    try std.testing.expectEqual(before, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(before, rt.allocation_diagnostics.allocation_count);
     try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
     bytes.clearAndFree(rt.nativeAllocator());
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, appendValueUtf8(rt, &bytes, try input.get(rt)));
     try std.testing.expect(!rope.isLinearized());
@@ -1563,12 +1460,12 @@ test "string boundary UTF8 streaming matches flat encoding across leaf forms" {
                 expected.clearRetainingCapacity();
                 try unicode.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), &expected, &.{ 'a', first, second, 0xd800 });
                 actual.clearRetainingCapacity();
-                const allocations = rt.diagnostics.allocations.allocation_count;
+                const allocations = rt.allocation_diagnostics.allocation_count;
                 const epoch = rt.gc.collection_epoch;
                 try appendValueUtf8(rt, &actual, try input.get(rt));
                 try std.testing.expectEqualSlices(u8, expected.items, actual.items);
                 try std.testing.expectEqual(kind == 2, rope.isLinearized());
-                try std.testing.expectEqual(allocations, rt.diagnostics.allocations.allocation_count);
+                try std.testing.expectEqual(allocations, rt.allocation_diagnostics.allocation_count);
                 try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
             }
         }
@@ -1719,17 +1616,60 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
     buckets[bucket_index] = values[1];
 }
 
-fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSValue) !void {
+/// A run of adjacent short leaves, joined into one flat leaf before
+/// bucketing. Without it, alternating prepend/append keeps adding one-unit
+/// leaves on both edges and every rebalance walks all of them (quadratic
+/// overall). The run is joined once, so it leaves no intermediate garbage.
+const ShortLeafRun = struct {
+    /// Rooted by `rebalanceRope`; entries past `count` stay undefined.
+    leaves: [String.rope_short_len]JSValue = @splat(JSValue.undefinedValue()),
+    count: usize = 0,
+    len: usize = 0,
+
+    fn add(run: *ShortLeafRun, rt: *JSRuntime, buckets: *RopeBuckets, leaf: JSValue) !void {
+        const leaf_len = stringValueLen(leaf);
+        if (leaf_len == 0) return;
+        // A flush allocates; keep `leaf` rooted across it.
+        var held = [_]JSValue{leaf};
+        const slots: []JSValue = &held;
+        const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        if (leaf_len >= String.rope_short_len) {
+            try run.flush(rt, buckets);
+            return addRopeRebalanceLeaf(rt, buckets, held[0]);
+        }
+        if (run.len + leaf_len > String.rope_short_len) try run.flush(rt, buckets);
+        run.leaves[run.count] = held[0];
+        run.count += 1;
+        run.len += leaf_len;
+    }
+
+    fn flush(run: *ShortLeafRun, rt: *JSRuntime, buckets: *RopeBuckets) !void {
+        if (run.count == 0) return;
+        const joined = if (run.count == 1) run.leaves[0] else (String.createConcatParts(rt, run.leaves[0..run.count]) catch |err| switch (err) {
+            error.ExpectedString => unreachable, // every entry is a rope leaf
+            else => |e| return e,
+        }).value();
+        @memset(run.leaves[0..run.count], JSValue.undefinedValue());
+        run.count = 0;
+        run.len = 0;
+        try addRopeRebalanceLeaf(rt, buckets, joined);
+    }
+};
+
+fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, run: *ShortLeafRun, value: JSValue) !void {
     const node = value.ropeBody() orelse {
-        return addRopeRebalanceLeaf(rt, buckets, value);
+        return run.add(rt, buckets, value);
     };
     if (node.flatString()) |flat| {
-        return addRopeRebalanceLeaf(rt, buckets, flat.value());
+        return run.add(rt, buckets, flat.value());
     }
     // A dependent view is an indivisible leaf: the buffer bytes past `len`
     // belong to a longer sibling view, so the rebalance must keep the node.
     if (node.buffer != null) {
-        return addRopeRebalanceLeaf(rt, buckets, value);
+        return run.add(rt, buckets, value);
     }
 
     // A collection during the left traversal may materialize the parent and
@@ -1740,8 +1680,8 @@ fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSVa
     var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
-    try collectRopeRebalanceLeaves(rt, buckets, children[0]);
-    try collectRopeRebalanceLeaves(rt, buckets, children[1]);
+    try collectRopeRebalanceLeaves(rt, buckets, run, children[0]);
+    try collectRopeRebalanceLeaves(rt, buckets, run, children[1]);
 }
 
 /// Returns a new balanced value without consuming `rope`. This is the Boehm,
@@ -1749,15 +1689,18 @@ fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSVa
 /// `js_rebalancee_string_rope`.
 fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
     var buckets: RopeBuckets = @splat(JSValue.undefinedValue());
+    var run: ShortLeafRun = .{};
     var values = [_]JSValue{ rope, JSValue.undefinedValue() };
     const slots: []JSValue = &values;
     const bucket_slots: []JSValue = &buckets;
-    const slices = [_]runtime_owner.ValueRootSlice{ .{ .mutable = &slots }, .{ .mutable = &bucket_slots } };
+    const run_slots: []JSValue = &run.leaves;
+    const slices = [_]runtime_owner.ValueRootSlice{ .{ .mutable = &slots }, .{ .mutable = &bucket_slots }, .{ .mutable = &run_slots } };
     var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
 
-    try collectRopeRebalanceLeaves(rt, &buckets, values[0]);
+    try collectRopeRebalanceLeaves(rt, &buckets, &run, values[0]);
+    try run.flush(rt, &buckets);
 
     for (&buckets) |*entry| {
         const bucket = entry.*;
@@ -2014,12 +1957,11 @@ fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) 
 
 const InlineAllocationLayout = struct {
     total_size: usize,
-    allocation_alignment: std.mem.Alignment,
 };
 
 /// TGC S4-a (D-S4-1): the rope discriminator is a GC kind, not a borrowed
 /// `mark` bit. `allocRopeNode` stamps it in the prefix the allocator writes.
-pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
+inline fn metaIsRope(meta: *const gc.Metadata) bool {
     return meta.flags.kind == .rope;
 }
 
@@ -2046,7 +1988,7 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.Header) usize {
 
 /// Sweep-time death of a condemned string-family BLOCK CELL (TGC S2 §5.7
 /// "sweep dispatch"). `header` is the body pointer (cell base + 8, the same
-/// convention `traceStringEdges` uses); the prefix at `header - 8` tells a
+/// convention `traceRopeEdges` uses); the prefix at `header - 8` tells a
 /// rope from a flat body. Nothing here touches a refcount and nothing calls
 /// `JSValue.free`: a rope's `left`/`right` are traced values the sweep
 /// reclaims on their own, and only an atom-table entry needs an explicit
@@ -2241,7 +2183,6 @@ fn inlineAllocationLayout(comptime tag: String.StorageTag, unit_count: usize) ?I
     };
     // The allocation base carries the Metadata prefix, so it is 8-aligned;
     // that covers `String` (4) and the u16 FAM.
-    const string_alignment = std.mem.Alignment.of(gc.Metadata);
     const payload_units = switch (tag) {
         // latin1 keeps a trailing NUL terminator (qjs `str8` is NUL-terminated).
         .latin1 => finalLatin1AllocationLen(unit_count) orelse return null,
@@ -2255,7 +2196,6 @@ fn inlineAllocationLayout(comptime tag: String.StorageTag, unit_count: usize) ?I
     const total_size = std.math.add(usize, gc.string_prefix_size, struct_and_payload) catch return null;
     return .{
         .total_size = total_size,
-        .allocation_alignment = string_alignment,
     };
 }
 
@@ -2267,10 +2207,6 @@ fn writeLatin1Terminator(bytes: []u8) void {
     bytes.ptr[bytes.len] = 0;
 }
 
-/// Folds a full 32-bit content hash into the 30-bit field qjs `JSString.hash`
-/// stores, reserving 0 as the "not yet computed" sentinel (a computed 0 becomes
-/// 1). Flat strings and ropes both route through this so equal content hashes
-/// identically regardless of rope state.
 /// Folds a full 32-bit content hash into the 30-bit `HashMeta.hash` field,
 /// bumping a computed 0 to 1 (qjs `js_string_compute_hash`). Callers that hash
 /// string content WITHOUT a `String` object (e.g. the Map latin1-concat fast
@@ -2286,7 +2222,7 @@ pub fn hashLatin1(bytes: []const u8, seed: u32) u32 {
     return h;
 }
 
-pub fn hashUtf16(units: []const u16, seed: u32) u32 {
+fn hashUtf16(units: []const u16, seed: u32) u32 {
     var h = seed;
     for (units) |unit| h = h *% 263 +% unit;
     return h;
@@ -2532,21 +2468,21 @@ test "ASCII suffix concatenation preserves source width with one result allocati
     defer rt.destroy();
 
     const narrow_source = try String.createLatin1(rt, "ab");
-    const narrow_allocations = rt.diagnostics.allocations.allocation_count;
+    const narrow_allocations = rt.allocation_diagnostics.allocation_count;
     const narrow = try String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
     try std.testing.expect(!narrow.isWide());
     try std.testing.expect(narrow.eqlBytes("aby"));
-    try std.testing.expectEqual(narrow_allocations + 1, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(narrow_allocations + 1, rt.allocation_diagnostics.allocation_count);
 
     const wide_source = try String.createUtf16(rt, &.{ 0x0100, 'a' });
-    const wide_allocations = rt.diagnostics.allocations.allocation_count;
+    const wide_allocations = rt.allocation_diagnostics.allocation_count;
     const wide = try String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
     try std.testing.expect(wide.isWide());
     try std.testing.expectEqual(@as(usize, 3), wide.len());
     try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
     try std.testing.expectEqual(@as(u16, 'a'), wide.codeUnitAt(1));
     try std.testing.expectEqual(@as(u16, 'y'), wide.codeUnitAt(2));
-    try std.testing.expectEqual(wide_allocations + 1, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(wide_allocations + 1, rt.allocation_diagnostics.allocation_count);
 }
 
 test "flat strings store characters inline in a single fixed-size allocation" {
@@ -2556,20 +2492,20 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     // QuickJS `JSString` keeps characters inline (a flexible array member),
     // so creating a flat string is exactly one allocation and holds no spare
     // capacity to append into.
-    const fixed_allocations = rt.diagnostics.allocations.allocation_count;
+    const fixed_allocations = rt.allocation_diagnostics.allocation_count;
     var fixed = try String.createLatin1(rt, "abc");
     try std.testing.expectEqual(@as(usize, 3), fixed.len());
     try std.testing.expect(!fixed.isWide());
     try std.testing.expect(fixed.eqlBytes("abc"));
-    try std.testing.expectEqual(fixed_allocations + 1, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(fixed_allocations + 1, rt.allocation_diagnostics.allocation_count);
     dropGcPtr(&fixed);
     _ = rt.collectForTest();
-    try std.testing.expectEqual(fixed_allocations, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(fixed_allocations, rt.allocation_diagnostics.allocation_count);
 
-    const growable_allocations = rt.diagnostics.allocations.allocation_count;
+    const growable_allocations = rt.allocation_diagnostics.allocation_count;
     const growable = try String.createLatin1Concat(rt, "ab", "c");
     try std.testing.expect(growable.eqlBytes("abc"));
-    try std.testing.expectEqual(growable_allocations + 1, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(growable_allocations + 1, rt.allocation_diagnostics.allocation_count);
 }
 
 test "string materialization flat rope wide and tail views support aliases and cached reads" {
@@ -2604,13 +2540,13 @@ test "string materialization flat rope wide and tail views support aliases and c
             try std.testing.expectEqual(@as(u16, 0x100), flat.codeUnitAt(0));
             try std.testing.expectEqual(@as(usize, 7), flat.len());
         } else try std.testing.expect(flat.eqlBytes(if (kind == 0) "left" else "leftright"));
-        const allocations = rt.diagnostics.allocations.allocation_count;
+        const allocations = rt.allocation_diagnostics.allocation_count;
         // Cached ropes still do not satisfy a pure flat-value projection.
         try std.testing.expectEqual(kind == 0, asFlat(try input.get(rt)) != null);
         try ensureFlat(rt, input.readOnly(), input);
         try std.testing.expectEqual(flat, asFlat(try input.get(rt)).?);
         try ensureFlat(rt, input.readOnly(), input);
-        try std.testing.expectEqual(allocations, rt.diagnostics.allocations.allocation_count);
+        try std.testing.expectEqual(allocations, rt.allocation_diagnostics.allocation_count);
     }
 }
 
@@ -2674,7 +2610,7 @@ test "string materialization keeps graph alive across allocation probe collectio
         fn collect(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
-            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = self.rt.collectFull(null, .declared_only) catch |err| {
                 self.failure = err;
             };
         }
@@ -2777,16 +2713,13 @@ fn testReentrantTailCopy(mode: enum { flatten, concat, slice, suffix, lower, upp
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             if (self.once and self.calls != 0) return;
             self.calls += 1;
-            const saved = self.rt.gc.heap_budget.probe;
-            self.rt.gc.heap_budget.probe = null;
-            defer self.rt.gc.heap_budget.probe = saved;
             ensureFlat(self.rt, self.input, self.output) catch |err| {
                 self.failure = err;
                 return;
             };
             // Linearization dropped the old buffer edge. Reclaim it before
             // the outer materialization resumes its copy.
-            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            _ = self.rt.collectFull(null, .declared_only) catch |err| {
                 self.failure = err;
                 return;
             };

@@ -3,83 +3,17 @@ const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const context = @import("../core/context.zig");
 const runtime = @import("../runtime.zig");
-const execution = @import("../core/execution.zig");
 const FunctionBytecode = bytecode.FunctionBytecode;
-const CallFacts = bytecode.CallFacts;
-const FunctionDef = bytecode.FunctionDef;
-const pipeline = bytecode.pipeline;
 const opcode = bytecode.opcode;
-const module = bytecode.module;
 const EntryContract = bytecode.EntryContract;
 const function_bytecode = bytecode.function_bytecode;
 const pipeline_pc2line = bytecode.pipeline.pc2line;
 
 const function_bytecode_mod = function_bytecode;
-const pc2line = pipeline_pc2line;
-
-/// Generic geometric growth helper, identical in shape to the FunctionDef
-/// helper of the same name. Keeps `slice.*.len` as the *used* count and
-/// `slice.*.ptr[0..capacity.*]` as the allocator-owned buffer. Returns the
-/// freshly grown tail (length `n`).
-fn growSliceBy(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    slice: *[]T,
-    capacity: *usize,
-    n: usize,
-) ![]T {
-    const used = slice.len;
-    const new_used = used + n;
-    if (new_used <= capacity.*) {
-        slice.* = slice.ptr[0..new_used];
-        return slice.ptr[used..new_used];
-    }
-    var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
-    if (new_cap < new_used) new_cap = new_used;
-    const new_buf = try allocator.alloc(T, new_cap);
-    @memcpy(new_buf[0..used], slice.*);
-    var old_buf: []T = &.{};
-    if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-    slice.* = new_buf[0..new_used];
-    capacity.* = new_cap;
-    if (old_buf.len != 0) allocator.free(old_buf);
-    return slice.ptr[used..new_used];
-}
-
-fn freeGrowableSlice(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    slice: *[]T,
-    capacity: *usize,
-) void {
-    var old_buf: []T = &.{};
-    if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_buf.len != 0) allocator.free(old_buf);
-}
-
-fn freeOwnedAtomSlice(allocator: std.mem.Allocator, slot: *[]atom.Atom) void {
-    const items = slot.*;
-    slot.* = &.{};
-    if (items.len != 0) allocator.free(items);
-}
-
-fn freeGrowableAtomSlice(
-    allocator: std.mem.Allocator,
-    slice: *[]atom.Atom,
-    capacity: *usize,
-) void {
-    const items = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_capacity != 0) {
-        allocator.free(items.ptr[0..old_capacity]);
-    } else if (items.len != 0) {
-        allocator.free(items);
-    }
-}
+const growable = @import("growable.zig");
+const growSliceBy = growable.growSliceBy;
+const freeGrowableSlice = growable.freeGrowableSlice;
+const freeGrowableAtomSlice = growable.freeGrowableAtomSlice;
 
 pub const Flags = packed struct(u16) {
     has_prototype: bool = false,
@@ -96,9 +30,6 @@ pub const Flags = packed struct(u16) {
     /// Compile/finalize fact used to distinguish strict snapshot frames
     /// from strict functions that never create an arguments object.
     materializes_arguments_object: bool = false,
-    /// Runtime-created mapped Arguments objects open-alias every supplied
-    /// argument slot in addition to the statically captured bindings.
-    has_mapped_arguments: bool = false,
     /// Exact-zero-argument sloppy plain-function leaf whose frame cannot
     /// acquire cold state or value-bearing local/capture/open-ref windows.
     /// Published in the previously reserved execution flag bit. The
@@ -106,7 +37,7 @@ pub const Flags = packed struct(u16) {
     /// `raw_this_inline_empty_leaf` field, so this established sloppy test
     /// stays single-bit while this packed carrier retains its u16 ABI.
     simple_inline_empty_leaf: bool = false,
-    _reserved: u2 = 0,
+    _reserved: u3 = 0,
 
     comptime {
         std.debug.assert(@sizeOf(@This()) == 2);
@@ -135,6 +66,9 @@ pub const BytecodeImpl = struct {
     /// module/test bytecode leaves this null and supplies its realm at the
     /// module/test entry boundary.
     realm: ?*context.RealmContext = null,
+    /// Runtime whose interrupt handler the compiler passes poll (contract
+    /// C8): a huge function lowers for seconds. Null in standalone tests.
+    interrupt_runtime: ?*runtime.JSRuntime = null,
     name: atom.Atom,
     filename: atom.Atom,
     /// Stable ScriptOrModule identity used for host referrer resolution.
@@ -257,112 +191,6 @@ pub const BytecodeImpl = struct {
         if (owns_pc2line_buf and pc2line_buf.len != 0) self.allocator.free(pc2line_buf);
     }
 
-    pub inline fn byteCode(self: *const BytecodeImpl) []const u8 {
-        return self.code;
-    }
-    pub inline fn funcName(self: *const BytecodeImpl) atom.Atom {
-        return self.name;
-    }
-    pub inline fn pc2lineBuf(self: *const BytecodeImpl) []const u8 {
-        return self.pc2line_buf;
-    }
-    pub inline fn lineNum(self: *const BytecodeImpl) i32 {
-        return self.line_num;
-    }
-    pub inline fn colNum(self: *const BytecodeImpl) i32 {
-        return self.col_num;
-    }
-    pub inline fn scriptOrModule(self: *const BytecodeImpl) atom.Atom {
-        return self.script_or_module;
-    }
-    pub inline fn realmContext(self: *const BytecodeImpl) ?*context.RealmContext {
-        return self.realm;
-    }
-    pub inline fn isGlobalVar(self: *const BytecodeImpl) bool {
-        return self.flags.is_global_var;
-    }
-    pub inline fn isModule(self: *const BytecodeImpl) bool {
-        return self.flags.is_module;
-    }
-    pub inline fn functionKind(self: *const BytecodeImpl) function_bytecode_mod.FunctionKind {
-        return if (self.flags.is_async and self.flags.is_generator)
-            .async_generator
-        else if (self.flags.is_async)
-            .async
-        else if (self.flags.is_generator)
-            .generator
-        else
-            .normal;
-    }
-    pub inline fn isDerivedClassConstructor(self: *const BytecodeImpl) bool {
-        return self.flags.is_derived_class_constructor;
-    }
-    pub inline fn hasPrototype(self: *const BytecodeImpl) bool {
-        return self.flags.has_prototype;
-    }
-    pub inline fn hasSimpleParameterList(self: *const BytecodeImpl) bool {
-        return self.flags.has_simple_parameter_list;
-    }
-    pub inline fn needHomeObject(self: *const BytecodeImpl) bool {
-        return self.flags.need_home_object;
-    }
-    pub inline fn newTargetAllowed(self: *const BytecodeImpl) bool {
-        return self.entry_contract.new_target_allowed;
-    }
-    pub inline fn superCallAllowed(self: *const BytecodeImpl) bool {
-        return self.entry_contract.super_call_allowed;
-    }
-    pub inline fn superAllowed(self: *const BytecodeImpl) bool {
-        return self.entry_contract.super_allowed;
-    }
-    pub inline fn argumentsAllowed(self: *const BytecodeImpl) bool {
-        return self.entry_contract.arguments_allowed;
-    }
-    pub inline fn isDirectOrIndirectEval(self: *const BytecodeImpl) bool {
-        return self.flags.is_direct_or_indirect_eval;
-    }
-    pub inline fn isAsync(self: *const BytecodeImpl) bool {
-        return self.flags.is_async;
-    }
-    pub inline fn isGenerator(self: *const BytecodeImpl) bool {
-        return self.flags.is_generator;
-    }
-    pub inline fn entryContract(self: *const BytecodeImpl) EntryContract {
-        return self.entry_contract;
-    }
-    pub inline fn isStrictMode(self: *const BytecodeImpl) bool {
-        return self.flags.is_strict;
-    }
-    pub inline fn runtimeStrictMode(self: *const BytecodeImpl) bool {
-        return self.flags.runtime_strict;
-    }
-    pub inline fn hasMappedArguments(self: *const BytecodeImpl) bool {
-        return self.flags.has_mapped_arguments;
-    }
-    pub inline fn simpleInlineEligible(self: *const BytecodeImpl) bool {
-        return self.simple_inline_eligible;
-    }
-    pub inline fn strictSimpleInlineEligible(self: *const BytecodeImpl) bool {
-        return self.strict_simple_inline_eligible;
-    }
-    pub inline fn strictSimpleSnapshotInlineEligible(self: *const BytecodeImpl) bool {
-        return self.strict_simple_snapshot_inline_eligible;
-    }
-    pub inline fn simpleInlineEmptyLeaf(self: *const BytecodeImpl) bool {
-        return self.flags.simple_inline_empty_leaf;
-    }
-    pub inline fn rawThisInlineEmptyLeaf(self: *const BytecodeImpl) bool {
-        return self.raw_this_inline_empty_leaf;
-    }
-    pub inline fn simpleInlineExactArgsLeaf(self: *const BytecodeImpl) bool {
-        return self.simple_inline_exact_args_leaf;
-    }
-    pub inline fn rawThisInlineExactArgsLeaf(self: *const BytecodeImpl) bool {
-        return self.raw_this_inline_exact_args_leaf;
-    }
-    pub inline fn exactArgsLeafKind(self: *const BytecodeImpl) function_bytecode_mod.ExactArgsLeafKind {
-        return self.exact_args_leaf_kind;
-    }
     pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
         freeGrowableSlice(u8, self.allocator, &self.code, &self.code_capacity);
         if (bytes.len == 0) return;
@@ -380,13 +208,6 @@ pub const BytecodeImpl = struct {
         if (bytes.len == 0) return;
         const tail = try growSliceBy(u8, self.allocator, &self.code, &self.code_capacity, bytes.len);
         @memcpy(tail, bytes);
-    }
-
-    /// Truncate `code` back to `target_len` bytes, preserving capacity so
-    /// re-emission after speculative rollback does not reallocate.
-    pub fn truncateCode(self: *BytecodeImpl, target_len: usize) void {
-        std.debug.assert(target_len <= self.code.len);
-        self.code = self.code.ptr[0..target_len];
     }
 
     /// Replace the `code` buffer with a caller-owned backing allocation
@@ -502,7 +323,6 @@ pub fn classifyAsyncExecution(fb: *const FunctionBytecode) AsyncExecutionPolicy 
 /// `CallFacts` classification consumes but the FB does not store itself.
 pub const ExecutionFacts = struct {
     materializes_arguments_object: bool,
-    has_mapped_arguments: bool,
     leaf_returns_balanced: bool,
     contains_direct_eval: bool,
     /// Class syntax is a finalizer-only exclusion fact. Runtime rejection
@@ -514,7 +334,6 @@ pub const ExecutionFacts = struct {
 
 pub fn publishExecutionFlags(fb: *FunctionBytecode, facts: ExecutionFacts) void {
     const materializes_arguments_object = facts.materializes_arguments_object;
-    const has_mapped_arguments = facts.has_mapped_arguments;
     const leaf_returns_balanced = facts.leaf_returns_balanced;
     const contains_direct_eval = facts.contains_direct_eval;
     const class_syntax_excludes_inline = facts.class_syntax_excludes_inline;
@@ -561,11 +380,10 @@ pub fn publishExecutionFlags(fb: *FunctionBytecode, facts: ExecutionFacts) void 
     // bodies never enter noteMonomorphic. Not a shape special case.
     const small_inline_eligible = scanSmallInlineEligible(fb, facts) and leaf_returns_balanced;
     if (fb.realmContext()) |realm| {
-        execution.addSmallInlinePublished(realm.runtime, entry_code.len);
+        realm.runtime.small_inline.published_bytes +|= entry_code.len;
     }
 
     call_facts.execution = .{
-        .has_mapped_arguments = has_mapped_arguments,
         .simple_inline_eligible = simple_inline_base and !strict_mode,
         .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
         .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,

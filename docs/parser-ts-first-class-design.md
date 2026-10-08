@@ -16,18 +16,22 @@
   明确拒绝。
 - **JSX 不在范围**。`.tsx`/`.jsx` 文件名在 compile 入口直接报 SyntaxError。
 
-## 2. 与 JS 的三处已知分歧
+## 2. 与 JS 的已知分歧
 
-TS 文法在三处与 JS 对同一 token 序列给出不同解释，全部按 TS 解释：
+TS 文法在几处与 JS 对同一 token 序列给出不同解释：
 
 | 输入 | JS | 本 parser |
 | --- | --- | --- |
-| `f<T>(x)` | `(f < T) > (x)` | 泛型调用 `f(x)` |
+| `f<T>(x)` / `new C<T>(x)` / `f<T>` | `(f < T) > (x)` | 仅 TS 源：泛型调用 `f(x)`；JS 源按 JS |
+| `x!` | 语法错误（`1!+1`）| 仅 TS 源：非空断言，等价于 `x`；JS 源按 JS |
 | `<T>expr` | 语法错误 | 尖括号断言，等价于 `expr` |
 | `cond ? (a): T => b : c` | 三元 | 三元的 whenTrue 分支禁止箭头返回类型，仍按 JS 解析 |
 
-前两条在真实 JS 中不出现；第三条沿用 tsc 的 `allowReturnTypeInArrowFunction` 规则，
-通过 `ParseFlags.arrow_return_type_forbidden` 只在 `?:` 的 whenTrue 分支置位。
+前两条在 JS 中是合法代码（或应报错）而含义不同，2026-10-06 起按源码类型区分：
+`State.typescript` 只对 `.ts`/`.mts`/`.cts` 文件置位，`.js`/`.mjs`、`eval`、
+`new Function` 按 JS 解释（owner 裁决）。第三条在 JS 中本就是语法错误，统一按 TS；
+第四条沿用 tsc 的 `allowReturnTypeInArrowFunction` 规则，通过
+`ParseFlags.arrow_return_type_forbidden` 只在 `?:` 的 whenTrue 分支置位。
 
 上下文关键字（`type`/`interface`/`declare`/`namespace`/`module`/`abstract`/`as`/
 `satisfies`/`readonly`/`keyof`…）只在特定形状下生效，其余位置仍是普通标识符，

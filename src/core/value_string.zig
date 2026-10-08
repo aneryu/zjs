@@ -77,7 +77,7 @@ pub noinline fn appendValueString(
         return;
     }
     if (value.as(.float64)) |float_value| return appendFloat(rt, buffer, float_value);
-    if (value.isBigInt()) return value_format.appendBigIntBase10(rt.nativeAllocator(), buffer, value);
+    if (value.isBigInt()) return value_format.appendBigIntBase10(rt.nativeAllocator(), buffer, value, rt);
     if (value.as(.boolean)) |bool_value| {
         return buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
     }

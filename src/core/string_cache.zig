@@ -1,11 +1,8 @@
 //! Runtime string cache: single-byte, empty, two-unit, atom, percent, and
 //! small-integer strings.
 //!
-//! The slots stay on `JSRuntime` so auto-layout does not move `vm_stack`.
 //! Each filled slot is a strong root for the runtime's lifetime. Lookups
-//! return a borrowed string; there is no per-caller retain. The four-way
-//! atom cursor lives in `recent_atom_string_next` (a `u8` in the old
-//! `compact_state` slot).
+//! return a borrowed string; there is no per-caller retain.
 
 const std = @import("std");
 const atom = @import("atom.zig");
@@ -27,55 +24,69 @@ pub const RecentAtom = struct {
     string: *string.String,
 };
 
-pub fn clear(rt: *JSRuntime) void {
-    rt.recent_two_unit_string = null;
-    for (&rt.recent_atom_strings) |*slot| slot.* = null;
-    rt.recent_atom_string_next = 0;
-    rt.empty_string = null;
-    for (&rt.single_byte_strings) |*slot| slot.* = null;
-    for (&rt.percent_hex_strings) |*slot| slot.* = null;
-    for (&rt.small_int_strings) |*slot| slot.* = null;
-}
+/// `JSRuntime.strings`. Every slot is filled lazily and then kept until
+/// runtime teardown.
+pub const Cache = struct {
+    /// One shared latin1 body per code unit `0..255`. Every one-code-unit
+    /// producer reads it (`charAt`, `at`, one-argument `String.fromCharCode`,
+    /// the string iterator, `s[i]`, a length-1 `slice`); code units `>= 0x100`
+    /// still allocate. Sharing is unobservable because strings are immutable
+    /// and compared by value.
+    single_byte: [256]?*string.String = @splat(null),
+    /// Uppercase percent-escaped bytes (`%00`..`%FF`) for the URI helpers.
+    percent_hex: [256]?*string.String = @splat(null),
+    /// Decimal strings "0".."255".
+    small_int: [256]?*string.String = @splat(null),
+    empty: ?*string.String = null,
+    /// Most recent two-code-unit string, e.g. a surrogate pair built by both
+    /// `decodeURI` and `String.fromCharCode` in the same sweep.
+    recent_two_unit: ?RecentTwoUnit = null,
+    /// Four-way atom-to-string cache for hot bytecode constants; regexp
+    /// literals alternate between source and flags atoms.
+    recent_atoms: [4]?RecentAtom = @splat(null),
+    recent_atom_next: u8 = 0,
+};
 
 pub fn trace(rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-    for (&rt.single_byte_strings) |*slot| try visitor.stringSlot(slot);
-    for (&rt.percent_hex_strings) |*slot| try visitor.stringSlot(slot);
-    for (&rt.small_int_strings) |*slot| try visitor.stringSlot(slot);
-    try visitor.stringSlot(&rt.empty_string);
-    if (rt.recent_two_unit_string) |*cached| try visitor.stringField(&cached.string);
-    for (&rt.recent_atom_strings) |*cached| {
+    const cache = &rt.strings;
+    for (&cache.single_byte) |*slot| try visitor.stringSlot(slot);
+    for (&cache.percent_hex) |*slot| try visitor.stringSlot(slot);
+    for (&cache.small_int) |*slot| try visitor.stringSlot(slot);
+    try visitor.stringSlot(&cache.empty);
+    if (cache.recent_two_unit) |*cached| try visitor.stringField(&cached.string);
+    for (&cache.recent_atoms) |*cached| {
         if (cached.*) |*stored| try visitor.stringField(&stored.string);
     }
 }
 
 pub inline fn singleByte(rt: *JSRuntime, byte: u8) !*string.String {
-    if (rt.single_byte_strings[byte]) |cached| return cached;
+    if (rt.strings.single_byte[byte]) |cached| return cached;
     return createSingleByte(rt, byte);
 }
 
 pub noinline fn createSingleByte(rt: *JSRuntime, byte: u8) !*string.String {
     const created = try string.String.createLatin1(rt, &.{byte});
-    rt.single_byte_strings[byte] = created;
+    rt.strings.single_byte[byte] = created;
     return created;
 }
 
 pub inline fn cachedSingleByte(rt: *JSRuntime, byte: u8) ?*string.String {
-    return rt.single_byte_strings[byte];
+    return rt.strings.single_byte[byte];
 }
 
 pub fn empty(rt: *JSRuntime) !*string.String {
-    if (rt.empty_string) |cached| return cached;
+    if (rt.strings.empty) |cached| return cached;
     const created = try string.String.createAscii(rt, "");
-    rt.empty_string = created;
+    rt.strings.empty = created;
     return created;
 }
 
 pub fn recentTwoUnit(rt: *JSRuntime, first: u16, second: u16) !*string.String {
-    if (rt.recent_two_unit_string) |cached| {
+    if (rt.strings.recent_two_unit) |cached| {
         if (cached.first == first and cached.second == second) return cached.string;
     }
     const created = try string.String.createUtf16Pair(rt, first, second);
-    rt.recent_two_unit_string = .{
+    rt.strings.recent_two_unit = .{
         .first = first,
         .second = second,
         .string = created,
@@ -84,39 +95,39 @@ pub fn recentTwoUnit(rt: *JSRuntime, first: u16, second: u16) !*string.String {
 }
 
 pub fn recentAtom(rt: *JSRuntime, atom_id: atom.Atom, bytes: []const u8) !*string.String {
-    for (rt.recent_atom_strings) |slot| {
+    for (rt.strings.recent_atoms) |slot| {
         if (slot) |cached| {
             if (cached.atom_id == atom_id) return cached.string;
         }
     }
     const created = try string.String.createUtf8(rt, bytes);
     rt.atoms.cacheString(rt, atom_id, created);
-    const slot_index: usize = rt.recent_atom_string_next;
-    rt.recent_atom_strings[slot_index] = .{
+    const slot_index: usize = rt.strings.recent_atom_next;
+    rt.strings.recent_atoms[slot_index] = .{
         .atom_id = atom_id,
         .string = created,
     };
-    rt.recent_atom_string_next = @intCast((slot_index + 1) % rt.recent_atom_strings.len);
+    rt.strings.recent_atom_next = @intCast((slot_index + 1) % rt.strings.recent_atoms.len);
     return created;
 }
 
 pub fn smallInt(rt: *JSRuntime, value: u8) !*string.String {
-    if (rt.small_int_strings[value]) |cached| return cached;
+    if (rt.strings.small_int[value]) |cached| return cached;
     var buf: [4]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
     const cached = try string.String.createLatin1(rt, text);
-    rt.small_int_strings[value] = cached;
+    rt.strings.small_int[value] = cached;
     return cached;
 }
 
 pub fn percentHex(rt: *JSRuntime, value: u8) !*string.String {
-    if (rt.percent_hex_strings[value]) |cached| return cached;
+    if (rt.strings.percent_hex[value]) |cached| return cached;
     const bytes: [3]u8 = .{
         '%',
         unicode.asciiUpperHexDigitChar(value >> 4),
         unicode.asciiUpperHexDigitChar(value & 0x0f),
     };
     const created = try string.String.createAscii(rt, &bytes);
-    rt.percent_hex_strings[value] = created;
+    rt.strings.percent_hex[value] = created;
     return created;
 }

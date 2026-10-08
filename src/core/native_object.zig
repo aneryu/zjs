@@ -11,7 +11,6 @@
 //! finalizer has already run). Class ids are Runtime-local; callers retain
 //! the binding and must not use it after its owner is destroyed.
 
-const std = @import("std");
 const class = @import("class.zig");
 const object_mod = @import("object.zig");
 const runtime_mod = @import("../runtime.zig");

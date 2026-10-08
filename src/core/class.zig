@@ -88,7 +88,8 @@ pub const ids = struct {
     pub const async_generator: ClassId = 59;
     pub const weak_ref: ClassId = 60;
     pub const finalization_registry: ClassId = 61;
-    pub const dom_exception: ClassId = 62;
+    /// Reserved legacy slot. DOMException belongs to the embedding host.
+    pub const reserved_62: ClassId = 62;
     pub const call_site: ClassId = 63;
     pub const raw_json: ClassId = 64;
     /// Reserved legacy slot. File handles belong to the embedding host.
@@ -167,6 +168,16 @@ pub inline fn isBytecodeFunctionClass(id: ClassId) bool {
 /// Internal Await reaction handlers, with one continuation edge in Object.u.
 pub inline fn isAsyncFunctionResumeClass(id: ClassId) bool {
     return id == ids.async_function_resolve or id == ids.async_function_reject;
+}
+
+/// Every function object class: native, native-with-data, bytecode, bound,
+/// and the internal Await reaction handlers. Proxies are not included.
+pub inline fn isFunctionClass(id: ClassId) bool {
+    return id == ids.c_function or
+        id == ids.c_function_data or
+        id == ids.bound_function or
+        isBytecodeFunctionClass(id) or
+        isAsyncFunctionResumeClass(id);
 }
 
 pub const PayloadVisitor = struct {
@@ -316,14 +327,6 @@ pub const Table = struct {
         }
     };
 
-    /// Function pointers copied into a deferred payload-finalizer node. The
-    /// callback pin owns the definition until the callback returns.
-    pub const DeferredPayloadCallbacks = struct {
-        generation: u64,
-        finalizer: PayloadFinalizer,
-        mark: ?PayloadMark,
-    };
-
     atoms: *atom.AtomTable,
     storage_allocator: std.mem.Allocator,
     allocator: std.mem.Allocator,
@@ -460,7 +463,7 @@ pub const Table = struct {
         // TGC S3 §4 class B: `name_atom` is a bare id and this file sits below
         // runtime.zig, so it cannot name an `AtomRootFrame`. Grow the record
         // table first instead -- then the only allocation left between the
-        // intern and `dupForHolder` is gone and the id spans no collection
+        // intern and `registerAtom`'s store is gone and the id spans no collection
         // point at all. `registerAtom` re-checks both, idempotently.
         if (id == invalid_class_id) return error.InvalidClassId;
         try self.ensureCapacity(@as(usize, id) + 1);
@@ -536,34 +539,6 @@ pub const Table = struct {
         state.live_object_pins -= 1;
     }
 
-    /// Copy the callbacks for a deferred node and retain the definition from
-    /// enqueue until callback completion.
-    pub fn pinDeferredPayloadCallbacks(self: *Table, id: ClassId, generation: u64) ?DeferredPayloadCallbacks {
-        self.assertOwnerThread();
-        const definition_view = self.recordPtr(id) orelse return null;
-        const finalizer = definition_view.payload_finalizer orelse return null;
-        if (id >= ids.init_count) {
-            const state = &self.registration_states[id];
-            if (state.generation != generation or state.live_object_pins == 0) return null;
-            state.callback_pins += 1;
-        }
-        return .{
-            .generation = generation,
-            .finalizer = finalizer,
-            .mark = definition_view.payload_mark,
-        };
-    }
-
-    pub fn releaseDeferredPayloadCallbacks(self: *Table, id: ClassId, generation: u64) void {
-        self.assertOwnerThread();
-        if (id < ids.init_count) return;
-        std.debug.assert(id < self.registration_states.len);
-        const state = &self.registration_states[id];
-        std.debug.assert(state.generation == generation);
-        std.debug.assert(state.callback_pins != 0);
-        state.callback_pins -= 1;
-    }
-
     pub fn isRegistered(self: Table, id: ClassId) bool {
         if (id >= self.records.len) return false;
         return self.records[id].isRegistered();
@@ -573,24 +548,6 @@ pub const Table = struct {
         self.assertOwnerThread();
         if (!self.isRegistered(id)) return null;
         return self.records[id].class_name;
-    }
-
-    pub fn findByName(self: *const Table, name: []const u8) ?ClassId {
-        for (self.records) |rec| {
-            if (!rec.isRegistered()) continue;
-            const stored = self.atoms.name(rec.class_name) orelse continue;
-            if (std.mem.eql(u8, stored, name)) return rec.id;
-        }
-        return null;
-    }
-
-    pub fn findByIdentity(self: *const Table, identity: []const u8) ?ClassId {
-        for (self.records) |rec| {
-            if (!rec.isRegistered()) continue;
-            const stored = rec.binding_identity orelse continue;
-            if (std.mem.eql(u8, stored, identity)) return rec.id;
-        }
-        return null;
     }
 
     pub fn record(self: *const Table, id: ClassId) ?Record {
@@ -615,31 +572,6 @@ pub const Table = struct {
         const rec = &self.records[id];
         if (!rec.isRegistered()) return null;
         return rec;
-    }
-
-    pub fn runFinalizer(self: *Table, id: ClassId) bool {
-        self.assertOwnerThread();
-        const generation = self.pinCallback(id) orelse return false;
-        defer self.releaseCallback(id, generation);
-        const finalizer = (self.recordPtr(id) orelse return false).finalizer orelse return false;
-        finalizer();
-        return true;
-    }
-
-    pub fn runPayloadFinalizerForTest(
-        self: *Table,
-        id: ClassId,
-        runtime: *anyopaque,
-        object: *anyopaque,
-        payload: *Payload,
-    ) bool {
-        self.assertOwnerThread();
-        if (!builtin.is_test) @compileError("runPayloadFinalizerForTest is only available in tests");
-        const generation = self.pinCallback(id) orelse return false;
-        defer self.releaseCallback(id, generation);
-        const finalizer = (self.recordPtr(id) orelse return false).payload_finalizer orelse return false;
-        finalizer(runtime, object, payload);
-        return true;
     }
 
     pub fn runPayloadFinalizer(
@@ -857,7 +789,6 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
     return switch (id) {
         ids.object,
         ids.error_,
-        ids.dom_exception,
         ids.call_site,
         ids.raw_json,
         => .ordinary,

@@ -8,14 +8,15 @@ const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
+const internal_builtins = @import("internal_builtins.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
-const coercion_ops = @import("value_ops.zig");
 
 const dispatch = @import("tailcall_dispatch.zig");
 const Vm = dispatch.Vm;
+const catchVmError = object_ops.catchVmError;
 const HostError = @import("exception_ops.zig").HostError;
 const op = bytecode.opcode.op;
 
@@ -33,7 +34,7 @@ pub fn binary(
     // The two pops above guarantee capacity for one push, and none of the
     // fast legs below run user code that could touch the operand stack in
     // between — mirror qjs js_add_slow/js_binary_arith_slow writing the
-    // result straight to sp[-2] with no capacity check (quickjs.c,
+    // result straight to sp[-2] with no capacity check (quickjs.c).
     // The coercing tail below keeps the checked push: toPrimitive
     // re-enters user code.
     if (lhs.as(.int)) |lhs_int| {
@@ -58,24 +59,21 @@ pub fn binary(
         return;
     }
     const result = if (binop == op.add) blk: {
-        const lhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
-        const rhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
+        const lhs_primitive = try value_ops.toPrimitiveForAddition(ctx, output, global, lhs);
+        const rhs_primitive = try value_ops.toPrimitiveForAddition(ctx, output, global, rhs);
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else if (isBitwiseBinaryOp(binop) or isNumericBinaryOp(binop)) blk: {
-        const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-        if (lhs_primitive.is(.symbol)) return error.TypeError;
-        const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-        if (rhs_primitive.is(.symbol)) return error.TypeError;
+        const lhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, lhs);
+        if (lhs_primitive.is(.symbol)) return error.SymbolToNumber;
+        const rhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, rhs);
+        if (rhs_primitive.is(.symbol)) return error.SymbolToNumber;
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else try value_ops.binary(ctx.runtime, binop, lhs, rhs);
     try stack.pushOwned(result);
 }
 
 pub noinline fn binaryVm(vm: *Vm, opc: u8) HostError!void {
-    binary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    binary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
 }
 
 pub fn compare(
@@ -119,10 +117,10 @@ pub fn compare(
         op.strict_eq => value_ops.strictEqual(lhs, rhs),
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
-            const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-            if (lhs_primitive.is(.symbol)) return error.TypeError;
-            const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-            if (rhs_primitive.is(.symbol)) return error.TypeError;
+            // IsLessThan: ToPrimitive both operands before either ToNumeric.
+            const lhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, lhs);
+            const rhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, rhs);
+            if (lhs_primitive.is(.symbol) or rhs_primitive.is(.symbol)) return error.SymbolToNumber;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
         },
     };
@@ -130,10 +128,7 @@ pub fn compare(
 }
 
 pub noinline fn compareVm(vm: *Vm, opc: u8) HostError!void {
-    compare(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    compare(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
 }
 
 /// Register-resident slow compare (qjs OP_lt/OP_le/… → js_relational_slow /
@@ -146,8 +141,8 @@ pub noinline fn compareVm(vm: *Vm, opc: u8) HostError!void {
 /// borrowing coercions, exactly as `compare`'s popped operands were).
 ///
 /// `cmp` is COMPTIME — qjs reaches its slow calls from independent CASE labels
-/// (`js_relational_slow(ctx, sp, opcode)` at quickjs.c vs
-/// `js_eq_slow(ctx, sp, inv)` at 20330), so no qjs slow path ever selects its
+/// (`js_relational_slow(ctx, sp, opcode)` vs `js_eq_slow(ctx, sp, inv)`),
+/// so no qjs slow path ever selects its
 /// predicate at run time. With a runtime `u8` here every eq-family call still
 /// evaluated the relational float leg's switch and every relational call still
 /// evaluated the eq dispatch; both legs measured ZERO hits from the other family's
@@ -203,13 +198,13 @@ pub fn compareAt(
             // operands directly to compare. Objects still need the full
             // ToPrimitive path (valueOf/toString can run user code).
             if (lhs.is(.object) or rhs.is(.object)) {
-                const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-                if (lhs_primitive.is(.symbol)) return error.TypeError;
-                const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-                if (rhs_primitive.is(.symbol)) return error.TypeError;
+                // IsLessThan: ToPrimitive both operands before either ToNumeric.
+                const lhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, lhs);
+                const rhs_primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, rhs);
+                if (lhs_primitive.is(.symbol) or rhs_primitive.is(.symbol)) return error.SymbolToNumber;
                 break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
             }
-            if (lhs.is(.symbol) or rhs.is(.symbol)) return error.TypeError;
+            if (lhs.is(.symbol) or rhs.is(.symbol)) return error.SymbolToNumber;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs, rhs);
         },
     };
@@ -238,8 +233,8 @@ pub fn unary(
             if (value_ops.shortBigIntUnary(opcode_id, bigint_value)) |fast| break :blk fast;
         }
         if (opcode_id == op.neg or opcode_id == op.to_number or opcode_id == op.inc or opcode_id == op.dec) {
-            const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-            if (primitive.is(.symbol)) return error.TypeError;
+            const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, value);
+            if (primitive.is(.symbol)) return error.SymbolToNumber;
             break :blk try value_ops.unary(ctx.runtime, opcode_id, primitive);
         }
         break :blk try value_ops.unary(ctx.runtime, opcode_id, value);
@@ -248,10 +243,7 @@ pub fn unary(
 }
 
 pub noinline fn unaryVm(vm: *Vm, opc: u8) HostError!void {
-    unary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    unary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
 }
 
 pub fn bitNot(
@@ -261,16 +253,13 @@ pub fn bitNot(
     global: *core.Object,
 ) !void {
     const value = try stack.pop();
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, value);
     const result = try value_ops.unary(ctx.runtime, op.not, primitive);
     try stack.pushOwned(result);
 }
 
 pub noinline fn bitNotVm(vm: *Vm) HostError!void {
-    bitNot(vm.ctx, vm.stack, vm.output, vm.global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    bitNot(vm.ctx, vm.stack, vm.output, vm.global) catch |err| return catchVmError(vm, err);
 }
 
 pub fn postUpdate(
@@ -298,8 +287,8 @@ pub fn postUpdate(
             return;
         }
     }
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, old);
-    if (primitive.is(.symbol)) return error.TypeError;
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, old);
+    if (primitive.is(.symbol)) return error.SymbolToNumber;
     const numeric_old = if (primitive.isBigInt()) primitive else try value_ops.toNumberValue(ctx.runtime, primitive);
     const updated = try value_ops.unary(ctx.runtime, opcode_id, numeric_old);
     try stack.push(numeric_old);
@@ -307,10 +296,7 @@ pub fn postUpdate(
 }
 
 pub noinline fn postUpdateVm(vm: *Vm, opc: u8) HostError!void {
-    postUpdate(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    postUpdate(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
 }
 
 pub fn updateLocal(
@@ -347,8 +333,8 @@ pub fn updateLocal(
             return;
         }
     }
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.is(.symbol)) return error.TypeError;
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, output, global, value);
+    if (primitive.is(.symbol)) return error.SymbolToNumber;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
         op.dec_loc => op.dec,
@@ -359,10 +345,7 @@ pub fn updateLocal(
 }
 
 pub noinline fn updateLocalVm(vm: *Vm, opc: u8) HostError!void {
-    updateLocal(vm.ctx, vm.function, vm.global, vm.frame, opc, vm.output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    updateLocal(vm.ctx, vm.function, vm.global, vm.frame, opc, vm.output) catch |err| return catchVmError(vm, err);
 }
 
 /// Register-resident slow inc_loc/dec_loc (qjs OP_inc_loc/OP_dec_loc's non-int
@@ -414,8 +397,8 @@ pub fn updateLocalAt(vm: *Vm, opcode_id: u8, slot: *core.JSValue) HostError!void
     // (valueOf) cannot free the accumulator underneath us (qjs OP_inc_loc's
     // `op1 = JS_DupValue(op1)`).
     const value = slot.*;
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, vm.output, vm.global, value);
-    if (primitive.is(.symbol)) return error.TypeError;
+    const primitive = try value_ops.toPrimitiveForNumber(ctx, vm.output, vm.global, value);
+    if (primitive.is(.symbol)) return error.SymbolToNumber;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
         op.dec_loc => op.dec,
@@ -477,14 +460,14 @@ pub fn addLocal(
     // qjs js_add_slow's JS_ToPrimitiveFree(op1)/JS_ToPrimitiveFree(op2). For the
     // hot float case both are non-objects, so each call passes the value straight
     // through — one fewer live JSValue temporary per operand than a borrowing dup.
-    const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
+    const lhs_primitive = value_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
         return err;
     };
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    const rhs_primitive = try value_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
 
     // js_add_slow general path: two JS_TAG_INT operands take the int32 path
     // (overflow→float); any float operand falls to ToFloat64 + bare __JS_NewFloat64
-    // with NO int32 renormalization. The hot loop is float+int, so `isInt`
+    // with NO int32 renormalization. The hot loop is float+int, so `is(.int)`
     // short-circuits to the bare box. value_ops.binary is reached only for the cold
     // (string-via-coercion / BigInt / bool / null) operand combinations.
     if (value_ops.numberValue(lhs_primitive)) |d1| {
@@ -528,16 +511,13 @@ noinline fn addLocalString(
         return;
     }
 
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    const rhs_primitive = try value_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     frame.locals[idx] = updated;
 }
 
 pub noinline fn addLocalVm(vm: *Vm) HostError!void {
-    addLocal(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    addLocal(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.output) catch |err| return catchVmError(vm, err);
 }
 
 /// Register-resident slow add for OP_add_loc, the faithful analog of qjs's
@@ -582,10 +562,10 @@ pub fn addLocalAt(vm: *Vm, slot: *core.JSValue, rhs: core.JSValue) HostError!voi
         }
     }
 
-    const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
+    const lhs_primitive = value_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
         return err;
     };
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    const rhs_primitive = try value_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
 
     if (value_ops.numberValue(lhs_primitive)) |d1| {
         if (value_ops.numberValue(rhs_primitive)) |d2| {
@@ -620,7 +600,7 @@ noinline fn addLocalStringAt(
         return;
     }
 
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    const rhs_primitive = try value_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     slot.* = updated;
 }
@@ -720,13 +700,21 @@ fn looseEqualOp(
         return looseEqualSameNumberTypes(number_lhs, rhs);
     }
     if (lhs.isBigInt() and rhs.isString()) {
-        var rhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, rhs) catch return false;
+        var rhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, rhs) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // StringToBigInt is undefined: not equal.
+            else => return false,
+        };
         defer rhs_bigint.deinit();
         const rhs_value = try value_ops.createBigIntValue(ctx.runtime, rhs_bigint);
         return value_ops.strictEqual(lhs, rhs_value).as(.boolean).?;
     }
     if (lhs.isString() and rhs.isBigInt()) {
-        var lhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, lhs) catch return false;
+        var lhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, lhs) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // StringToBigInt is undefined: not equal.
+            else => return false,
+        };
         defer lhs_bigint.deinit();
         const lhs_value = try value_ops.createBigIntValue(ctx.runtime, lhs_bigint);
         return value_ops.strictEqual(lhs_value, rhs).as(.boolean).?;
@@ -748,11 +736,11 @@ fn looseEqualOp(
         return value_ops.bigIntEqualsNumber(ctx.runtime, rhs, number_lhs);
     }
     if (isLoosePrimitiveForObject(lhs) and rhs.is(.object)) {
-        const primitive_rhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
+        const primitive_rhs = try value_ops.toPrimitiveForAddition(ctx, output, global, rhs);
         return looseEqualOp(ctx, output, global, lhs, primitive_rhs, depth + 1);
     }
     if (lhs.is(.object) and isLoosePrimitiveForObject(rhs)) {
-        const primitive_lhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
+        const primitive_lhs = try value_ops.toPrimitiveForAddition(ctx, output, global, lhs);
         return looseEqualOp(ctx, output, global, primitive_lhs, rhs, depth + 1);
     }
     return false;
@@ -780,16 +768,15 @@ fn looseEqualSameNumberTypes(lhs: core.JSValue, rhs: core.JSValue) bool {
     return lhs_number == rhs_number;
 }
 
-// ----- merged from vm_call.zig -----
+// ----- Call, construct and tail-call opcodes -----
 // Bytecode call, construct, and tail-call adapters plus call-depth accounting.
 //
 // Operand-stack values enter as owned slots; frame setup borrows, duplicates,
 // or transfers arguments and VarRef cells according to `Frame`'s explicit
 // dispositions. `CallDepthGuard` balances logical, native, and byte budgets.
 // Inline requests use caller-owned request storage to avoid an sret; hot native
-// dispatch remains separate from generic fallback. This follows
-// `JS_CallInternal` frame entry at quickjs.c and class-call
-// dispatch at quickjs.c.
+// dispatch remains separate from generic fallback. This follows QuickJS's
+// `JS_CallInternal` frame entry and class-call dispatch.
 const array_ops = @import("array_ops.zig");
 const property_ops = @import("property_ops.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -812,10 +799,10 @@ pub const CallDepthGuard = struct {
 
     pub fn deinit(self: CallDepthGuard) void {
         const rt = self.ctx.runtime;
-        std.debug.assert(rt.active_bytecode_stack_bytes >= self.planned_stack_bytes);
-        rt.active_bytecode_stack_bytes -= self.planned_stack_bytes;
-        rt.call_depth -= 1;
-        rt.native_call_depth -= 1;
+        std.debug.assert(rt.stack.bytecode_bytes >= self.planned_stack_bytes);
+        rt.stack.bytecode_bytes -= self.planned_stack_bytes;
+        rt.stack.call_depth -= 1;
+        rt.stack.native_call_depth -= 1;
     }
 };
 pub fn enterCallDepth(
@@ -824,17 +811,17 @@ pub fn enterCallDepth(
     planned_stack_bytes: usize,
 ) !CallDepthGuard {
     const rt = ctx.runtime;
-    if (rt.native_call_depth >= maxNativeJsCallDepth(ctx) or
+    if (nativeReentryWouldOverflow(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
         // InternalError "stack overflow".
-        _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+        _ = try exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow");
         return error.StackOverflow;
     }
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
-    rt.native_call_depth += 1;
+    rt.stack.bytecode_bytes += planned_stack_bytes;
+    rt.stack.call_depth += 1;
+    rt.stack.native_call_depth += 1;
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
@@ -877,8 +864,8 @@ inline fn bytecodeStackBudgetWouldOverflow(
 ) bool {
     return admissionCeilingsReject(
         rt,
-        rt.call_depth,
-        rt.active_bytecode_stack_bytes +% planned_stack_bytes,
+        rt.stack.call_depth,
+        rt.stack.bytecode_bytes +% planned_stack_bytes,
         planned_stack_bytes,
     );
 }
@@ -891,8 +878,8 @@ pub inline fn callBudgetWouldOverflow(
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    return depth >= rt.stack_size or accumulated < planned_stack_bytes or
-        accumulated > rt.stack_size;
+    return depth >= rt.stack.limit or accumulated < planned_stack_bytes or
+        accumulated > rt.stack.limit;
 }
 
 /// Add the actual native stack-address guard to the VM budget predicate.
@@ -903,7 +890,7 @@ inline fn admissionCeilingsReject(
     planned_stack_bytes: usize,
 ) bool {
     return callBudgetWouldOverflow(rt, depth, accumulated, planned_stack_bytes) or
-        @frameAddress() < rt.native_stack_limit;
+        @frameAddress() < rt.stack.native_limit;
 }
 
 /// Byte-priced variants: constructors that already hold the planned frame
@@ -923,9 +910,9 @@ pub inline fn commitInlineCallDepthBytes(
     planned_stack_bytes: usize,
 ) void {
     const rt = ctx.runtime;
-    std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
+    std.debug.assert(std.math.maxInt(usize) - rt.stack.bytecode_bytes >= planned_stack_bytes);
+    rt.stack.bytecode_bytes += planned_stack_bytes;
+    rt.stack.call_depth += 1;
 }
 
 /// Admit and charge a leaf frame in one step. If later Entry or arena setup
@@ -936,12 +923,12 @@ pub inline fn tryCommitInlineCallDepthBytesRt(
 ) bool {
     // Check and commit the same accumulated byte figure so miss handling can
     // reverse exactly the charge installed here.
-    const depth = rt.call_depth;
-    const bytes = rt.active_bytecode_stack_bytes;
+    const depth = rt.stack.call_depth;
+    const bytes = rt.stack.bytecode_bytes;
     const accumulated = bytes +% planned_stack_bytes;
     if (admissionCeilingsReject(rt, depth, accumulated, planned_stack_bytes)) return false;
-    rt.active_bytecode_stack_bytes = accumulated;
-    rt.call_depth = depth + 1;
+    rt.stack.bytecode_bytes = accumulated;
+    rt.stack.call_depth = depth + 1;
     return true;
 }
 
@@ -983,9 +970,9 @@ pub inline fn leaveInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) void {
-    std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes -= planned_stack_bytes;
-    rt.call_depth -= 1;
+    std.debug.assert(rt.stack.bytecode_bytes >= planned_stack_bytes);
+    rt.stack.bytecode_bytes -= planned_stack_bytes;
+    rt.stack.call_depth -= 1;
 }
 
 /// Preflight for a tail-call frame replacement. QuickJS's OP_tail_call enters
@@ -1011,7 +998,7 @@ pub fn checkTailCallChainStackBudget(
 /// ordinary JS call.  QJS likewise keeps this behind the unlikely
 /// `js_check_stack_overflow` arm of `JS_CallInternal`.
 noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) !void {
-    _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+    _ = try exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow");
     return error.StackOverflow;
 }
 
@@ -1060,8 +1047,7 @@ pub inline fn initFrameVarRefs(
             }
             break :blk try allocFrameVarRefWindow(ctx, frame, var_refs.len);
         };
-        // Inherit: pointer copy + rc++ per slot (qjs JS_CLOSURE_REF form,
-        // quickjs.c).
+        // Inherit: copy each cell pointer (qjs JS_CLOSURE_REF form).
         for (var_refs, 0..) |cell, idx| owned_refs[idx] = cell;
         frame.var_refs = owned_refs;
         return;
@@ -1132,11 +1118,10 @@ pub fn call(
 /// (`nativeCallTarget`); a builtin whose record is not memoized yet takes the
 /// lazy resolve once and retries.
 pub inline fn resolvedNativeCallTargetAssumeCFunction(
-    ctx: *core.JSContext,
     func_obj: *core.Object,
 ) ?core.Object.NativeCallTarget {
     return func_obj.nativeCallTarget() orelse blk: {
-        _ = resolvedNativeMethodRecordAssumeCFunction(ctx, func_obj) orelse return null;
+        _ = resolvedNativeMethodRecordAssumeCFunction(func_obj) orelse return null;
         break :blk func_obj.nativeCallTarget();
     };
 }
@@ -1146,22 +1131,20 @@ pub inline fn resolvedNativeCallTargetAssumeCFunction(
 /// `p->u.cfunc.c_function` directly. Keep the record
 /// memoization shared by every opcode that already holds the method object.
 pub inline fn resolvedNativeMethodRecord(
-    ctx: *core.JSContext,
     method_obj: *core.Object,
 ) ?*const core.NativeEntry {
     if (method_obj.class_id != core.class.ids.c_function) return null;
-    return resolvedNativeMethodRecordAssumeCFunction(ctx, method_obj);
+    return resolvedNativeMethodRecordAssumeCFunction(method_obj);
 }
 
 /// K1: caller already proved `class_id == c_function`.
 pub inline fn resolvedNativeMethodRecordAssumeCFunction(
-    ctx: *core.JSContext,
     method_obj: *core.Object,
 ) ?*const core.NativeEntry {
     return method_obj.nativeEntryAssumeCFunction() orelse blk: {
         const native_id = method_obj.nativeFunctionId();
         const nref = core.function.decodeNativeBuiltinId(native_id) orelse return null;
-        const record = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
+        const record = internal_builtins.lookup(nref.domain, nref.id) orelse return null;
         method_obj.nativeEntrySlot().* = record;
         break :blk record;
     };
@@ -1258,19 +1241,11 @@ pub noinline fn callMethod(
         stack.pushOwnedAssumeCapacity(value);
         return .done;
     }
-    const maybe_array_result = array_ops.arrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+    const result = call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    const result = if (maybe_array_result) |array_result|
-        array_result
-    else
-        call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
-            call_runtime.popOwnedStackRegion(stack, region_base);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-            return err;
-        };
     call_runtime.popOwnedStackRegion(stack, region_base);
     if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
     stack.pushOwnedAssumeCapacity(result);
@@ -1315,12 +1290,9 @@ inline fn fastNativeMethodCall(
     // as one view. Keep the caller global here so no fast-path-only fallback
     // can switch authority before record selection and stack preflight.
     //
-    // A table MISS returns null so the caller falls through to the array
-    // fast-array storage fallback (`arrayMethodFastCall`, which keeps the
-    // name-based TypedArray slice/subarray path that has no native-builtin id)
-    // and then the generic value/bytecode dispatch. Among encoded native
-    // domains, only the separate host mechanism intentionally has no standard
-    // record table.
+    // A table MISS returns null so the caller falls through to the generic
+    // value/bytecode dispatch. Among encoded native domains, only the separate
+    // host mechanism intentionally has no standard record table.
     const function_object = core.value_semantics.objectFromValue(func) orelse return null;
     // This is specifically the native c_function fast path. Bytecode functions
     // use the same FunctionPayload kind, but qjs discriminates their overlaid
@@ -1336,7 +1308,7 @@ inline fn fastNativeMethodCall(
     // `pub const` in `internal_builtins.table` (rodata) — program-lifetime stable,
     // identical across runtimes, never dangles, so the memo can never go stale.
     // A MISS falls through to null exactly as the pre-memo decode/probe did.
-    const rec = resolvedNativeMethodRecord(ctx, function_object) orelse return null;
+    const rec = resolvedNativeMethodRecord(function_object) orelse return null;
     return try callResolvedNativeMethod(ctx, output, global, function_object, rec, this_value, args, caller_function, caller_frame);
 }
 
@@ -1503,15 +1475,9 @@ pub noinline fn constructor(
         remaining -= 1;
         args_buf[remaining] = try stack.pop();
     }
-    const top = try stack.pop();
-    const has_explicit_new_target = stack.len() != 0;
-    const new_target = top;
-    const func = if (has_explicit_new_target)
-        stack.pop() catch |err| {
-            return err;
-        }
-    else
-        top;
+    // call_constructor operands: func, new.target, args (pop_base 2).
+    const new_target = try stack.pop();
+    const func = try stack.pop();
     // Popped operands are off the traced stack, and past four arguments the
     // buffer is native heap the stack scan cannot see. The construct path
     // polls for interrupts (and so may collect) before anything below roots
@@ -1532,7 +1498,7 @@ pub noinline fn constructor(
 }
 
 fn throwCtorTypeError(ctx: *core.JSContext, global: *core.Object, message: []const u8) !void {
-    _ = exception_ops.throwTypeErrorMessage(ctx, global, message) catch |err| return err;
+    _ = try exception_ops.throwTypeErrorMessage(ctx, global, message);
     return error.TypeError;
 }
 
@@ -1543,14 +1509,10 @@ pub fn checkCtor(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.F
 }
 
 pub noinline fn checkCtorVm(vm: *Vm) HostError!void {
-    checkCtor(vm.ctx, vm.global, vm.frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    checkCtor(vm.ctx, vm.global, vm.frame) catch |err| return catchVmError(vm, err);
 }
 
-pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn checkCtorReturn(stack: *stack_mod.Stack) !void {
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
     if (value.is(.object)) {
         try stack.pushOwned(core.JSValue.boolean(false));
@@ -1565,10 +1527,7 @@ pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 }
 
 pub noinline fn checkCtorReturnVm(vm: *Vm) HostError!void {
-    checkCtorReturn(vm.ctx, vm.stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    checkCtorReturn(vm.stack) catch |err| return catchVmError(vm, err);
 }
 
 pub fn initCtor(
@@ -1591,38 +1550,50 @@ pub fn initCtor(
     const super_object = function_object.getPrototype() orelse
         return throwCtorTypeError(ctx, global, "not a function");
     const super = super_object.value();
-    const original_args = frame.originalArgs();
-    const args = if (original_args.len != 0)
-        original_args[0..@min(frame.actual_arg_count, original_args.len)]
-    else
-        frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
-    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.newTargetValue());
+    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, initCtorArgs(frame), function, frame, frame.newTargetValue());
     try stack.pushOwned(result);
 }
 
-pub noinline fn initCtorVm(vm: *Vm) HostError!void {
-    initCtor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+/// The arguments a default derived constructor forwards to its parent.
+pub fn initCtorArgs(frame: *const frame_mod.Frame) []const core.JSValue {
+    const original_args = frame.originalArgs();
+    return if (original_args.len != 0)
+        original_args[0..@min(frame.actual_arg_count, original_args.len)]
+    else
+        frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
 }
 
-fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
-    return @max(@as(usize, 16), ctx.stackLimit() / 16384);
+pub noinline fn initCtorVm(vm: *Vm) HostError!void {
+    initCtor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| return catchVmError(vm, err);
+}
+
+/// Native stack the deepest builtin can use between two re-entry checks
+/// (a String.prototype.replace callback level measures about 14 KiB), capped
+/// at a quarter of a small configured budget.
+const native_reentry_margin: usize = 64 * 1024;
+
+/// Does one more native re-entry into bytecode risk the native stack? With a
+/// native limit armed this measures the real frame address; a nesting count
+/// assuming 16 KiB per level used to stop recursion through generators,
+/// bound functions or `super()` at 64 levels while a level costs about
+/// 4 KiB. Without a limit, the count is the only guard left.
+fn nativeReentryWouldOverflow(ctx: *const core.JSContext) bool {
+    const rt = ctx.runtime;
+    if (rt.stack.native_limit != 0) return rt.checkNativeStackOverflow(@min(native_reentry_margin, rt.stack.native_size / 4));
+    return rt.stack.native_call_depth >= @max(@as(usize, 16), ctx.stackLimit() / 16384);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
 
-// ----- merged from vm_control.zig -----
+// ----- Control transfer: return, jump, throw, catch -----
 // VM control-transfer helpers: return, jump, throw, catch, and iterator close.
 //
 // Stack pops are ownership moves, matching QuickJS opcode semantics; handled
 // throws install or route the pending exception before execution resumes.
 // Hot dispatch remains outside this file and calls these focused helpers.
 const builtin = @import("builtin");
-const forof_ops = @import("iterator_ops.zig");
 pub const ThrowResult = enum {
     handled,
 };
@@ -1733,15 +1704,15 @@ pub noinline fn throwTop(vm: *Vm) !ThrowResult {
     const stack = vm.stack;
     const catch_target = vm.catch_target;
     const value = try stack.pop();
-    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, vm.output, vm.global, stack);
+    try iterator_ops.closeStackTopForOfIteratorForPendingError(ctx, vm.output, vm.global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
-        if (try array_ops.popCatchMarker(ctx.runtime, stack)) |restored| {
+        if (try array_ops.popCatchMarker(stack)) |restored| {
             catch_target.* = restored;
         }
     }
     if (catch_target.*) |target| {
-        const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
+        const restored = (try array_ops.popCatchMarker(stack)) orelse null;
         stack.pushOwnedAssumeCapacity(value);
         vm.frame.pc = target;
         catch_target.* = restored;
@@ -1762,7 +1733,7 @@ fn createAtomError(
     const atom_name = ctx.runtime.atoms.name(atom_id) orelse "lexical variable";
     const prefix_name_len = std.math.add(usize, prefix.len, atom_name.len) catch return error.OutOfMemory;
     const message_len = std.math.add(usize, prefix_name_len, suffix.len) catch return error.OutOfMemory;
-    const message = try ctx.runtime.allocRuntime(u8, message_len);
+    const message = try ctx.runtime.allocNative(u8, message_len);
     defer ctx.runtime.nativeAllocator().free(message);
     @memcpy(message[0..prefix.len], prefix);
     @memcpy(message[prefix.len..prefix_name_len], atom_name);
@@ -1778,6 +1749,7 @@ fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: co
         3 => exception_ops.createNamedError(ctx, global, "ReferenceError", "unsupported reference to 'super'"),
         4 => exception_ops.createNamedError(ctx, global, "TypeError", "iterator does not have a throw method"),
         5 => exception_ops.createNamedError(ctx, global, "ReferenceError", "invalid assignment target"),
+        6 => createAtomError(ctx, global, "TypeError", atom_id, "'", "' was defined without a getter"),
         else => blk: {
             var message_buffer: [64]u8 = undefined;
             const message = std.fmt.bufPrint(&message_buffer, "invalid throw var type {d}", .{error_type}) catch unreachable;
@@ -1854,20 +1826,9 @@ fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
 
-fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
-    const cell = varRefCellFromValue(slot) orelse return slot;
-    const value = cell.varRefValue();
-    if (comptime builtin.mode == .Debug) {
-        std.debug.assert(varRefCellFromValue(value) == null);
-    }
-    return value;
-}
+const adapterValueBorrow = property_ops.adapterValueBorrow;
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
-    return core.VarRef.fromValue(value);
-}
-
-// ----- merged from vm_eval_module.zig -----
+// ----- Direct eval and dynamic import opcodes -----
 // VM opcode helpers for direct eval, apply-eval, and dynamic import.
 //
 // The active frame supplies lexical/caller authority, while module jobs and
@@ -1877,12 +1838,7 @@ const eval_ops = @import("eval_entry.zig");
 const module_graph = @import("module.zig");
 const promise_ops = @import("promise_ops.zig");
 const string_ops = @import("string_ops.zig");
-pub const EvalStep = union(enum) {
-    done,
-    continue_loop,
-    /// Non-%eval% callee in tail position; eligible for frame reuse.
-    tail_inline: call_runtime.InlineCallRequest,
-};
+pub const EvalStep = eval_ops.ExecEvalResult;
 pub noinline fn directEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -1899,7 +1855,7 @@ pub noinline fn directEval(
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
     const eval_scope_head = @as(i32, eval_scope) + bytecode.function_bytecode.arg_scope_end;
-    return switch (try eval_ops.execDirectEval(
+    return eval_ops.execDirectEval(
         ctx,
         stack,
         function,
@@ -1911,18 +1867,14 @@ pub noinline fn directEval(
         eval_scope_head,
         caller_eval_global_var_bindings,
         allow_tail_inline,
-    )) {
-        .done => .done,
-        .continue_loop => .continue_loop,
-        .tail_inline => |request| .{ .tail_inline = request },
-    };
+    );
 }
 
 pub noinline fn applyEval(vm: *Vm) HostError!void {
     const eval_scope = readInt(u16, vm.function.byteCode()[vm.frame.pc..][0..2]);
     vm.frame.pc += 2;
     const eval_scope_head = @as(i32, eval_scope) + bytecode.function_bytecode.arg_scope_end;
-    switch (try eval_ops.execApplyEval(
+    try eval_ops.execApplyEval(
         vm.ctx,
         vm.stack,
         vm.function,
@@ -1932,11 +1884,7 @@ pub noinline fn applyEval(vm: *Vm) HostError!void {
         vm.global,
         eval_scope_head,
         dispatch.directEvalVarsReachGlobal(vm),
-    )) {
-        .done, .continue_loop => {},
-        // eval_ops.execApplyEval never requests tail-call inlining.
-        .tail_inline => unreachable,
-    }
+    );
 }
 
 pub noinline fn dynamicImport(vm: *Vm) HostError!void {
@@ -1973,7 +1921,7 @@ pub noinline fn dynamicImport(vm: *Vm) HostError!void {
     try stack.pushOwned(promise);
 }
 
-// ----- merged from vm_gen_async.zig -----
+// ----- Generator and async opcodes -----
 // Generator, async-function, `yield`, and `await` opcode state transitions.
 //
 // Parking transfers frame and operand-stack backing into
@@ -1991,17 +1939,6 @@ pub const Result = union(enum) {
 pub const ResumeState = struct {
     throw_on_entry: bool = false,
     catch_target: ?usize = null,
-};
-const AwaitSuspendMode = enum {
-    none,
-    /// Legacy synchronous-drain mode. Kept for the non-suspending helper legs;
-    /// module TLA now uses `.raw` and is resumed as an ordered Promise reaction.
-    settled,
-    /// Async functions and async generators yield the raw awaited value; the
-    /// caller wires it through Promise.resolve(...).then(resume, reject),
-    /// matching QuickJS OP_await (quickjs.c: save frame, return
-    /// FUNC_RET_AWAIT with the operand at cur_sp[-1]).
-    raw,
 };
 inline fn reserveGeneratorExecutionStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, execution: *core.object.GeneratorExecutionState, additional: usize) !void {
     const parked = &execution.suspended.storage.stack;
@@ -2445,7 +2382,7 @@ pub noinline fn yieldStar(vm: *Vm) !Result {
     const stack = vm.stack;
     const frame = vm.frame;
     const catch_target = vm.catch_target;
-    return yieldStarRaw(ctx, output, global, stack, vm.function, frame, dispatch.generatorState(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
+    return yieldStarRaw(ctx, stack, vm.function, frame, dispatch.generatorState(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
@@ -2455,8 +2392,6 @@ pub noinline fn yieldStar(vm: *Vm) !Result {
 
 fn yieldStarRaw(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
@@ -2464,70 +2399,23 @@ fn yieldStarRaw(
     stop_on_yield: bool,
     catch_target: ?usize,
 ) !Result {
-    const opcode_pc = frame.pc - 1;
-    const expanded_lowering = frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.dup;
-    if (expanded_lowering) {
-        const result_object = try stack.pop();
-        if (stop_on_yield) {
-            if (generator) |generator_object| {
-                try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
-                generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
-                try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
-                generator_object.generatorStartedSlot().* = true;
-                generator_object.generatorJustYieldedSlot().* = true;
-            } else {
-                try stack.reserveAdditional(2);
-                stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-                stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
-                return .none;
-            }
-            return .{ .return_value = result_object };
-        }
-        try stack.reserveAdditional(2);
-        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-        stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
-        return .none;
-    }
-
-    var iterator_value: core.JSValue = undefined;
-    var using_stored_iterator = false;
-    var next_arg = core.JSValue.undefinedValue();
-    if (generator) |generator_object| {
-        if (generator_object.generatorYieldStarIterator()) |stored| {
-            iterator_value = stored;
-            using_stored_iterator = true;
-            if (generator_object.generatorStarted() and stack.len() > 0) {
-                next_arg = try stack.pop();
-            }
-        } else {
-            const iterable = try stack.pop();
-            iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
-        }
-    } else {
-        const iterable = try stack.pop();
-        iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
-    }
-    const step = try iterator_ops.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
-    if (step.done) {
-        try stack.reserveAdditional(1);
-        if (generator) |generator_object| {
-            generator_object.clearGeneratorYieldStarIterator();
-        }
-        stack.pushAssumeCapacity(step.value);
-        return .continue_loop;
-    }
+    // The parser lowers `yield*` into an explicit loop around this opcode
+    // (`emitYieldStarDelegation`): it only suspends with the step result.
+    std.debug.assert(frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.dup);
+    const result_object = try stack.pop();
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(iterator_value);
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc, catch_target);
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
             generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
+            call_runtime.setGeneratorYieldStarSuspended(generator_object, true);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
+            return .{ .return_value = result_object };
         }
-        return .{ .return_value = step.result };
     }
-    try stack.reserveAdditional(1);
+    try stack.reserveAdditional(2);
     stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+    stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
     return .none;
 }
 
@@ -2539,7 +2427,7 @@ pub noinline fn awaitValue(vm: *Vm) HostError!Result {
     const function = vm.function;
     const frame = vm.frame;
     const catch_target = vm.catch_target;
-    return awaitValueRaw(ctx, output, global, stack, function, frame, dispatch.generatorState(vm), dispatch.suspendOnModuleAwait(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
+    return awaitValueRaw(ctx, stack, function, frame, dispatch.generatorState(vm), dispatch.suspendOnModuleAwait(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
         if (try handleAwaitError(ctx, output, global, stack, function, frame, catch_target, err)) {
             return .continue_loop;
         }
@@ -2549,8 +2437,6 @@ pub noinline fn awaitValue(vm: *Vm) HostError!Result {
 
 fn awaitValueRaw(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
@@ -2559,73 +2445,19 @@ fn awaitValueRaw(
     stop_on_yield: bool,
     catch_target: ?usize,
 ) HostError!Result {
-    const suspend_mode = awaitSuspendMode(function, suspend_on_module_await, stop_on_yield);
+    // Every await suspends its async function, async generator or module
+    // body with the raw operand, as QuickJS OP_await does (save the frame,
+    // return FUNC_RET_AWAIT); the caller resumes it from a promise reaction.
+    // An await that cannot suspend is unreachable from user code.
+    const suspends = function.isAsync() or function.isModule();
+    if (!suspends or !(suspend_on_module_await or (stop_on_yield and function.isAsync()))) return error.InvalidBytecode;
+    const generator_object = generator orelse return error.InvalidBytecode;
     const awaited = try stack.pop();
-    if (suspend_mode == .raw) {
-        if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited, catch_target)) |result| return result;
-        try stack.push(awaited);
-        return .continue_loop;
-    }
-    const promise = objectFromValue(awaited) orelse {
-        if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
-            try stack.push(value);
-            return .none;
-        }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, catch_target)) |result| return result;
-        try stack.push(awaited);
-        return .continue_loop;
-    };
-    if (promise.class_id != core.class.ids.promise) {
-        if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
-            try stack.push(value);
-            return .none;
-        }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, catch_target)) |result| return result;
-        try stack.push(awaited);
-        return .continue_loop;
-    }
-    try promise_ops.settlePendingPromiseReaction(ctx, output, global, promise);
-    if (suspend_mode == .settled and promise.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
-    if (promise.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, promise);
-    const result = if (promise.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
-    if (promise.promiseIsRejected()) {
-        _ = ctx.throwValue(result);
-        return error.JSException;
-    }
-    if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result, catch_target)) |suspended| return suspended;
-    try stack.push(result);
-    return .none;
-}
-
-fn suspendAwaitValue(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    generator: ?*core.Object,
-    suspend_on_await: bool,
-    value: core.JSValue,
-    catch_target: ?usize,
-) !?Result {
-    if (!suspend_on_await) return null;
-    const generator_object = generator orelse return null;
     try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
     generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.await_op);
     generator_object.generatorStartedSlot().* = true;
     generator_object.generatorJustYieldedSlot().* = true;
-    return .{ .return_value = value };
-}
-
-fn awaitSuspendMode(function: *const bytecode.FunctionBytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
-    if (suspend_on_module_await and function.isModule()) return .raw;
-    if (suspend_on_module_await and function.isAsync()) return .raw;
-    // Async-generator bodies genuinely suspend at every await; the queue
-    // machine (exec/promise_ops.zig) resumes them via promise-reaction
-    // jobs (mirrors js_async_generator_await + resume trampolines,
-    // quickjs.c).
-    if (stop_on_yield and function.isAsync()) return .raw;
-    return .none;
+    return .{ .return_value = awaited };
 }
 
 fn closeIteratorForPendingError(
@@ -2645,20 +2477,19 @@ fn closeIteratorForPendingError(
         // is the only closer.
         return;
     }
-    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+    try iterator_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
 }
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
-// ----- merged from vm_literal.zig -----
+// ----- Object/array literal and spread opcodes -----
 // Object, array, spread, rest, and special-object literal opcode adapters.
 //
 // Popped stack values are owned locally; successful property insertion or
 // stack push transfers them, while guarded fast probes remain borrow-until-
 // commit. Observable iterator and property work stays on the explicit call
-// environment. The opcode bodies follow QuickJS object/field creation at
-// quickjs.c and quickjs.c, spread copying at quickjs.c,
-// and rest-array construction at quickjs.c.
+// environment. The opcode bodies follow QuickJS object/field creation,
+// spread copying and rest-array construction.
 const object_ops = @import("object_ops.zig");
 const special_object_subtype = bytecode.opcode.special_object_subtype;
 pub noinline fn objectLiteral(vm: *Vm) HostError!void {
@@ -2699,12 +2530,12 @@ pub inline fn newPlainObjectReserved2Value(ctx: *core.JSContext, global: *core.O
 /// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c). Handles the
 /// plain-data-add/replace on a plain, extensible, non-array, non-exotic, non-proxy
 /// `obj` for ANY value shape — qjs's define path carries no value-form gate either:
-/// a refcounted value ({left:obj,right:obj} literals) takes the same
+/// an object value ({left:obj,right:obj} literals) takes the same
 /// JS_DefinePropertyValue fast route as an int. No explicit value rooting is needed
-/// across the shape-transition alloc/GC: the value keeps its live refcount in the
-/// (unpublished) sp slot, and cycle removal is qjs-faithful trial deletion
-/// (gc_decref/gc_scan) — a refcount unaccounted for by traced children IS an
-/// external root, so the stack-held ref keeps the value alive. Returns true on a
+/// across the shape-transition alloc/GC: its operand slot is above the published
+/// top, but `obj` and `value` are live native locals here, and the conservative
+/// native stack/register scan keeps (and, under the nursery, pins) what they
+/// name (gc-invariants.md, "Precise roots"). Returns true on a
 /// completed define (handler pops the value + keeps obj as the literal receiver);
 /// false routes to the cold shell (arrays, proxies, non-extensible, setters — every
 /// backtrace/user-code-capable case stays on the publishing path). `value` is
@@ -2778,8 +2609,14 @@ pub noinline fn defineField(vm: *Vm) HostError!void {
                 !target.isArray() and
                 target.flags.extensible)
             {
-                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, value);
-                return;
+                if (target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, value)) |_| {
+                    return;
+                } else |err| switch (err) {
+                    // An existing non-redefinable property: the generic path
+                    // below throws CreateDataPropertyOrThrow's TypeError.
+                    error.IncompatibleDescriptor => {},
+                    else => return err,
+                }
             }
         } else |_| {}
     }
@@ -2790,21 +2627,6 @@ pub noinline fn defineField(vm: *Vm) HostError!void {
     defer root_frame.deactivate(ctx.runtime);
 
     const target = try property_ops.expectObject(obj);
-    if (target.isArray() and atom_id == core.atom.ids.length and
-        target.flags.length_writable and target.shape_ref.prop_count == 0)
-    {
-        if (value.as(.int)) |length| {
-            const new_len: u32 = @intCast(@max(length, 0));
-            // No index properties to delete, so the length set reduces to the
-            // dense case: growth keeps the fast array (tail holes), shrink frees
-            // the dense tail via truncateArrayElements. No sparse conversion
-            // either way — faithful to set_array_length.
-            // Arrays carrying index properties fall through to defineArrayLength.
-            target.truncateArrayElements(ctx.runtime, new_len);
-            target.setArrayLength(new_len);
-            return;
-        }
-    }
     if (target.isArray()) {
         if (core.array.arrayIndexFromAtom(ctx.runtime.atoms, atom_id)) |index| {
             if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return;
@@ -2820,10 +2642,7 @@ pub noinline fn defineField(vm: *Vm) HostError!void {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all));
         return;
     }
-    object_ops.createDataPropertyOrThrow(ctx, vm.output, vm.global, rooted_obj, target, atom_id, rooted_value, vm.function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    object_ops.createDataPropertyOrThrow(ctx, vm.output, vm.global, target, atom_id, rooted_value, vm.function, frame) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn setProto(
@@ -2861,7 +2680,7 @@ pub noinline fn defineArrayEl(vm: *Vm) HostError!void {
         return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, vm.function, frame) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
-    object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, vm.function, frame) catch |err|
+    object_ops.createDataPropertyOrThrow(ctx, output, global, object_value, atom_id, rooted_value, vm.function, frame) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
     try stack.push(rooted_index);
 }
@@ -2888,10 +2707,7 @@ pub fn appendSpreadValues(
 }
 
 pub noinline fn appendSpreadValuesVm(vm: *Vm, opc: u8) HostError!void {
-    appendSpreadValues(vm.ctx, vm.output, vm.global, vm.stack, opc) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    appendSpreadValues(vm.ctx, vm.output, vm.global, vm.stack, opc) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
@@ -2904,11 +2720,11 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
     const mask = vm.function.byteCode()[vm.frame.pc];
     vm.frame.pc += 1;
     const rt = ctx.runtime;
-    const target_value = try stackValueFromTop(stack, mask & 3);
+    const target_value = try stack.peekFromTop(mask & 3);
     var rooted_target_value = target_value;
-    const source_value = try stackValueFromTop(stack, (mask >> 2) & 7);
+    const source_value = try stack.peekFromTop((mask >> 2) & 7);
     var rooted_source_value = source_value;
-    const exclusion_value = try stackValueFromTop(stack, (mask >> 5) & 7);
+    const exclusion_value = try stack.peekFromTop((mask >> 5) & 7);
     var rooted_exclusion_value = exclusion_value;
 
     var root_frame = core.runtime.rootValues(.{
@@ -2919,14 +2735,14 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    // qjs JS_CopyDataProperties skips EVERY non-object
-    // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
-    // properties, not just null/undefined. (Object-rest destructuring still
-    // copies from a wrapped string because its source is objectified upstream
-    // before OP_copy_data_properties, both engines.) The former
-    // null/undefined-only skip let a primitive source fall into expectObject's
-    // TypeError — a divergence from qjs, not a spec-ordering guard.
-    if (!rooted_source_value.is(.object)) return;
+    // CopyDataProperties (§7.3.25) skips null/undefined and copies from
+    // ToObject(source) otherwise. Only a String wrapper has own enumerable
+    // properties (its indices), so the other primitives copy nothing.
+    // QuickJS skips every primitive, dropping `{..."ab"}`'s characters.
+    if (rooted_source_value.isString()) {
+        rooted_source_value = object_ops.primitiveObjectForAccess(rt, global, rooted_source_value) catch |err|
+            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+    } else if (!rooted_source_value.is(.object)) return;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
@@ -2940,50 +2756,41 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
     const keys = object_ops.objectRestOwnKeys(ctx, output, global, source) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
+    // A Proxy ownKeys result lives only in this native list across the
+    // traps and allocations below; keep its atoms alive.
+    var keys_roots = core.runtime.rootAtomList(&keys);
+    keys_roots.activate(rt);
+    defer keys_roots.deactivate(rt);
 
-    // qjs JS_CopyDataProperties requests JS_GPN_ENUM_ONLY
-    // for an ordinary (non-exotic) source, so the per-key enumerable
-    // descriptor probe is folded into the key enumeration up-front: the key
-    // set is already enumerable-filtered before the copy loop runs any
-    // user getter, and each surviving key takes a single JS_GetProperty.
-    // Only an exotic source with a get_own_property_names hook (a Proxy, or
-    // a typed array / module namespace here) keeps JS_GPN_ENUM_ONLY cleared,
-    // so its descriptor test stays interleaved with the per-key get (trap
-    // ordering for a proxy: gopd:k, get:k, ...).
+    // An ordinary source reads each key's enumerability straight off its
+    // shape; an exotic source (a Proxy, typed array or module namespace)
+    // goes through [[GetOwnProperty]] per key (proxy trap order: gopd:k,
+    // get:k, ...).
     const source_is_ordinary = source.proxyTarget() == null and
         !core.object.isTypedArrayObject(source) and
         source.class_id != core.class.ids.module_ns;
     if (source_is_ordinary) {
-        // Up-front enumerable snapshot. getOwnProperty for an ordinary source
-        // never invokes a user getter (it surfaces the getter function, not
-        // its result), so resolving every key's enumerability here is free of
-        // observable side effects -- and it freezes which keys copy before any
-        // value getter can mutate a later key's enumerability/existence
-        // (qjs ENUM_ONLY snapshots tab_atom once up front).
-        const copy_flags = try rt.nativeAllocator().alloc(bool, keys.len);
-        defer rt.nativeAllocator().free(copy_flags);
-        for (keys, copy_flags) |key, *copy| {
+        // CopyDataProperties re-reads each key's own descriptor right before
+        // its Get, so an earlier getter that deletes or redefines a later key
+        // is observed. For an ordinary source that read runs no user code.
+        for (keys) |key| {
             if (exclusion) |excluded| {
-                if (excluded.hasOwnProperty(key)) {
-                    copy.* = false;
-                    continue;
-                }
+                if (excluded.hasOwnProperty(key)) continue;
             }
-            copy.* = switch (source.ownPropertyEnumerableKind(rt, key)) {
+            const live_source = object_ops.objectFromValue(rooted_source_value).?;
+            const copy = switch (live_source.ownPropertyEnumerableKind(rt, key)) {
                 .enumerable => true,
                 .not_enumerable => false,
                 // Ordinary sources never yield `.descriptor` here (typed
-                // arrays / module namespaces are routed to the interleaved
-                // path above); fall back defensively if that ever changes.
+                // arrays / module namespaces take the interleaved path
+                // above); fall back defensively if that ever changes.
                 .descriptor => blk: {
-                    const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
+                    const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, live_source, key) catch |err|
                         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
                     const desc = maybe_desc orelse break :blk false;
                     break :blk (desc.enumerable orelse false);
                 },
             };
-        }
-        for (keys, copy_flags) |key, copy| {
             if (!copy) continue;
             const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
@@ -3068,10 +2875,7 @@ pub noinline fn specialObject(vm: *Vm) HostError!void {
 
 pub noinline fn getLength(vm: *Vm) HostError!void {
     const value = try vm.stack.pop();
-    const length = object_ops.getValueProperty(vm.ctx, vm.output, vm.global, value, core.atom.ids.length, vm.function, vm.frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
-        return err;
-    };
+    const length = object_ops.getValueProperty(vm.ctx, vm.output, vm.global, value, core.atom.ids.length, vm.function, vm.frame) catch |err| return catchVmError(vm, err);
     try vm.stack.pushOwned(length);
 }
 
@@ -3095,17 +2899,10 @@ pub noinline fn rest(vm: *Vm) HostError!void {
     vm.stack.pushOwnedAssumeCapacity(array_value);
 }
 
-fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
-    const index_from_top: usize = offset;
-    if (index_from_top >= stack.len()) return error.StackUnderflow;
-    return stack.values[stack.len() - 1 - index_from_top];
-}
-
-// ----- merged from vm_native.zig -----
+// ----- VM native-call dispatch -----
 // NB2 §5.2: the one VM-side native call dispatcher for both call shapes
 // (`op_call*`: window = [callee, args...]; `op_call_method`: window =
-// [receiver, callee, args...]). Replaces the plain / method twin
-// dispatchers of vm_call.zig. The terminal is
+// [receiver, callee, args...]). The terminal is
 // `builtin_dispatch.callRecordFromVmInRealm` (preflight, backtrace marker,
 // leaf arm without environment, managed arm with environment only when the
 // entry declares `needs_env`).
@@ -3127,7 +2924,7 @@ pub noinline fn dispatchNativeCall(
     const total: usize = @as(usize, argc) + window_head;
     if (shape == .method and stack.len() < total) return error.StackUnderflow;
     const region_base = stack.len() - total;
-    const target = resolvedNativeCallTargetAssumeCFunction(ctx, func_obj) orelse return .miss;
+    const target = resolvedNativeCallTargetAssumeCFunction(func_obj) orelse return .miss;
     const entry = target.entry;
     const args: []const core.JSValue = stack.values[region_base + window_head ..][0..argc];
     var result: core.JSValue = undefined;
@@ -3206,14 +3003,14 @@ pub noinline fn failure(
     return err;
 }
 
-// ----- merged from vm_regexp.zig -----
+// ----- RegExp literal creation -----
 // VM adapter for compiled RegExp literal creation.
 //
 // The operand stack transfers owned pattern/bytecode constants into this
 // helper; locals release them after construction, and `pushOwned` transfers
 // the fresh RegExp result back to the stack. The active global selects the
 // realm's fixed RegExp shape without consulting the mutable constructor
-// binding, matching QuickJS `OP_regexp` at quickjs.c.
+// binding, matching QuickJS `OP_regexp`.
 fn constructCompiledLiteralInRealm(
     rt: *core.JSRuntime,
     global: *core.Object,
@@ -3247,15 +3044,14 @@ pub noinline fn pushLiteral(vm: *Vm) HostError!void {
     try vm.stack.pushOwned(value);
 }
 
-// ----- merged from vm_value.zig -----
+// ----- Value, constant and stack-shuffle opcodes -----
 // Value, constant, stack-shuffle, `typeof`, and return opcode adapters.
 //
 // Operand-stack slots are owned; borrowed frame bindings and constant-pool
 // values are duplicated before they are pushed, while explicit pop/drop paths
 // release their slots. Private symbols and completion values transfer only at
 // their named handoff points. These cold adapters mirror the standalone
-// QuickJS opcode cases beginning at quickjs.c; fused hot dispatch
-// remains outside this module.
+// QuickJS opcode cases; fused hot dispatch remains outside this module.
 pub const DropResult = union(enum) {
     value,
     catch_target: ?usize,
@@ -3358,13 +3154,7 @@ pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
 }
 
 pub noinline fn pushThisVm(vm: *Vm) HostError!void {
-    const this_value = object_ops.materializeFrameThisBinding(vm.ctx, vm.global, vm.frame) catch |err| switch (err) {
-        error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.TypeError)) return;
-            return error.TypeError;
-        },
-        else => return err,
-    };
+    const this_value = object_ops.materializeFrameThisBinding(vm.ctx, vm.global, vm.frame) catch |err| return catchVmError(vm, err);
     pushThis(vm.stack, this_value) catch |err| switch (err) {
         error.ReferenceError => {
             if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.ReferenceError)) return;
@@ -3383,13 +3173,7 @@ pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.St
 }
 
 pub noinline fn toObjectVm(vm: *Vm) HostError!void {
-    toObject(vm.ctx, vm.global, vm.stack) catch |err| switch (err) {
-        error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.TypeError)) return;
-            return error.TypeError;
-        },
-        else => return err,
-    };
+    toObject(vm.ctx, vm.global, vm.stack) catch |err| return catchVmError(vm, err);
 }
 
 pub noinline fn typeOf(vm: *Vm) HostError!void {
@@ -3445,7 +3229,7 @@ pub noinline fn logicalNot(vm: *Vm) HostError!void {
 
 pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
-    if (forof_ops.isIteratorCatchMarker(value)) {
+    if (iterator_ops.isIteratorCatchMarker(value)) {
         return .value;
     }
     if (value.is(.catch_offset)) {
@@ -3468,7 +3252,7 @@ pub noinline fn nipCatch(vm: *Vm) HostError!void {
     while (stack.len() != 0) {
         const value = try stack.pop();
         if (value.is(.catch_offset)) {
-            const is_marker = forof_ops.isIteratorCatchMarker(value) or
+            const is_marker = iterator_ops.isIteratorCatchMarker(value) or
                 (value.as(.catch_offset) orelse -1) == 0;
             try stack.pushOwned(ret_value);
             if (!is_marker) vm.catch_target.* = value.catchTarget();
@@ -3501,8 +3285,7 @@ pub fn nip(vm: *Vm) HostError!void {
     stack.pushOwnedAssumeCapacity(top);
 }
 
-pub fn dup2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn dup2(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 2);
     const b = try stack.pop();
     const a = try stack.pop();
@@ -3512,8 +3295,7 @@ pub fn dup2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn dup1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn dup1(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 2);
     const b = try stack.pop();
     const a = try stack.pop();
@@ -3522,8 +3304,7 @@ pub fn dup1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn dup3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn dup3(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -3558,8 +3339,7 @@ pub fn insert3(vm: *Vm) HostError!void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn insert4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn insert4(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 4);
     const d = try stack.pop();
     const c = try stack.pop();
@@ -3583,8 +3363,7 @@ pub fn rot3l(vm: *Vm) HostError!void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn rot3r(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn rot3r(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -3594,8 +3373,7 @@ pub fn rot3r(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn rot4l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn rot4l(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 4);
     const d = try stack.pop();
     const c = try stack.pop();
@@ -3607,8 +3385,7 @@ pub fn rot4l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn rot5l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn rot5l(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 5);
     const e = try stack.pop();
     const d = try stack.pop();
@@ -3646,8 +3423,7 @@ pub fn perm4(vm: *Vm) HostError!void {
     stack.pushOwnedAssumeCapacity(d);
 }
 
-pub fn perm5(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn perm5(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 5);
     const e = try stack.pop();
     const d = try stack.pop();
@@ -3661,8 +3437,7 @@ pub fn perm5(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(e);
 }
 
-pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn swap2(stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 4);
     const d = try stack.pop();
     const c = try stack.pop();
@@ -3700,30 +3475,10 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
     }
 }
 
-fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.is(.object)) return null;
-    const header = value.refHeader() orelse return null;
-    const object = core.Object.fromHeader(header);
-    if (!core.class.isBytecodeFunctionClass(object.class_id)) return null;
-    return object;
-}
+const functionObjectFromValue = object_ops.functionObjectFromValue;
+const callableObjectFromValue = object_ops.callableObjectFromValue;
 
-fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.is(.object)) return null;
-    const header = value.refHeader() orelse return null;
-    const object = core.Object.fromHeader(header);
-    if (object.class_id != core.class.ids.c_function and
-        object.class_id != core.class.ids.c_function_data and
-        !core.class.isAsyncFunctionResumeClass(object.class_id) and
-        object.class_id != core.class.ids.bound_function) return null;
-    return object;
-}
-
-fn proxyTargetIsCallable(value: core.JSValue) bool {
-    const object = objectFromValue(value) orelse return false;
-    const target = object.proxyTarget() orelse return false;
-    return target.is(.function_bytecode) or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
-}
+const proxyTargetIsCallable = object_ops.proxyTargetIsCallable;
 
 fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) usize {
     var count: usize = 0;
@@ -3819,14 +3574,14 @@ test "stack rearrange opcodes validate depth before mutating stack" {
 
     try stack.pushOwned(core.JSValue.int32(1));
     try stack.pushOwned(core.JSValue.int32(2));
-    try std.testing.expectError(error.StackUnderflow, dup3(ctx, &stack));
+    try std.testing.expectError(error.StackUnderflow, dup3(&stack));
     try expectStackInt32s(&stack, &.{ 1, 2 });
 
     try stack.pushOwned(core.JSValue.int32(3));
-    try std.testing.expectError(error.StackUnderflow, insert4(ctx, &stack));
+    try std.testing.expectError(error.StackUnderflow, insert4(&stack));
     try expectStackInt32s(&stack, &.{ 1, 2, 3 });
 
-    try std.testing.expectError(error.StackUnderflow, swap2(ctx, &stack));
+    try std.testing.expectError(error.StackUnderflow, swap2(&stack));
     try expectStackInt32s(&stack, &.{ 1, 2, 3 });
 }
 
@@ -3859,9 +3614,9 @@ test "push private symbol stack failure does not retain transient private atom" 
     // collected before the measurement.
     _ = try rt.atoms.newSymbol(template_name, .private);
     _ = rt.collectForTest();
-    const allocated_before = rt.diagnostics.allocations.allocated_bytes;
+    const allocated_before = rt.allocation_diagnostics.allocated_bytes;
     try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
-    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(allocated_before, rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     template_roots.deactivate(rt);
@@ -3897,10 +3652,10 @@ test "push private symbol releases fresh atom on allocation failure" {
     // description allocation. The following limit then admits newSymbol but
     // rejects the first symbol-body allocation in takeSymbolValue.
     _ = try rt.atoms.newSymbol(template_name, .private);
-    const allocated_with_atom = rt.diagnostics.allocations.allocated_bytes;
+    const allocated_with_atom = rt.allocation_diagnostics.allocated_bytes;
     // TGC S3-c: `free` no longer retires an entry -- a major does.
     _ = rt.collectForTest();
-    const allocated_before = rt.diagnostics.allocations.allocated_bytes;
+    const allocated_before = rt.allocation_diagnostics.allocated_bytes;
     try std.testing.expect(allocated_with_atom > allocated_before);
     const atom_allocation_bytes = allocated_with_atom - allocated_before;
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
@@ -3908,14 +3663,14 @@ test "push private symbol releases fresh atom on allocation failure" {
     rt.setNativeBytesLimitForTest(allocated_before);
     try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(allocated_before, rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     frame.pc = 0;
     rt.setNativeBytesLimitForTest(allocated_before + atom_allocation_bytes);
     try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(allocated_before, rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     frame.pc = 0;
@@ -3926,7 +3681,7 @@ test "push private symbol releases fresh atom on allocation failure" {
     try std.testing.expectEqualStrings(template_name, rt.atoms.name(recovered_atom).?);
 }
 
-// ----- merged from using_ops.zig -----
+// ----- `using` / disposal opcodes -----
 // Bytecode handlers for explicit-resource-management (`using`) operations.
 //
 // These handlers own and pop VM operands, delegate resource lifetime to
@@ -3956,7 +3711,7 @@ fn routeRuntimeError(vm: *Vm, err: anytype) HostError!void {
 pub noinline fn createStackVm(vm: *Vm) HostError!void {
     const stack = vm.stack;
     try stack.reserveAdditional(1);
-    const value = promise_ops.usingCreateAsyncDisposableStack(vm.ctx, vm.global) catch |err| {
+    const value = disposable_ops.usingCreateAsyncDisposableStack(vm.ctx, vm.global) catch |err| {
         return routeRuntimeError(vm, err);
     };
     stack.pushOwnedAssumeCapacity(value);
@@ -3990,14 +3745,15 @@ pub noinline fn execVm(vm: *Vm) HostError!void {
         bytecode.opcode.ext0_sub.to_object => {
             try toObjectVm(vm);
         },
-        // C0 late-encoding resident: the canonical final encoding of
-        // to_propkey. Identical semantics to the direct id 112, which
-        // stays executable for the D11 alias window only.
-        bytecode.opcode.ext0_sub.to_propkey => {
-            _ = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
+        bytecode.opcode.ext0_sub.iterator_step => {
+            try iterator_ops.forOfStepVm(vm);
         },
-        // C1-1 resident: identical semantics to the direct id 75, which
-        // stays executable for its D11 window only. The opcode constant is
+        // The final encoding of to_propkey (the direct id 112 is reclaimed;
+        // only the parser's phase-1 stream still carries it).
+        bytecode.opcode.ext0_sub.to_propkey => {
+            try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
+        },
+        // The final encoding of set_name_computed. The opcode constant is
         // passed literally -- the shared setName helper selects its
         // computed arm from it, never from the stream byte.
         bytecode.opcode.ext0_sub.set_name_computed => {
@@ -4019,31 +3775,31 @@ pub noinline fn execVm(vm: *Vm) HostError!void {
             try typeOfIsFunction(ctx.runtime, stack);
         },
         bytecode.opcode.ext0_sub.insert4 => {
-            try insert4(ctx, stack);
+            try insert4(stack);
         },
         bytecode.opcode.ext0_sub.rot5l => {
-            try rot5l(ctx, stack);
+            try rot5l(stack);
         },
         bytecode.opcode.ext0_sub.perm5 => {
-            try perm5(ctx, stack);
+            try perm5(stack);
         },
         bytecode.opcode.ext0_sub.dup2 => {
-            try dup2(ctx, stack);
+            try dup2(stack);
         },
         bytecode.opcode.ext0_sub.swap2 => {
-            try swap2(ctx, stack);
+            try swap2(stack);
         },
         bytecode.opcode.ext0_sub.rot3r => {
-            try rot3r(ctx, stack);
+            try rot3r(stack);
         },
         bytecode.opcode.ext0_sub.rot4l => {
-            try rot4l(ctx, stack);
+            try rot4l(stack);
         },
         bytecode.opcode.ext0_sub.dup3 => {
-            try dup3(ctx, stack);
+            try dup3(stack);
         },
         bytecode.opcode.ext0_sub.dup1 => {
-            try dup1(ctx, stack);
+            try dup1(stack);
         },
         else => return error.InvalidBytecode,
     }
@@ -4063,7 +3819,7 @@ fn addResourceWithHint(vm: *Vm, hint_byte: u8) HostError!void {
 
     _ = switch (hint) {
         .sync => disposable_ops.usingAddSyncResource(ctx, vm.output, vm.global, args),
-        .async => promise_ops.usingAddAsyncResource(ctx, vm.output, vm.global, args),
+        .async => disposable_ops.usingAddAsyncResource(ctx, vm.output, vm.global, args),
     } catch |err| {
         try popOwnedOperands(vm.rt, stack, 2);
         return routeRuntimeError(vm, err);
@@ -4078,22 +3834,26 @@ fn disposeStack(
     stack_value: core.JSValue,
     completion: ?core.JSValue,
 ) !core.JSValue {
+    // Both forms return the stack object itself once disposal is complete
+    // (the "done" marker of the `await using` exit loop, see
+    // `usingAsyncDisposeStep`) and throw the disposal's aggregated error.
     const disposable_stack = try disposable_ops.parserDisposableStackReceiver(stack_value);
-    if (!disposable_stack.disposableStackHasAsyncHint()) {
+    // Once an async disposal has started (it awaited or holds errors), stay
+    // on its step even when only sync resources remain: it owns the
+    // aggregated error and the remaining sync disposals.
+    const async_started = disposable_stack.disposableStackAsyncHasAwaitedSlot().* or
+        disposable_stack.disposableStackAsyncErrorSlot().* != null;
+    if (!disposable_stack.disposableStackHasAsyncHint() and !async_started) {
         if (completion) |thrown| {
             const args = [_]core.JSValue{ stack_value, thrown };
-            return disposable_ops.usingDisposeSyncStackForThrow(ctx, output, global, &args);
+            _ = try disposable_ops.usingDisposeSyncStackForThrow(ctx, output, global, &args);
+        } else {
+            const args = [_]core.JSValue{stack_value};
+            _ = try disposable_ops.usingDisposeSyncStack(ctx, output, global, &args);
         }
-        const args = [_]core.JSValue{stack_value};
-        return disposable_ops.usingDisposeSyncStack(ctx, output, global, &args);
+        return stack_value;
     }
-
-    if (completion) |thrown| {
-        const args = [_]core.JSValue{ stack_value, thrown };
-        return promise_ops.usingDisposeAsyncStackForThrow(ctx, output, global, &args);
-    }
-    const args = [_]core.JSValue{stack_value};
-    return promise_ops.usingDisposeAsyncStack(ctx, output, global, &args);
+    return disposable_ops.usingAsyncDisposeStep(ctx, output, global, disposable_stack, completion);
 }
 
 pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostError!void {
@@ -4119,11 +3879,11 @@ pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostEr
 test "VM byte admission is independent of native stack addresses" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    rt.stack_size = 1024;
-    rt.native_stack_limit = 0;
+    rt.stack.limit = 1024;
+    rt.stack.native_limit = 0;
     try std.testing.expect(!admissionCeilingsReject(rt, 0, 1024, 512));
     try std.testing.expect(admissionCeilingsReject(rt, 0, 1025, 512));
     try std.testing.expect(admissionCeilingsReject(rt, 0, 2, 512));
-    rt.native_stack_limit = std.math.maxInt(usize);
+    rt.stack.native_limit = std.math.maxInt(usize);
     try std.testing.expect(admissionCeilingsReject(rt, 0, 512, 512));
 }

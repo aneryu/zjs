@@ -17,7 +17,6 @@ const block_heap_mod = @import("gc_block_heap.zig");
 /// index on the same shift, so the constant is defined once there and
 /// aliased here rather than duplicated.
 pub const page_shift: u6 = block_heap_mod.page_shift;
-pub const page_size: usize = block_heap_mod.page_bytes;
 
 pub const VerifyError = error{
     AddressIndexMissingPage,
@@ -49,6 +48,18 @@ const PageBucket = struct {
 /// callbacks can touch arbitrary runtime state, but neither filter can
 /// change while the world is stopped.
 pub const ScanFilter = struct {
+    /// One-word bloom filter over every 4 KiB base a candidate could resolve
+    /// through: arena bases OR'd with occupant-table page bases. `filterRulesOutBits` is
+    /// two ALU ops, and it rejects almost every stack word before any hash
+    /// probe runs -- JSC's TinyBloomFilter over its MarkedBlock set
+    /// (ConservativeRoots.cpp:168-173), which it also rebuilds per collection
+    /// because a bloom filter cannot forget.
+    ///
+    /// Soundness constraint, learned by review before it shipped: the filter
+    /// MUST cover both populations. A filter built from arenas alone would
+    /// early-out on words pointing into standalone-prefix allocations and the
+    /// scan would miss live objects -- a use-after-free, not an optimization.
+    /// Arena size and page size are both 4096, so one mask serves both.
     address_bits: usize,
     block_bits: usize,
     bounds_lo: usize,
@@ -91,19 +102,6 @@ pub const Table = struct {
     /// builds without the block heap), which every block arm treats as "no
     /// such population".
     block_heap: ?*const block_heap_mod.Heap = null,
-    /// One-word bloom filter over every 4 KiB base a candidate could resolve
-    /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
-    /// two ALU ops, and it rejects almost every stack word before any hash
-    /// probe runs -- JSC's TinyBloomFilter over its MarkedBlock set
-    /// (ConservativeRoots.cpp:168-173), which it also rebuilds per collection
-    /// because a bloom filter cannot forget.
-    ///
-    /// Soundness constraint, learned by review before it shipped: the filter
-    /// MUST cover both populations. A filter built from arenas alone would
-    /// early-out on words pointing into standalone-prefix allocations and the
-    /// scan would miss live objects -- a use-after-free, not an optimization.
-    /// Arena size and page size are both 4096, so one mask serves both.
-    scan_filter: usize = 0,
 
     /// Removals since `by_header` and `pages` were last compacted.
     ///
@@ -267,7 +265,8 @@ pub const Table = struct {
     /// which is why it needs a checker rather than a test per suspected site.
     ///
     /// Returns the number of violations, and reports the first few. Costs a
-    /// walk of every block of every arena, so it is opt-in: `ZJS_GC_ARENA_AUDIT=1`.
+    /// walk of every block of every arena; it runs after each major in builds
+    /// with runtime safety (`gc.invariantChecksEnabled`).
     pub fn auditArenas(self: *Table) usize {
         const Audit = struct {
             violations: usize = 0,
@@ -301,12 +300,11 @@ pub const Table = struct {
     /// `by_header` owns each standalone range and `pages` fans that range out
     /// to every page a candidate may name. A missing fan-out entry drops a live
     /// root; an orphan entry resolves freed memory. Both are use-after-free
-    /// directions, so checking only counts is insufficient. This also verifies
-    /// the scan-time accelerators rebuilt at the start of a trace: every page
-    /// must survive the address bloom filter and every block mapping must be
-    /// inside the global bounds. The block heap separately audits its exact
-    /// block set and TinyBloom bits. Called only by arena/runtime-safety audit.
-    pub fn verifyIndex(self: *Table, verify_scan_cache: bool) VerifyError!void {
+    /// directions, so checking only counts is insufficient. The bounds are
+    /// widened on every insert, so each range must lie inside them. Called
+    /// only by arena/runtime-safety audit; the scan-time accelerators are
+    /// `verifyScanFilter`'s, because they hold only right after a rebuild.
+    pub fn verifyIndex(self: *const Table) VerifyError!void {
         var by_it = self.by_header.iterator();
         while (by_it.next()) |entry| {
             const occupant = entry.value_ptr.*;
@@ -334,9 +332,6 @@ pub const Table = struct {
             const page = entry.key_ptr.*;
             const bucket = entry.value_ptr;
             if (bucket.occupants.items.len == 0) return error.AddressIndexOrphanPage;
-            if (verify_scan_cache and self.filterRulesOut(page << page_shift)) {
-                return error.AddressScanFilterMissing;
-            }
             for (bucket.occupants.items, 0..) |occupant, index| {
                 const first_page = occupant.lo >> page_shift;
                 const last_page = (occupant.hi - 1) >> page_shift;
@@ -353,26 +348,43 @@ pub const Table = struct {
             if (base.* < self.bounds_lo or base.* + Slab.arena_size + 1 > self.bounds_hi) {
                 return error.AddressBoundsMissing;
             }
-            if (verify_scan_cache and self.filterRulesOut(base.*)) return error.AddressScanFilterMissing;
         }
+    }
 
-        if (verify_scan_cache and self.block_heap != null) {
-            const heap = self.block_heap.?;
-            for (heap.superblocks.items) |sb| {
-                if (sb.used_blocks == 0) continue; // medium population
-                const lo = @intFromPtr(sb.bytes.ptr);
-                const hi = lo + sb.bytes.len;
-                if (lo < self.bounds_lo or hi + 1 > self.bounds_hi) {
-                    return error.AddressBoundsMissing;
-                }
+    /// Prove a freshly rebuilt `filter` admits every population a candidate
+    /// may resolve through: each occupant page and arena base passes the
+    /// address bloom, and every arena, in-use superblock, and the string
+    /// extent window is inside the range gate. The block heap separately
+    /// audits its exact block set and TinyBloom bits.
+    ///
+    /// Only meaningful at the scan that built `filter`: a collection maps
+    /// superblocks (evacuation, promotion) after its scan, and those are
+    /// covered by the next scan's rebuild, not this one.
+    pub fn verifyScanFilter(self: *const Table, filter: ScanFilter) VerifyError!void {
+        var page_it = self.pages.keyIterator();
+        while (page_it.next()) |page| {
+            if (filterRulesOutBits(filter.address_bits, page.* << page_shift)) return error.AddressScanFilterMissing;
+        }
+        var arena_it = self.arenas.keyIterator();
+        while (arena_it.next()) |base| {
+            if (filterRulesOutBits(filter.address_bits, base.*)) return error.AddressScanFilterMissing;
+            if (base.* < filter.bounds_lo or base.* + Slab.arena_size + 1 > filter.bounds_hi) {
+                return error.AddressBoundsMissing;
             }
-            // The extent window is the only thing keeping a >3760-byte
-            // string body inside the range gate (TGC S2-h1). A hole here
-            // drops the live root the page index would have resolved.
-            if (heap.extent_bounds_hi != 0) {
-                if (heap.extent_bounds_lo < self.bounds_lo or heap.extent_bounds_hi > self.bounds_hi) {
-                    return error.AddressBoundsMissing;
-                }
+        }
+        const heap = self.block_heap orelse return;
+        for (heap.superblocks.items) |sb| {
+            if (sb.used_blocks == 0) continue; // medium population
+            const lo = @intFromPtr(sb.bytes.ptr);
+            const hi = lo + sb.bytes.len;
+            if (lo < filter.bounds_lo or hi + 1 > filter.bounds_hi) return error.AddressBoundsMissing;
+        }
+        // The extent window is the only thing keeping a >3760-byte
+        // string body inside the range gate (TGC S2-h1). A hole here
+        // drops the live root the page index would have resolved.
+        if (heap.extent_bounds_hi != 0) {
+            if (heap.extent_bounds_lo < filter.bounds_lo or heap.extent_bounds_hi > filter.bounds_hi) {
+                return error.AddressBoundsMissing;
             }
         }
     }
@@ -386,7 +398,6 @@ pub const Table = struct {
         while (arena_it.next()) |base| bits |= base.*;
         var page_it = self.pages.keyIterator();
         while (page_it.next()) |page| bits |= page.* << page_shift;
-        self.scan_filter = bits;
 
         var block_bits: usize = 0;
         if (self.block_heap) |heap| {
@@ -459,10 +470,6 @@ pub const Table = struct {
     }
 
     /// Two ALU ops: can this 4 KiB base possibly be registered?
-    inline fn filterRulesOut(self: *const Table, base: usize) bool {
-        return filterRulesOutBits(self.scan_filter, base);
-    }
-
     inline fn filterRulesOutBits(bits: usize, base: usize) bool {
         return (base & bits) != base;
     }
@@ -711,4 +718,28 @@ pub const Table = struct {
 
 fn occupantsEqual(a: Occupant, b: Occupant) bool {
     return a.lo == b.lo and a.hi == b.hi and a.ptr == b.ptr;
+}
+
+test "superblocks mapped after the scan-filter rebuild keep the index audit clean" {
+    var heap = block_heap_mod.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    var table: Table = .{};
+    defer table.deinit(std.testing.allocator);
+    table.block_heap = &heap;
+
+    _ = try heap.allocCell(64);
+    try table.verifyScanFilter(table.rebuildScanFilter());
+    try table.verifyIndex();
+
+    // A collection's evacuation maps superblocks after its scan rebuilt the
+    // filter; the next scan's rebuild is what covers them.
+    const stale = table.rebuildScanFilter();
+    const before = heap.superblocks.items.len;
+    while (heap.superblocks.items.len < before + 8) _ = try heap.allocCell(64);
+    try table.verifyIndex();
+    try table.verifyScanFilter(table.rebuildScanFilter());
+    // The audit does catch a filter that misses a mapping.
+    var narrowed = stale;
+    narrowed.bounds_lo = std.math.maxInt(usize);
+    try std.testing.expectError(error.AddressBoundsMissing, table.verifyScanFilter(narrowed));
 }

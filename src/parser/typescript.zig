@@ -17,8 +17,8 @@ const emitter = @import("emitter.zig");
 const expressions = @import("expressions.zig");
 const statements = @import("statements.zig");
 const functions = @import("functions.zig");
-const classes = @import("classes.zig");
 const modules = @import("modules.zig");
+const number_format = @import("../libs/number_format.zig");
 const Error = parse_state.Error;
 const PendingDiagnostic = parse_state.PendingDiagnostic;
 const ParseFlags = parse_state.ParseFlags;
@@ -29,7 +29,14 @@ const Emitter = emitter.Emitter;
 
 /// `namespace N { export <decl> }`: copy the member binding onto the
 /// namespace object right after its declaration.
-fn emitNamespaceExport(s: *State, ns_atom: Atom, member: Atom) Error!void {
+fn emitNamespaceExport(s: *State, ns_atom: Atom, member: Atom, is_var: bool) Error!void {
+    try tsRegisterMember(s, ns_atom, member);
+    if (is_var and s.ts_member_frames.items.len != 0) {
+        if (functions.findCurrentScopeVar(s, member)) |temporary| {
+            const frame = &s.ts_member_frames.items[s.ts_member_frames.items.len - 1];
+            try frame.member_temporaries.append(s.scratch, temporary);
+        }
+    }
     try s.emitScopeGetVar(ns_atom);
     try s.emitScopeGetVar(member);
     try Emitter.opAtom(s, opcode.op.put_field, member);
@@ -37,15 +44,221 @@ fn emitNamespaceExport(s: *State, ns_atom: Atom, member: Atom) Error!void {
 
 pub fn emitNamespaceExportIfExported(s: *State, member: Atom) Error!void {
     if (!s.ctx.namespace_export) return;
-    if (s.ctx.current_namespace_atom) |ns_atom| try emitNamespaceExport(s, ns_atom, member);
+    if (s.ctx.current_namespace_atom) |ns_atom| try emitNamespaceExport(s, ns_atom, member, false);
 }
 
+/// Whether the declaration being parsed is an exported namespace member.
+pub fn isNamespaceExport(s: *const State) bool {
+    return s.ctx.namespace_export and s.ctx.current_namespace_atom != null;
+}
+
+/// An exported `var`/`let`/`const` member: after this copy every other
+/// reference is `N.member`, so the namespace property is the live binding.
+pub fn emitNamespaceVarExportIfExported(s: *State, member: Atom) Error!void {
+    if (!s.ctx.namespace_export) return;
+    if (s.ctx.current_namespace_atom) |ns_atom| try emitNamespaceExport(s, ns_atom, member, true);
+}
+
+//--- namespace / enum member resolution ---
+
+/// An identifier reference. Inside a namespace or enum body, a name that is
+/// a member of it (from any block) and not shadowed by a local binding is
+/// the property `Object.name`, exactly as tsc rewrites it; the lvalue
+/// machinery turns that `get_field` into stores, updates and deletes.
+pub fn emitIdentifierReference(s: *State, atom_id: Atom) Error!void {
+    if (s.ts_member_frames.items.len != 0) {
+        if (tsMemberOwner(s, atom_id)) |object| {
+            try s.emitScopeGetVar(object);
+            try Emitter.opAtom(s, opcode.op.get_field, atom_id);
+            return;
+        }
+    }
+    try s.emitScopeGetVar(atom_id);
+}
+
+fn tsMemberOwner(s: *State, atom_id: Atom) ?Atom {
+    var index = s.ts_member_frames.items.len;
+    while (index > 0) {
+        index -= 1;
+        const frame = s.ts_member_frames.items[index];
+        const set = &s.ts_member_sets.items[frame.set];
+        if (tsShadowedWithin(s, atom_id, frame)) return null;
+        if (set.members.contains(atom_id)) return frame.object;
+    }
+    return null;
+}
+
+/// Whether a local binding between the current position and `frame`'s body
+/// scope (inclusive) declares `atom_id`. The body-local temporary of an
+/// exported `var`/`let`/`const` member does not count.
+fn tsShadowedWithin(s: *State, atom_id: Atom, frame: parse_state.TsMemberFrame) bool {
+    var fd: *const parse_state.function_def_mod.FunctionDef = s.curFunc();
+    var scope = s.scope_level;
+    while (true) {
+        const is_frame_fd = fd == frame.fd;
+        while (scope >= 0 and @as(usize, @intCast(scope)) < fd.scopes.len) {
+            var idx = fd.scopes[@intCast(scope)].first;
+            while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+                const v = fd.vars[@intCast(idx)];
+                if (v.scope_level != scope) break;
+                if (v.var_name == atom_id) {
+                    const member_temporary = is_frame_fd and scope == frame.scope_level and
+                        std.mem.indexOfScalar(u16, frame.member_temporaries.items, @intCast(idx)) != null;
+                    if (!member_temporary) return true;
+                }
+                idx = v.scope_next;
+            }
+            if (is_frame_fd and scope == frame.scope_level) return false;
+            scope = fd.scopes[@intCast(scope)].parent;
+        }
+        if (is_frame_fd) return false;
+        for (fd.args) |arg| {
+            if (arg.var_name == atom_id) return true;
+        }
+        // Function-level `var`s and function declarations sit in scope 0,
+        // off the scope chain walked above.
+        for (fd.vars) |v| {
+            if (v.scope_level == 0 and v.var_name == atom_id and v.var_kind != .function_name) return true;
+        }
+        // Destructured parameters and a function expression's own name.
+        if (fd.isPatternParameterName(atom_id)) return true;
+        if (fd.is_named_func_expr and fd.func_name == atom_id) return true;
+        scope = fd.parent_scope_level;
+        fd = fd.parent orelse return false;
+    }
+}
+
+/// The member set of namespace/enum `name` declared here: blocks of one
+/// namespace (or one enum) in the same function and enclosing namespace
+/// share it.
+fn tsMemberSet(s: *State, kind: parse_state.TsMemberSet.Kind, name: Atom) Error!u32 {
+    const fd: *const parse_state.function_def_mod.FunctionDef = s.curFunc();
+    const parent: ?u32 = if (s.ts_member_frames.items.len != 0) s.ts_member_frames.items[s.ts_member_frames.items.len - 1].set else null;
+    for (s.ts_member_sets.items, 0..) |set, index| {
+        if (set.fd == fd and set.parent == parent and set.kind == kind and set.name == name) return @intCast(index);
+    }
+    try s.ts_member_sets.append(s.scratch, .{ .fd = fd, .parent = parent, .kind = kind, .name = name });
+    return @intCast(s.ts_member_sets.items.len - 1);
+}
+
+fn tsPushMemberFrame(s: *State, object: Atom, set: u32) Error!void {
+    try s.ts_member_frames.append(s.scratch, .{ .object = object, .fd = s.curFunc(), .scope_level = s.scope_level, .set = set });
+}
+
+fn tsPopMemberFrame(s: *State) void {
+    var frame = s.ts_member_frames.pop() orelse return;
+    frame.member_temporaries.deinit(s.scratch);
+}
+
+fn tsAddMember(s: *State, set_index: u32, member: Atom) Error!void {
+    const set = &s.ts_member_sets.items[set_index];
+    try set.members.put(s.scratch, member, {});
+}
+
+fn tsRegisterMember(s: *State, object: Atom, member: Atom) Error!void {
+    var index = s.ts_member_frames.items.len;
+    while (index > 0) {
+        index -= 1;
+        const frame = s.ts_member_frames.items[index];
+        if (frame.object == object) return tsAddMember(s, frame.set, member);
+    }
+}
+
+/// Walks the tokens of a body whose `{` is the current token, calling
+/// `visitor.token(s, token, top_level, after_line_terminator)` for each
+/// token inside it; the lexer is restored afterwards.
+fn tsPrescanBody(s: *State, visitor: anytype) Error!void {
+    if (s.peekKind() != .lbrace) return;
+    const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
+    defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
+
+    var depth: usize = 1;
+    var prev_kind: tok.Kind = .lbrace;
+    while (true) {
+        var scan_token = s.lex.next() catch |err| return lookahead.mapLookaheadLexerError(s, err);
+        defer s.lex.freeToken(&scan_token);
+        const k = scan_token.kind;
+        if (k == .eof) return;
+        const after_line_terminator = s.lex.got_lf;
+        switch (k) {
+            .slash, .div_assign => if (try lookahead.skipRegexpInPredeclareScan(s, prev_kind)) {
+                prev_kind = .regexp;
+                continue;
+            },
+            .template => {
+                try lookahead.skipTemplateInPredeclareScan(s, scan_token);
+                prev_kind = .template;
+                continue;
+            },
+            .rbrace, .rparen, .rbracket => {
+                depth -= 1;
+                if (depth == 0) return;
+            },
+            else => {},
+        }
+        try visitor.token(s, &scan_token, depth == 1, after_line_terminator);
+        if (k == .lbrace or k == .lparen or k == .lbracket) depth += 1;
+        prev_kind = k;
+    }
+}
+
+/// Registers the `export var/let/const` names of a namespace block before
+/// it is parsed, so references that precede the declaration also resolve
+/// to the member. Declarator lists continue across `,` only.
+const NamespaceVarExportScan = struct {
+    set: u32,
+    prev_export: bool = false,
+    expect_name: bool = false,
+    in_declaration: bool = false,
+
+    fn token(self: *NamespaceVarExportScan, s: *State, t: *const tok.Token, top_level: bool, after_line_terminator: bool) Error!void {
+        if (!top_level) return;
+        const k = t.kind;
+        const is_declaration_word = k == .kw_var or k == .kw_const or k == .kw_let;
+        if (self.prev_export and is_declaration_word) {
+            self.expect_name = true;
+            self.in_declaration = true;
+        } else if (self.expect_name) {
+            if (k == .ident) try tsAddMember(s, self.set, t.payload.ident.atom);
+            self.expect_name = false;
+        } else if (self.in_declaration) {
+            if (k == .comma) {
+                self.expect_name = true;
+            } else if (k == .semicolon or (after_line_terminator and k != .comma)) {
+                self.in_declaration = false;
+            }
+        }
+        // `export declare let x` declares a member too.
+        const declare_after_export = self.prev_export and k == .ident and !t.payload.ident.has_escape and
+            identifiers.atomNameEquals(s, t.payload.ident.atom, "declare");
+        self.prev_export = k == .kw_export or declare_after_export;
+    }
+};
+
+/// Registers every member name of an enum body before it is parsed.
+const EnumMemberScan = struct {
+    set: u32,
+    at_member_start: bool = true,
+
+    fn token(self: *EnumMemberScan, s: *State, t: *const tok.Token, top_level: bool, _: bool) Error!void {
+        if (!top_level) return;
+        if (self.at_member_start) {
+            switch (t.kind) {
+                .ident => try tsAddMember(s, self.set, t.payload.ident.atom),
+                .string => try tsAddMember(s, self.set, try s.atoms.internString(t.payload.str.bytes)),
+                else => {},
+            }
+        }
+        self.at_member_start = t.kind == .comma;
+    }
+};
+
 /// The binding of an `enum` or `namespace` declaration. tsc emits
-/// `var N;` at function level and `let N;` inside a namespace body, and a
-/// second declaration of the same name re-opens the first (declaration
-/// merging), so an existing binding in the same scope is reused.
+/// `var N;` at function level and `let N;` in a block or a namespace body,
+/// and a second declaration of the same name re-opens the first
+/// (declaration merging), so an existing binding in the same scope is reused.
 fn tsDefineNamespaceLikeBinding(s: *State, name: Atom) Error!void {
-    if (s.ctx.in_namespace) {
+    if (s.ctx.in_namespace or !s.atFunctionBodyScope()) {
         if (functions.findCurrentScopeVar(s, name) != null) return;
         _ = try declarations.defineVar(s, name, .let_);
         // `let N;` leaves the binding in its TDZ until here; the
@@ -55,7 +268,52 @@ fn tsDefineNamespaceLikeBinding(s: *State, name: Atom) Error!void {
         try s.emitScopePutVarInit(name);
         return;
     }
+    // A class or function of the same name merges with the namespace.
+    if (functions.findCurrentScopeVar(s, name) != null) return;
+    if (try declarations.findLexicalDeclaration(s, name, false) != null) return;
+    if (s.curFunc().is_global_var and s.firstGlobalVarIndex(name) != null) return;
     _ = try declarations.defineVar(s, name, .var_);
+}
+
+/// A body-scoped const holding the namespace/enum object. Member references
+/// and exports go through it, so an inner binding that reuses the
+/// namespace's own name (`namespace N { function f(N) {} }`) cannot hijack
+/// them, as tsc's renamed IIFE parameter guarantees. The name is not a
+/// valid identifier, so no source text can refer to it. The caller pushes
+/// the object before opening the body scope, where a member named like the
+/// namespace (`namespace Foo { export class Foo {} }`) would shadow it.
+fn tsBindNamespaceAlias(s: *State, name: Atom) Error!Atom {
+    const name_bytes = s.lex.atoms.name(name) orelse "";
+    const alias_name = try std.fmt.allocPrint(s.scratch, "<namespace {s} {d}>", .{ name_bytes, s.with_scope_id });
+    defer s.scratch.free(alias_name);
+    s.with_scope_id += 1;
+    const alias = try s.atoms.internString(alias_name);
+    _ = try declarations.defineVar(s, alias, .const_);
+    try s.emitScopePutVarInit(alias);
+    return alias;
+}
+
+/// `N = N || {}`, or tsc's `N = N || (Parent.N ??= {})` for an exported
+/// member of a parent namespace, so re-opening it keeps earlier members.
+/// The caller copies N onto the parent afterwards.
+fn emitNamespaceLikeObject(s: *State, name: Atom, exported_to_parent: bool) Error!void {
+    const skip_label = try Emitter.newLabel(s);
+    try s.emitScopeGetVarUndef(name);
+    try Emitter.op(s, opcode.op.dup);
+    try Emitter.jump(s, opcode.op.if_true, skip_label);
+    try Emitter.op(s, opcode.op.drop);
+    if (exported_to_parent) {
+        if (s.ctx.current_namespace_atom) |parent| {
+            try s.emitScopeGetVar(parent);
+            try Emitter.opAtom(s, opcode.op.get_field, name);
+            try Emitter.op(s, opcode.op.dup);
+            try Emitter.jump(s, opcode.op.if_true, skip_label);
+            try Emitter.op(s, opcode.op.drop);
+        }
+    }
+    try Emitter.op(s, opcode.op.object);
+    try Emitter.bind(s, skip_label);
+    try s.emitScopePutVar(name);
 }
 
 pub fn parseEnumDeclaration(s: *State) Error!void {
@@ -64,29 +322,36 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
     const enum_atom = identifiers.identifierLikeAtom(s);
     try tsDefineNamespaceLikeBinding(s, enum_atom);
     try s.advance();
+    try emitNamespaceLikeObject(s, enum_atom, s.ctx.namespace_export);
 
-    // Emit Enum = Enum || {}
-    try s.emitScopeGetVarUndef(enum_atom);
-    try Emitter.op(s, opcode.op.dup);
-    const skip_label = try Emitter.newLabel(s);
-    try Emitter.jump(s, opcode.op.if_true, skip_label);
-    try Emitter.op(s, opcode.op.drop);
-    try Emitter.op(s, opcode.op.object);
-    try Emitter.bind(s, skip_label);
-    try s.emitScopePutVar(enum_atom);
-
+    // Runtime initializers see every member (of every declaration of this
+    // enum) as `Enum.member`, ahead of outer bindings: a scope of its own.
+    const member_set = try tsMemberSet(s, .@"enum", enum_atom);
+    var member_names = EnumMemberScan{ .set = member_set };
+    try tsPrescanBody(s, &member_names);
     try s.expectToken(.lbrace);
+    try s.emitScopeGetVar(enum_atom);
+    var member_scope = try s.openScope();
+    errdefer member_scope.pop(s);
+    const enum_object = try tsBindNamespaceAlias(s, enum_atom);
+    try tsPushMemberFrame(s, enum_object, member_set);
+    defer tsPopMemberFrame(s);
 
     const allocator = s.scratch;
     var members = std.ArrayList(TsEnumMember).empty;
     defer {
-        for (members.items) |member| tsFreeEnumValue(s, member.value);
+        for (members.items) |member| if (member.value) |value| tsFreeEnumValue(s, value);
         members.deinit(allocator);
     }
     // Value of the next member without an initializer; null after a
     // string or runtime-computed member (tsc: "Enum member must have
     // initializer").
     var next_auto: ?f64 = 0;
+    // The previous member when it was computed at run time: a member without
+    // an initializer after it is that value plus one. tsc folds such a
+    // reference to a constant (`const k = 5; enum E { A = k, B }` gives 6);
+    // without type information the addition happens at run time.
+    var runtime_predecessor: ?Atom = null;
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         const member_atom = try tsEnumMemberName(s);
         const member_name = s.lex.atoms.name(member_atom) orelse "";
@@ -100,9 +365,15 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
                 // place, exactly like tsc's `E[E["A"] = expr] = "A"`.
                 try expressions.parseAssignExpr(s);
             }
-        } else {
-            const auto = next_auto orelse return s.failWithMessage(null, "enum member must have initializer");
+        } else if (next_auto) |auto| {
             folded = .{ .number = auto };
+        } else if (runtime_predecessor) |previous| {
+            try s.emitScopeGetVar(enum_object);
+            try Emitter.opAtom(s, opcode.op.get_field, previous);
+            try Emitter.opI32(s, opcode.op.push_i32, 1);
+            try Emitter.op(s, opcode.op.add);
+        } else {
+            return s.failWithMessage(null, "enum member must have initializer");
         }
 
         var reverse_mapping = true;
@@ -111,7 +382,7 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
                 .number => |n| try tsEmitNumber(s, n),
                 .string => |bytes| {
                     // String member: forward mapping only.
-                    try s.emitScopeGetVar(enum_atom);
+                    try s.emitScopeGetVar(enum_object);
                     try emitter.emitStringLiteralValue(s, bytes);
                     try Emitter.opAtom(s, opcode.op.put_field, member_atom);
                     reverse_mapping = false;
@@ -120,14 +391,33 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
         }
         if (reverse_mapping) {
             // Double mapping: Enum[Enum["Member"] = value] = "Member"
-            try s.emitScopeGetVar(enum_atom); // Stack: [value, outer_obj]
+            try s.emitScopeGetVar(enum_object); // Stack: [value, outer_obj]
             try Emitter.op(s, opcode.op.swap); // Stack: [outer_obj, value]
             try Emitter.op(s, opcode.op.dup); // Stack: [outer_obj, value, value]
-            try s.emitScopeGetVar(enum_atom); // Stack: [outer_obj, value, value, inner_obj]
+            try s.emitScopeGetVar(enum_object); // Stack: [outer_obj, value, value, inner_obj]
             try Emitter.op(s, opcode.op.swap); // Stack: [outer_obj, value, inner_obj, value]
             try Emitter.opAtom(s, opcode.op.put_field, member_atom); // Stack: [outer_obj, value]
+            // A member computed at run time (a template with substitutions,
+            // a string expression) may be a string, which tsc maps forward
+            // only; its type is not known here, so test the value.
+            const skip_reverse = if (folded == null) try Emitter.newLabel(s) else null;
+            if (skip_reverse) |label| {
+                try Emitter.op(s, opcode.op.dup);
+                try Emitter.op(s, opcode.op.typeof);
+                try emitter.emitStringLiteralValue(s, "string");
+                try Emitter.op(s, opcode.op.strict_eq);
+                try Emitter.jump(s, opcode.op.if_true, label);
+            }
             try emitter.emitStringLiteralValue(s, member_name); // Stack: [outer_obj, value, "Member"]
             try Emitter.op(s, opcode.op.put_array_el);
+            if (skip_reverse) |label| {
+                const done = try Emitter.newLabel(s);
+                try Emitter.jump(s, opcode.op.goto, done);
+                try Emitter.bind(s, label);
+                try Emitter.op(s, opcode.op.drop);
+                try Emitter.op(s, opcode.op.drop);
+                try Emitter.bind(s, done);
+            }
         }
 
         if (folded) |value| {
@@ -141,7 +431,9 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
             };
         } else {
             next_auto = null;
+            try members.append(allocator, .{ .name = member_atom, .value = null });
         }
+        runtime_predecessor = if (folded == null) member_atom else null;
 
         if (s.peekKind() == .comma) {
             try s.advance();
@@ -151,6 +443,7 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
     }
 
     try s.expectToken(.rbrace);
+    try member_scope.close(s);
     s.setLastDeclaredAtom(enum_atom);
 
     try emitNamespaceExportIfExported(s, enum_atom);
@@ -158,24 +451,40 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
 
 pub fn parseNamespaceDeclaration(s: *State) Error!void {
     try s.expectToken(.ident); // Already matched "namespace" in caller
-    try parseNamespaceDeclarationWithIdent(s);
+    try parseNamespaceDeclarationWithIdent(s, s.ctx.namespace_export);
 }
 
-fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
+const SavedNamespace = struct {
+    in_namespace: bool,
+    atom: ?Atom,
+
+    fn take(s: *const State) SavedNamespace {
+        return .{ .in_namespace = s.ctx.in_namespace, .atom = s.ctx.current_namespace_atom };
+    }
+};
+
+/// Bind the namespace body's object alias and make it the current
+/// namespace; `tsLeaveNamespaceBody` restores the enclosing one.
+fn tsEnterNamespaceBody(s: *State, ns_atom: Atom, member_set: u32) Error!Atom {
+    const ns_object = try tsBindNamespaceAlias(s, ns_atom);
+    s.ctx.in_namespace = true;
+    s.setCurrentNamespaceAtom(ns_object);
+    try tsPushMemberFrame(s, ns_object, member_set);
+    return ns_object;
+}
+
+fn tsLeaveNamespaceBody(s: *State, saved: SavedNamespace) void {
+    tsPopMemberFrame(s);
+    s.ctx.in_namespace = saved.in_namespace;
+    s.setCurrentNamespaceAtom(saved.atom);
+}
+
+fn parseNamespaceDeclarationWithIdent(s: *State, exported_to_parent: bool) Error!void {
     if (s.peekKind() != .ident) return s.failExpectedToken(.ident);
     const ns_atom = identifiers.identifierLikeAtom(s);
     try tsDefineNamespaceLikeBinding(s, ns_atom);
     try s.advance();
-
-    // Emit Namespace = Namespace || {}
-    try s.emitScopeGetVarUndef(ns_atom);
-    try Emitter.op(s, opcode.op.dup);
-    const skip_label = try Emitter.newLabel(s);
-    try Emitter.jump(s, opcode.op.if_true, skip_label);
-    try Emitter.op(s, opcode.op.drop);
-    try Emitter.op(s, opcode.op.object);
-    try Emitter.bind(s, skip_label);
-    try s.emitScopePutVar(ns_atom);
+    try emitNamespaceLikeObject(s, ns_atom, exported_to_parent);
 
     if (s.peekKind() == .dot) {
         try s.advance(); // consume '.'
@@ -184,24 +493,20 @@ fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         // scope, so its declarations (block-level functions included)
         // are instantiated at scope entry and never collide with
         // same-named members of sibling namespaces.
+        const member_set = try tsMemberSet(s, .namespace, ns_atom);
+        try s.emitScopeGetVar(ns_atom);
         var nested_scope = try s.openScope();
         errdefer nested_scope.pop(s);
-        const saved_in_namespace = s.ctx.in_namespace;
-        const saved_namespace_atom = if (s.ctx.current_namespace_atom) |atom_id|
-            atom_id
-        else
-            null;
-        s.ctx.in_namespace = true;
-        s.setCurrentNamespaceAtom(ns_atom);
-        defer {
-            s.ctx.in_namespace = saved_in_namespace;
-            s.setCurrentNamespaceAtom(saved_namespace_atom);
-        }
+        const saved_namespace = SavedNamespace.take(s);
+        const ns_object = try tsEnterNamespaceBody(s, ns_atom, member_set);
+        defer tsLeaveNamespaceBody(s, saved_namespace);
 
-        try parseNamespaceDeclarationWithIdent(s);
+        // `namespace A.B {}` is `namespace A { export namespace B {} }`.
+        try parseNamespaceDeclarationWithIdent(s, true);
 
         if (s.last_declared_atom) |nested_atom| {
-            try s.emitScopeGetVar(ns_atom);
+            try tsRegisterMember(s, ns_object, nested_atom);
+            try s.emitScopeGetVar(ns_object);
             try s.emitScopeGetVar(nested_atom);
             try Emitter.opAtom(s, opcode.op.put_field, nested_atom);
         }
@@ -212,23 +517,19 @@ fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         return;
     }
 
+    const member_set = try tsMemberSet(s, .namespace, ns_atom);
+    var var_exports = NamespaceVarExportScan{ .set = member_set };
+    try tsPrescanBody(s, &var_exports);
     try s.expectToken(.lbrace);
     // The namespace body is a real lexical scope (tsc: an IIFE): block
     // level function declarations are instantiated at scope entry, and
     // sibling namespaces may export same-named members.
+    try s.emitScopeGetVar(ns_atom);
     var body_scope = try s.openScope();
     errdefer body_scope.pop(s);
-    const saved_in_namespace = s.ctx.in_namespace;
-    const saved_namespace_atom = if (s.ctx.current_namespace_atom) |atom_id|
-        atom_id
-    else
-        null;
-    s.ctx.in_namespace = true;
-    s.setCurrentNamespaceAtom(ns_atom);
-    defer {
-        s.ctx.in_namespace = saved_in_namespace;
-        s.setCurrentNamespaceAtom(saved_namespace_atom);
-    }
+    const saved_namespace = SavedNamespace.take(s);
+    _ = try tsEnterNamespaceBody(s, ns_atom, member_set);
+    defer tsLeaveNamespaceBody(s, saved_namespace);
 
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         try parseNamespaceStatement(s);
@@ -239,7 +540,7 @@ fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
     s.setLastDeclaredAtom(ns_atom);
 
     if (s.ctx.namespace_export) {
-        if (saved_namespace_atom) |parent_ns| try emitNamespaceExport(s, parent_ns, ns_atom);
+        if (saved_namespace.atom) |parent_ns| try emitNamespaceExport(s, parent_ns, ns_atom, false);
     }
 }
 
@@ -272,7 +573,7 @@ fn tsAtTypeName(s: *State) bool {
 /// object type: any identifier, keyword, string, or number.
 fn tsAtPropertyNameToken(s: *State) bool {
     const k = s.peekKind();
-    return tsKindIsIdentifierLike(k) or k.isKeyword() or k == .string or k == .number;
+    return k == .ident or k.isKeyword() or k == .string or k == .number;
 }
 
 fn tsIsIdentNoLineTerminator(s: *State, name: []const u8) bool {
@@ -440,6 +741,13 @@ fn tsParseTypeOrPredicate(s: *State) Error!void {
     const saved = s.ts_disallow_conditional;
     s.ts_disallow_conditional = false;
     defer s.ts_disallow_conditional = saved;
+    // `x is T` first: a parameter may itself be named `asserts`.
+    if ((s.peekKind() == .kw_this or tsAtTypeName(s)) and tsPeekNextIsIdent(s, "is", true)) {
+        try s.advance();
+        try s.advance();
+        try tsParseType(s);
+        return;
+    }
     if (s.isIdent("asserts")) {
         const next_peek = s.peekNext();
         const next = next_peek.kind;
@@ -453,12 +761,6 @@ fn tsParseTypeOrPredicate(s: *State) Error!void {
             }
             return;
         }
-    }
-    if ((s.peekKind() == .kw_this or tsAtTypeName(s)) and tsPeekNextIsIdent(s, "is", true)) {
-        try s.advance();
-        try s.advance();
-        try tsParseType(s);
-        return;
     }
     try tsParseType(s);
 }
@@ -496,8 +798,34 @@ fn tsAtFunctionTypeStart(s: *State) Error!bool {
     if (k == .lt or k == .shl or k == .kw_new) return true;
     if (s.isIdent("abstract") and s.peekNextKind() == .kw_new) return true;
     if (k != .lparen) return false;
-    const balanced = lookahead.scanBalancedToken(s, false) catch |err| return lookahead.lookaheadErrorAsNoMatch(err);
-    return balanced.closed and balanced.following == .arrow;
+    // tsc isUnambiguouslyStartOfFunctionType: a parenthesized type such as
+    // an arrow's `(): (() => void) => ...` return type must not swallow the
+    // arrow's own `=>`.
+    const next = s.peekNextKind();
+    if (next == .rparen or next == .ellipsis) return true;
+    if (next == .lbracket or next == .lbrace) {
+        const balanced = lookahead.scanBalancedToken(s, false) catch |err| return lookahead.lookaheadErrorAsNoMatch(err);
+        return balanced.closed and balanced.following == .arrow;
+    }
+    if (next != .ident and next != .kw_this) return false;
+    const spec = try tsBeginSpeculation(s);
+    defer tsRollback(s, spec);
+    return tsParameterNameStartsSignature(s) catch |err| lookahead.lookaheadErrorAsNoMatch(err);
+}
+
+/// At `(name`: a signature if the name is followed by `:`, `,`, `?`, `=`,
+/// or by `)` and then `=>`.
+fn tsParameterNameStartsSignature(s: *State) Error!bool {
+    try s.advance();
+    try s.advance();
+    switch (s.peekKind()) {
+        .colon, .comma, .question, .assign => return true,
+        .rparen => {
+            try s.advance();
+            return s.peekKind() == .arrow;
+        },
+        else => return false,
+    }
 }
 
 fn tsParseFunctionType(s: *State) Error!void {
@@ -594,7 +922,7 @@ fn tsParsePrimaryType(s: *State) Error!void {
         try s.advance();
         if (s.peekKind() == .kw_import) return tsParseImportType(s);
         try tsParseEntityName(s);
-        if (s.peekKind() == .lt and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+        try tsParseTypeReferenceArgumentsOpt(s);
         return;
     }
     if (k == .kw_import) return tsParseImportType(s);
@@ -604,8 +932,19 @@ fn tsParsePrimaryType(s: *State) Error!void {
 }
 
 pub fn tsParseTypeReference(s: *State) Error!void {
+    const keyword_type = tsAtKeywordTypeName(s) and s.peekNextKind() != .dot;
     try tsParseEntityName(s);
-    if (s.peekKind() == .lt and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+    // Keyword types take no type arguments, so `a as number < 5` compares.
+    if (!keyword_type) try tsParseTypeReferenceArgumentsOpt(s);
+}
+
+/// `any`, `number`, ... : tsc parses these as keyword types, not references.
+fn tsAtKeywordTypeName(s: *State) bool {
+    const names = [_][]const u8{ "any", "unknown", "number", "bigint", "boolean", "string", "symbol", "object", "never", "undefined" };
+    for (names) |name| {
+        if (s.isIdent(name)) return true;
+    }
+    return false;
 }
 
 fn tsParseEntityName(s: *State) Error!void {
@@ -635,7 +974,7 @@ fn tsParseImportType(s: *State) Error!void {
         if (!tsAtPropertyNameToken(s)) return s.failExpectedDescription("property name");
         try s.advance();
     }
-    if (s.peekKind() == .lt and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+    try tsParseTypeReferenceArgumentsOpt(s);
 }
 
 fn tsParseTemplateLiteralType(s: *State) Error!void {
@@ -677,6 +1016,25 @@ fn tsExpectLess(s: *State) Error!void {
         return s.advance();
     }
     return s.failExpectedToken(.lt);
+}
+
+/// Type arguments after a type name. A `<<` token opens them only when its
+/// second `<` starts a generic function type (`Array<<T>() => T>`); tsc
+/// keeps `x satisfies number << 1` a shift.
+pub fn tsParseTypeReferenceArgumentsOpt(s: *State) Error!void {
+    if (s.gotLineTerminator()) return;
+    switch (s.peekKind()) {
+        .lt => return tsParseTypeArguments(s),
+        .shl => {
+            const spec = try tsBeginSpeculation(s);
+            if (try tsProbe(s, tsParseTypeArguments)) {
+                tsCommit(s, spec);
+            } else {
+                tsRollback(s, spec);
+            }
+        },
+        else => {},
+    }
 }
 
 pub fn tsParseTypeArguments(s: *State) Error!void {
@@ -798,7 +1156,10 @@ fn tsParseObjectTypeMember(s: *State) Error!void {
             return tsParseMethodSignatureRest(s);
         }
     }
-    if ((s.isIdent("get") or s.isIdent("set")) and tsWordIsMemberModifier(s)) try s.advance();
+    if ((s.isIdent("get") or s.isIdent("set")) and tsWordIsMemberModifier(s)) {
+        try s.advance();
+        if (s.peekKind() == .lbracket) return tsParseIndexOrMappedMember(s);
+    }
     if (!tsAtPropertyNameToken(s) and k != .private_name) return s.failExpectedDescription("type member");
     try s.advance();
     if (s.peekKind() == .question) try s.advance();
@@ -814,7 +1175,7 @@ fn tsWordIsMemberModifier(s: *State) bool {
     const next = next_peek.kind;
     const has_lt = next_peek.line_terminator;
     if (has_lt) return false;
-    return tsKindIsIdentifierLike(next) or next.isKeyword() or next == .string or
+    return next == .ident or next.isKeyword() or next == .string or
         next == .number or next == .lbracket or next == .private_name;
 }
 
@@ -940,6 +1301,7 @@ fn tsAmbientDeclarationFollows(kind: tok.Kind) bool {
 pub fn tsParseInterfaceDeclaration(s: *State) Error!void {
     try s.advance();
     if (!tsAtTypeName(s)) return s.failExpectedDescription("interface name");
+    try tsRecordTypeName(s);
     try s.advance();
     if (tsAtLess(s)) try tsParseTypeParameters(s);
     if (s.peekKind() == .kw_extends) {
@@ -953,9 +1315,14 @@ pub fn tsParseInterfaceDeclaration(s: *State) Error!void {
     try tsParseObjectType(s);
 }
 
+fn tsRecordTypeName(s: *State) Error!void {
+    try s.ts_type_names.append(s.scratch, identifiers.identifierLikeAtom(s));
+}
+
 pub fn tsParseTypeAliasDeclaration(s: *State) Error!void {
     try s.advance();
     if (!tsAtTypeName(s)) return s.failExpectedDescription("type alias name");
+    try tsRecordTypeName(s);
     try s.advance();
     if (tsAtLess(s)) try tsParseTypeParameters(s);
     try s.expectToken(.assign);
@@ -1140,6 +1507,33 @@ pub fn tsSkipDeclaredField(s: *State) Error!void {
     _ = try s.expectSemicolon();
 }
 
+/// Current token is the `[` of a computed class member: is the member an
+/// erased signature (an overload, optional or abstract method, or an
+/// abstract field)? tsc drops such a member with its key, so the key
+/// expression must not be evaluated.
+pub fn tsComputedMemberIsErased(s: *State, is_abstract: bool) Error!bool {
+    const spec = try tsBeginSpeculation(s);
+    defer tsRollback(s, spec);
+    if (!(try tsProbe(s, tsSkipComputedNameAndMarker))) return false;
+    if (!tsIsMethodStart(s)) return is_abstract;
+    return !(try tsFunctionHasBodyAhead(s));
+}
+
+/// Skip a member `tsComputedMemberIsErased` accepted.
+pub fn tsSkipErasedComputedMember(s: *State, is_abstract: bool) Error!void {
+    try tsSkipBalancedGroup(s);
+    const is_optional = s.peekKind() == .question;
+    if (is_optional or (s.peekKind() == .bang and !s.gotLineTerminator())) try s.advance();
+    if (tsIsMethodStart(s)) return tsSkipMethodSignature(s, is_abstract or is_optional);
+    try tsParseTypeAnnotationOpt(s);
+    _ = try s.expectSemicolon();
+}
+
+fn tsSkipComputedNameAndMarker(s: *State) Error!void {
+    try tsSkipBalancedGroup(s);
+    if (s.peekKind() == .question or (s.peekKind() == .bang and !s.gotLineTerminator())) try s.advance();
+}
+
 /// Modifier word in a class body. tsc `nextTokenCanFollowModifier`: the
 /// next token must be able to start a member; `static` alone tolerates a
 /// line terminator before that token.
@@ -1151,6 +1545,11 @@ pub fn tsCanFollowClassModifier(kind: tok.Kind) bool {
 
 /// Current token is `[`: is this a class index signature `[k: T]: U`?
 pub fn tsIndexSignatureAhead(s: *State) bool {
+    return tsIdentifierFollowedByAhead(s, .colon);
+}
+
+/// The two tokens after the current one are an identifier and `kind`.
+fn tsIdentifierFollowedByAhead(s: *State, kind: tok.Kind) bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return false;
@@ -1159,7 +1558,7 @@ pub fn tsIndexSignatureAhead(s: *State) bool {
     if (!tsKindIsIdentifierLike(first_kind)) return false;
     var second = s.lex.next() catch return false;
     defer s.lex.freeToken(&second);
-    return second.kind == .colon;
+    return second.kind == kind;
 }
 
 pub fn tsSkipIndexSignature(s: *State) Error!void {
@@ -1208,6 +1607,29 @@ pub fn tsParenArrowHeadWithReturnType(s: *State) Error!bool {
     return s.peekKind() == .arrow and !s.gotLineTerminator();
 }
 
+/// Leading `<T>` assertions of a destructuring assignment target
+/// (`[...<any>x] = a`): erased, the target follows.
+pub fn tsSkipTargetAssertionPrefix(s: *State) Error!void {
+    while (s.peekKind() == .lt) {
+        try tsExpectLess(s);
+        try tsParseTypeAllowConditional(s);
+        try tsExpectGreater(s);
+    }
+}
+
+/// Trailing `as T`, `satisfies T` and `!` of a destructuring assignment
+/// target (`[x as any] = a`): erased.
+pub fn tsSkipTargetAssertionSuffix(s: *State) Error!void {
+    while (true) {
+        if (tsAtAsOrSatisfies(s)) {
+            try s.advance();
+            try tsParseTypeAllowConditional(s);
+        } else if (s.peekKind() == .bang and !s.gotLineTerminator()) {
+            try s.advance();
+        } else return;
+    }
+}
+
 /// `<T>expr` type assertion at the current `<`.
 pub fn tsParseTypeAssertion(s: *State, flags: ParseFlags) Error!void {
     try tsExpectLess(s);
@@ -1241,6 +1663,8 @@ fn tsCanFollowTypeArgumentsInExpression(s: *State) bool {
     if (k == .assign or expressions.compoundAssignOpcode(k) != null or expressions.logicalAssignKind(k) != null) return false;
     if (s.gotLineTerminator()) return true;
     if (tsIsBinaryOperatorKind(k)) return true;
+    // `f<T> as U` / `f<T> satisfies U`: tsc parses these as binary operators.
+    if (s.isIdent("as") or s.isIdent("satisfies")) return true;
     return !tsTokenStartsExpression(k);
 }
 
@@ -1253,7 +1677,7 @@ fn tsIsBinaryOperatorKind(k: tok.Kind) bool {
 }
 
 fn tsTokenStartsExpression(k: tok.Kind) bool {
-    if (tsKindIsIdentifierLike(k) or k.isKeyword()) return true;
+    if (k == .ident or k.isKeyword()) return true;
     return switch (k) {
         .number, .string, .template, .regexp, .private_name, .inc, .dec, .div_assign => true,
         .lparen, .lbracket, .lbrace, .slash, .plus, .minus, .tilde, .bang, .lt => true,
@@ -1269,15 +1693,7 @@ pub fn tsAtAsOrSatisfies(s: *State) bool {
 
 /// `import` followed by `x =`: an import alias declaration.
 pub fn tsImportAliasAhead(s: *State) bool {
-    const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
-    defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return false;
-    const first_kind = first.kind;
-    s.lex.freeToken(&first);
-    if (!tsKindIsIdentifierLike(first_kind)) return false;
-    var second = s.lex.next() catch return false;
-    defer s.lex.freeToken(&second);
-    return second.kind == .assign;
+    return tsIdentifierFollowedByAhead(s, .assign);
 }
 
 /// `import x = A.B.C;` lowers to `const x = A.B.C;`. `require(...)` is
@@ -1292,10 +1708,12 @@ pub fn tsParseImportAlias(s: *State, export_decl: bool) Error!void {
     }
     if (!identifiers.isIdentifierLikeToken(s)) return s.failExpectedDescription("entity name");
     if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, alias_atom)) {
-        return s.failUnexpectedToken();
+        return s.failNamed("redeclaration of '{s}'", "redeclaration", alias_atom);
     }
     _ = try declarations.defineVar(s, alias_atom, .const_);
-    try s.emitScopeGetVar(identifiers.identifierLikeAtom(s));
+    // The entity's head is an ordinary reference: a member of an enclosing
+    // namespace (from any of its blocks) reads through the namespace object.
+    try emitIdentifierReference(s, identifiers.identifierLikeAtom(s));
     try s.advance();
     while (s.peekKind() == .dot) {
         try s.advance();
@@ -1352,7 +1770,13 @@ pub fn tsSpecifierTypeModifier(s: *State) bool {
     defer s.lex.freeToken(&second);
     const second_is_as = second.kind == .ident and !second.payload.ident.has_escape and
         identifiers.atomNameEquals(s, second.payload.ident.atom, "as");
-    if (second_is_as) return true; // `{ type as as X }`
+    if (second_is_as) {
+        // `{ type as as X }` is type-only; `{ type as as }` imports `type`
+        // under the local name `as`.
+        var third = s.lex.next() catch return false;
+        defer s.lex.freeToken(&third);
+        return modules.isModuleNameToken(third.kind);
+    }
     if (modules.isModuleNameToken(second.kind)) return false; // `{ type as X }`
     return true; // `{ type as }`
 }
@@ -1415,7 +1839,9 @@ const TsEnumValue = union(enum) {
 
 const TsEnumMember = struct {
     name: Atom,
-    value: TsEnumValue,
+    /// Null for a member computed at run time: a later reference to it is
+    /// not constant, and must not fold to a global of the same name.
+    value: ?TsEnumValue,
 };
 
 fn tsFreeEnumValue(s: *State, value: TsEnumValue) void {
@@ -1433,7 +1859,18 @@ fn tsEnumMemberName(s: *State) Error!Atom {
         try s.advance();
         return atom_id;
     }
-    if (identifiers.isIdentifierLikeToken(s) or k.isKeyword()) {
+    // `["a"]` / `` [`a`] ``: a computed name that is a string literal.
+    if (k == .lbracket) {
+        try s.advance();
+        const is_literal = s.peekKind() == .string or
+            (s.peekKind() == .template and s.token.payload.str.template == .no_substitution and !s.token.payload.str.cooked_invalid);
+        if (!is_literal) return s.failExpectedDescription("string literal enum member name");
+        const atom_id = try s.atoms.internString(s.token.payload.str.bytes);
+        try s.advance();
+        try s.expectToken(.rbracket);
+        return atom_id;
+    }
+    if (k == .ident or k.isKeyword()) {
         const atom_id = identifiers.identifierLikeAtom(s);
         try s.advance();
         return atom_id;
@@ -1476,12 +1913,20 @@ fn tsEnumBinaryPrecedence(k: tok.Kind) ?u8 {
 }
 
 fn tsFoldEnumBinary(s: *State, enum_atom: Atom, members: []const TsEnumMember, min_prec: u8) Error!?TsEnumValue {
+    const first = s.peekKind();
+    var left_is_unary = first == .minus or first == .plus or first == .tilde;
     var left = (try tsFoldEnumUnary(s, enum_atom, members)) orelse return null;
     errdefer tsFreeEnumValue(s, left);
     while (true) {
         const op = s.peekKind();
         const prec = tsEnumBinaryPrecedence(op) orelse return left;
         if (prec < min_prec) return left;
+        // `-a ** b` is a SyntaxError; leave it to the expression parser.
+        if (op == .pow and left_is_unary) {
+            tsFreeEnumValue(s, left);
+            return null;
+        }
+        left_is_unary = false;
         try s.advance();
         // `**` is right-associative; everything else binds left.
         const rhs_min: u8 = if (op == .pow) prec else prec + 1;
@@ -1498,10 +1943,21 @@ fn tsFoldEnumBinary(s: *State, enum_atom: Atom, members: []const TsEnumMember, m
 
 fn tsFoldEnumApply(s: *State, op: tok.Kind, left: TsEnumValue, right: TsEnumValue) Error!?TsEnumValue {
     if (left == .string or right == .string) {
-        if (op != .plus or left != .string or right != .string) return null;
-        const joined = try s.scratch.alloc(u8, left.string.len + right.string.len);
-        @memcpy(joined[0..left.string.len], left.string);
-        @memcpy(joined[left.string.len..], right.string);
+        if (op != .plus) return null;
+        // `+` with a string operand concatenates ToString of the other.
+        var left_buf: [64]u8 = undefined;
+        var right_buf: [64]u8 = undefined;
+        const left_text = switch (left) {
+            .string => |bytes| bytes,
+            .number => |n| number_format.formatNumber(&left_buf, n) catch return null,
+        };
+        const right_text = switch (right) {
+            .string => |bytes| bytes,
+            .number => |n| number_format.formatNumber(&right_buf, n) catch return null,
+        };
+        const joined = try s.scratch.alloc(u8, left_text.len + right_text.len);
+        @memcpy(joined[0..left_text.len], left_text);
+        @memcpy(joined[left_text.len..], right_text);
         return .{ .string = joined };
     }
     const a = left.number;
@@ -1512,7 +1968,7 @@ fn tsFoldEnumApply(s: *State, op: tok.Kind, left: TsEnumValue, right: TsEnumValu
         .star => a * b,
         .slash => a / b,
         .percent => @rem(a, b),
-        .pow => std.math.pow(f64, a, b),
+        .pow => core.number.exponentiate(a, b),
         .pipe => @floatFromInt(tsToInt32(a) | tsToInt32(b)),
         .amp => @floatFromInt(tsToInt32(a) & tsToInt32(b)),
         .caret => @floatFromInt(tsToInt32(a) ^ tsToInt32(b)),
@@ -1585,18 +2041,34 @@ fn tsFoldEnumPrimary(s: *State, enum_atom: Atom, members: []const TsEnumMember) 
     if (identifiers.isIdentifierLikeToken(s)) {
         var name = identifiers.identifierLikeAtom(s);
         try s.advance();
+        var qualified = false;
         if (name == enum_atom and s.peekKind() == .dot) {
             try s.advance();
             if (!identifiers.isIdentifierLikeToken(s) and !s.peekKind().isKeyword()) return null;
             name = identifiers.identifierLikeAtom(s);
             try s.advance();
+            qualified = true;
+        } else if (name == enum_atom and s.peekKind() == .lbracket) {
+            // `E["A"]`
+            try s.advance();
+            if (s.peekKind() != .string) return null;
+            name = try s.atoms.internString(s.token.payload.str.bytes);
+            try s.advance();
+            if (s.peekKind() != .rbracket) return null;
+            try s.advance();
+            qualified = true;
         }
         for (members) |member| {
             if (member.name != name) continue;
-            return switch (member.value) {
+            return switch (member.value orelse return null) {
                 .number => |n| .{ .number = n },
                 .string => |bytes| .{ .string = try s.scratch.dupe(u8, bytes) },
             };
+        }
+        if (!qualified) {
+            const text = s.lex.atoms.name(name) orelse return null;
+            if (std.mem.eql(u8, text, "NaN")) return .{ .number = std.math.nan(f64) };
+            if (std.mem.eql(u8, text, "Infinity")) return .{ .number = std.math.inf(f64) };
         }
         return null;
     }

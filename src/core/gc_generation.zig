@@ -93,7 +93,7 @@ pub const Stats = struct {
     young_at_start_max: usize = 0,
     /// Young objects reachable only from conservative stack/register candidates,
     /// not from the precise root graph. Populated only by
-    /// `ZJS_GC_VERIFY_MINOR=1`, whose full-trace prepass can separate the two
+    /// `ZJS_GC_VERIFY`, whose full-trace prepass can separate the two
     /// root populations without changing the production minor's liveness rule.
     conservative_only_young: usize = 0,
     /// Retirement transactions committed and abandoned. An abandon count
@@ -209,7 +209,7 @@ pub const State = struct {
     }
 
     /// An old owner that now points at a young child. Recorded by owner so a
-    /// minor can re-trace it; see §8.3 on why `tryMark(owner)` would be wrong
+    /// minor can re-trace it; see §8.3 on why `shadeExact(owner)` would be wrong
     /// (a sticky old mark would make the walk skip its children).
     /// Returns true only when the map owns the entry after this call. A
     /// caller may publish a redundant fast-path cache bit from that fact; an
@@ -443,6 +443,10 @@ pub const State = struct {
     pub fn noteMinorPromotion(self: *State, survivors: usize) void {
         self.stats.promoted += survivors;
         self.stats.minor_collections += 1;
+    }
+
+    pub fn isRemembered(self: *const State, header: *const gc.Header) bool {
+        return self.remembered.contains(@intFromPtr(header));
     }
 
     pub fn rememberedIterator(self: *const State) std.AutoHashMapUnmanaged(usize, void).KeyIterator {

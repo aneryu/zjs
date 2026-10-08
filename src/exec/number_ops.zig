@@ -10,22 +10,15 @@ const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const coercion_ops = @import("value_ops.zig");
-const exceptions = @import("exception_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const value_ops = @import("value_ops.zig");
 
-const HostError = exceptions.HostError;
+const HostError = exception_ops.HostError;
 
-/// Pure ASCII -> f64 parse primitives now live in `core/number.zig`; re-export
-/// them here so the existing install/dispatch path keeps a single import
-/// surface. The realm-coercing record handler (`numberCall`) and the
-/// `Number.prototype.*` formatters below still own the VM-touching logic.
-pub const parseIntValue = core.number.parseIntValue;
-pub const parseFloatValue = core.number.parseFloatValue;
-pub const parseIntLatin1Bytes = core.number.parseIntLatin1Bytes;
-pub const parseFloatLatin1Bytes = core.number.parseFloatLatin1Bytes;
+// Pure ASCII -> f64 parse primitives live in `core/number.zig`.
+const parseIntValue = core.number.parseIntValue;
+const parseFloatValue = core.number.parseFloatValue;
 
 pub const StaticMethod = core.host_function.builtin_method_ids.number.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.number.PrototypeMethod;
@@ -52,8 +45,7 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// Declaration table: one entry per `Number.*` static, the four global
 /// number functions, and the `Number.prototype.*` methods. `id` is the
 /// `StaticMethod`/`PrototypeMethod` enum value, reused as the dispatch
-/// `magic`. All share `numberCall`, which mirrors the legacy
-/// `callNumberNativeFunctionRecord` dispatch. Static parse helpers and the
+/// `magic`. All share `numberCall`. Static parse helpers and the
 /// realm-coercing prototype/parse paths reach exec VM ops through
 /// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
 /// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
@@ -62,6 +54,8 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float)),
     numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan)),
     numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite)),
+    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.global_is_nan)),
+    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.global_is_finite)),
     numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer)),
     numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer)),
     numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string)),
@@ -82,8 +76,7 @@ fn numberEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
     };
 }
 
-/// Shared record handler for the `.number` domain. Replicates the legacy
-/// `callNumberNativeFunctionRecord` dispatch verbatim: realm parse/predicate
+/// Shared record handler for the `.number` domain: realm parse/predicate
 /// and prototype methods take the VM-coercing exec ops, the bare-runtime
 /// `parse*` fall back to the primitive-only path, and the integer predicates
 /// stay self-contained.
@@ -120,12 +113,16 @@ fn numberCall(
             return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
         },
         @intFromEnum(StaticMethod.is_nan) => {
-            const global = call_global orelse return error.TypeError;
-            return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return core.JSValue.boolean(value.isNumber() and std.math.isNan(value_ops.numberValue(value).?));
         },
         @intFromEnum(StaticMethod.is_finite) => {
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return core.JSValue.boolean(value.isNumber() and std.math.isFinite(value_ops.numberValue(value).?));
+        },
+        @intFromEnum(StaticMethod.global_is_nan), @intFromEnum(StaticMethod.global_is_finite) => {
             const global = call_global orelse return error.TypeError;
-            return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
+            return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, args, id == @intFromEnum(StaticMethod.global_is_nan));
         },
         @intFromEnum(StaticMethod.is_integer) => {
             const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -134,7 +131,7 @@ fn numberCall(
         @intFromEnum(StaticMethod.is_safe_integer) => {
             const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             if (!numberIsInteger(value)) return core.JSValue.boolean(false);
-            const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
+            const number = value_ops.numberValue(value).?;
             return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
         },
         @intFromEnum(PrototypeMethod.to_string),
@@ -154,10 +151,7 @@ fn numberCall(
 /// method body. Coerces the receiver to a number primitive and the optional
 /// digits argument through the VM ToNumber path, then dispatches to the pure
 /// formatters below; receiver/range failures map to the spec error messages.
-/// `id` is a `PrototypeMethod` enum value. This is a builtin method body (it
-/// reaches the VM coercion/exception ops), so exec routes here through the
-/// record table (`object_ops.numberPrototypeMethod` ->
-/// `builtin_dispatch.callInternalRecord`) instead of naming it directly.
+/// `id` is a `PrototypeMethod` enum value.
 fn numberPrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -167,13 +161,13 @@ fn numberPrototypeMethod(
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     const rt = ctx.runtime;
-    const primitive = object_ops.primitivePrototypeThisValue(rt, this_value, 1) catch |err| switch (err) {
+    const primitive = object_ops.primitivePrototypeThisValue(this_value, 1) catch |err| switch (err) {
         error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a number"),
     };
     const coerced_arg: ?core.JSValue = if (id == @intFromEnum(PrototypeMethod.to_locale_string))
         null
     else
-        try coercion_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
+        try value_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args);
     var coerced_storage: [1]core.JSValue = undefined;
     const method_args = if (coerced_arg) |value| blk: {
         coerced_storage[0] = value;
@@ -216,11 +210,8 @@ pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const 
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
     const fraction_arg_undefined = args.len == 0 or args[0].is(.undefined_value);
     var fraction_digits = try integerDigitsArgument(rt, args, 0);
-    if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
-    const format: dtoa.Format = if (fraction_arg_undefined) format: {
-        fraction_digits = 0;
-        break :format .free;
-    } else format: {
+    if (!std.math.isFinite(number)) return numberStringValue(rt, number);
+    const format: dtoa.Format = if (fraction_arg_undefined) .free else format: {
         if (fraction_digits < 0 or fraction_digits > 100) return error.RangeError;
         fraction_digits += 1;
         break :format .fixed;
@@ -232,12 +223,12 @@ pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
     if (args.len == 0 or args[0].is(.undefined_value)) return numberStringValue(rt, number);
     const precision = try integerDigitsArgument(rt, args, 0);
-    if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
+    if (!std.math.isFinite(number)) return numberStringValue(rt, number);
     if (precision < 1 or precision > 100) return error.RangeError;
     return dtoaStringValue(rt, number, precision, .{ .format = .fixed });
 }
 
-pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
     // qjs js_number_toString uses js_get_radix → JS_ToInt32Sat
     // (qjs:44953 / JS_ToInt32SatFree qjs:13125) BEFORE the 2..36 range check.
@@ -246,12 +237,7 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     const radix = try integerDigitsArgument(rt, args, 10);
     if (radix < 2 or radix > 36) return error.InvalidRadix;
 
-    if (radix == 10 or !std.math.isFinite(number) or std.math.isNan(number)) {
-        var buffer: [64]u8 = undefined;
-        const text = toString(&buffer, number) catch unreachable;
-        const string = try core.string.String.createAscii(rt, text);
-        return string.value();
-    }
+    if (radix == 10 or !std.math.isFinite(number)) return numberStringValue(rt, number);
 
     // qjs js_number_toString -> js_dtoa2(d, base, 0, JS_DTOA_FORMAT_FREE |
     // JS_DTOA_EXP_DISABLED). The same faithful js_dtoa port
@@ -286,7 +272,8 @@ fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, options: dto
 
 fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, default: i32) !i32 {
     if (args.len == 0 or args[0].is(.undefined_value)) return default;
-    if (args[0].is(.symbol) or args[0].isBigInt()) return error.TypeError;
+    if (args[0].is(.symbol)) return error.SymbolToNumber;
+    if (args[0].isBigInt()) return error.BigIntToNumber;
     const number = try core.number.toNumber(rt, args[0]);
     if (std.math.isNan(number) or number == 0) return 0;
     if (!std.math.isFinite(number)) return if (number < 0) std.math.minInt(i32) else std.math.maxInt(i32);

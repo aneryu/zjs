@@ -1,7 +1,6 @@
 //! Unified parse entry for compiler tests.
 
 const std = @import("std");
-const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
 

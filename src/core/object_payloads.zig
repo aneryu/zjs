@@ -45,6 +45,8 @@ pub const FinalizationRegistryCellState = enum(u8) {
     active,
     pending_enqueue,
     queued,
+    /// Unregistered or cleaned up: already destroyed, awaiting compaction.
+    removed,
 };
 
 pub const FinalizationRegistryCell = struct {
@@ -52,6 +54,10 @@ pub const FinalizationRegistryCell = struct {
     held_value: JSValue = JSValue.undefinedValue(),
     unregister_token_identity: ?usize = null,
     state: FinalizationRegistryCellState = .active,
+    /// Names the cell to its cleanup job: a queued cell stays in `cells`
+    /// (its target identity released) until the job takes it, so
+    /// `unregister` can still remove it and cancel the callback (§9.13).
+    id: u32 = 0,
 
     pub fn isActive(self: FinalizationRegistryCell) bool {
         return self.state == .active;
@@ -76,14 +82,6 @@ pub const FinalizationRegistryCell = struct {
         }
     }
 };
-
-/// TGC S4-c: the collector header of a subordinate `.payload` cell -- the
-/// variable-length slice an a-class payload owns. Only valid where the owning
-/// payload says the slice names a cell (a non-zero capacity, or a non-empty
-/// fixed slice); the empty slice is a sentinel, not an allocation.
-pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.Header {
-    return @ptrCast(@alignCast(ptr));
-}
 
 /// Close and release the frame-owned references in an open-var-ref window.
 /// The window itself belongs to the surrounding frame slab.
@@ -227,7 +225,7 @@ pub const IteratorPayload = struct {
     zip_alive: usize = 0,
     kind: u8 = 0,
     zip_mode: u8 = 0,
-    zip_state: u8 = 0,
+    helper_state: u8 = 0,
     executing: bool = false,
     /// Set while this Map/Set iterator holds a cursor on `target`'s entry
     /// array. Taken on the first advance and dropped on exhaustion or
@@ -289,6 +287,16 @@ pub const CollectionPayload = struct {
     /// tombstones can be compacted away, which is what
     /// `map_delete_record_internal` does when `--ref_count == 0`.
     live_cursors: usize = 0,
+    /// Parked Map/Set iterator cursors (a subset of the pins above). They
+    /// hold logical positions, `entries_base` + physical index, so a run of
+    /// tombstones at the front can be trimmed under them: every trimmed slot
+    /// was already deleted, which an iterator skips anyway.
+    iterator_cursors: usize = 0,
+    /// Logical position of the physical entry 0.
+    entries_base: usize = 0,
+    /// Physical index of the first live entry, or the entry count when none
+    /// is live: the leading tombstone run a trim can drop.
+    leading_tombstones: usize = 0,
     /// Set when tracing relocated a strong key. Object keys hash by address,
     /// so their stored hashes and bucket chains are stale until the next
     /// lookup relinks the index. Rollback restoring the old addresses only
@@ -342,11 +350,13 @@ pub const SharedBufferStore = struct {
         const allocator = std.heap.page_allocator;
         const store = try allocator.create(SharedBufferStore);
         errdefer allocator.destroy(store);
-        const bytes = try allocator.alloc(u8, byte_length);
-        errdefer allocator.free(bytes);
+        // Raw page mappings: the OS zero-fills them, and `Allocator.alloc`'s
+        // safety-build poison write would commit every page of a growable
+        // buffer's maxByteLength reservation up front.
+        const bytes: []u8 = if (byte_length == 0) &.{} else (allocator.rawAlloc(byte_length, .of(u8), @returnAddress()) orelse return error.OutOfMemory)[0..byte_length];
+        errdefer if (bytes.len != 0) allocator.rawFree(bytes, .of(u8), @returnAddress());
         var external_memory = try rt.reportExternalAlloc(byte_length);
         errdefer external_memory.release();
-        @memset(bytes, 0);
         store.* = .{
             .ref_count = .init(1),
             .bytes = bytes,
@@ -392,8 +402,8 @@ pub const SharedBufferStore = struct {
         self.external_context = null;
         if (external_deinit) |deinit_fn| {
             deinit_fn(external_context, bytes);
-        } else {
-            allocator.free(bytes);
+        } else if (bytes.len != 0) {
+            allocator.rawFree(bytes, .of(u8), @returnAddress());
         }
         allocator.destroy(self);
     }
@@ -412,7 +422,6 @@ pub const BufferPayload = struct {
     external_deinit: ?ExternalByteStorageDeinit = null,
     external_context: ?*anyopaque = null,
     detached: bool = false,
-    immutable: bool = false,
     max_byte_length: ?usize = null,
     first_view: ?*TypedArrayPayload = null,
 
@@ -494,7 +503,7 @@ pub const BufferPayload = struct {
         view.clearLiveState();
     }
 
-    fn invalidateViews(self: *BufferPayload) void {
+    pub fn invalidateViews(self: *BufferPayload) void {
         var current = self.first_view;
         while (current) |view| : (current = view.buffer_next) {
             view.clearLiveState();
@@ -644,6 +653,10 @@ pub const BoundFunctionPayload = struct {
 pub const ProxyPayload = struct {
     target: ?JSValue = null,
     handler: ?JSValue = null,
+    /// ProxyCreate (§10.5.14) gives the proxy [[Call]] / [[Construct]] exactly
+    /// when its target has them; fixed at creation, kept after revocation.
+    is_callable: bool = false,
+    is_constructor: bool = false,
 
     pub const gc_edges: gc_visit.Edges = .{ .strong = &.{ "target", "handler" } };
 
@@ -732,12 +745,100 @@ pub const FinalizationRegistryPayload = struct {
     /// to a different Realm when the job invokes it.
     realm: context_mod.RealmRef = .{},
     weak_holder_link: WeakReferenceHolderLink = .{},
+    next_cell_id: u32 = 0,
+    /// Unregister token identity -> the id of a cell registered with it, so
+    /// `unregister` need not scan. A token shared by several cells falls back
+    /// to a scan. An entry may outlive its cell; it goes when the token dies.
+    token_cells: std.AutoHashMapUnmanaged(usize, TokenCell) = .empty,
+    token_cell_removals: usize = 0,
+    /// `.removed` cells not yet compacted out of `cells`.
+    removed_cells: usize = 0,
+
+    pub const TokenCell = struct {
+        id: u32,
+        shared: bool = false,
+    };
 
     pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
         self.realm.deinit();
         for (self.cells.items) |entry| entry.destroy(rt);
         self.cells.deinit(rt.nativeAllocator());
+        self.token_cells.deinit(rt.nativeAllocator());
         self.* = .{};
+    }
+
+    /// Cells are appended in id order and every removal keeps that order, so
+    /// a cell is found by binary search on its id relative to the first
+    /// cell's (ids wrap).
+    pub fn findCell(self: *const FinalizationRegistryPayload, id: u32) ?usize {
+        const cells = self.cells.items;
+        if (cells.len == 0) return null;
+        const base = cells[0].id;
+        const target = id -% base;
+        var low: usize = 0;
+        var high = cells.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (cells[mid].id -% base < target) low = mid + 1 else high = mid;
+        }
+        if (low < cells.len and cells[low].id == id) return low;
+        return null;
+    }
+
+    /// Destroy the cell at `index`, leaving a tombstone. Allocation-free.
+    pub fn removeCellAt(self: *FinalizationRegistryPayload, rt: *JSRuntime, index: usize) void {
+        const cell = &self.cells.items[index];
+        std.debug.assert(cell.state != .removed);
+        cell.destroy(rt);
+        cell.* = .{ .state = .removed, .id = cell.id };
+        self.removed_cells += 1;
+        const len = self.cells.items.len;
+        if (self.removed_cells == len or (self.removed_cells >= 32 and self.removed_cells * 2 >= len)) {
+            self.compactRemovedCells();
+        }
+    }
+
+    /// Drop every tombstone, preserving order.
+    pub fn compactRemovedCells(self: *FinalizationRegistryPayload) void {
+        var write_index: usize = 0;
+        for (self.cells.items) |cell| {
+            if (cell.state == .removed) continue;
+            self.cells.items[write_index] = cell;
+            write_index += 1;
+        }
+        self.cells.shrinkRetainingCapacity(write_index);
+        self.removed_cells = 0;
+    }
+
+    /// Record that the cell `id` was registered with `token`.
+    pub fn indexTokenCell(self: *FinalizationRegistryPayload, rt: *JSRuntime, token: usize, id: u32) !void {
+        const entry = try self.token_cells.getOrPut(rt.nativeAllocator(), token);
+        if (entry.found_existing and !entry.value_ptr.shared and self.liveTokenCell(token, entry.value_ptr.id) != null) {
+            entry.value_ptr.shared = true;
+            return;
+        }
+        if (!entry.found_existing or !entry.value_ptr.shared) entry.value_ptr.* = .{ .id = id };
+    }
+
+    /// The index of cell `id` if it is still registered with `token` and not
+    /// yet removed.
+    pub fn liveTokenCell(self: *const FinalizationRegistryPayload, token: usize, id: u32) ?usize {
+        const index = self.findCell(id) orelse return null;
+        const cell = self.cells.items[index];
+        if (cell.state == .removed or cell.unregister_token_identity != token) return null;
+        return index;
+    }
+
+    /// Forget `token`. Allocation-free; rehashes once removals have left
+    /// enough tombstones, as a std hash map never regrows on its own.
+    pub fn dropTokenCell(self: *FinalizationRegistryPayload, token: usize) ?TokenCell {
+        const removed = self.token_cells.fetchRemove(token) orelse return null;
+        self.token_cell_removals += 1;
+        if (self.token_cell_removals * 4 >= self.token_cells.capacity()) {
+            self.token_cell_removals = 0;
+            if (self.token_cells.capacity() != 0) self.token_cells.rehash(std.hash_map.AutoContext(usize){});
+        }
+        return removed.value;
     }
 
     pub const gc_edges: gc_visit.Edges = .{
@@ -787,6 +888,8 @@ pub const DisposableStackPayload = struct {
     resources: []DisposableResource = &.{},
     resource_capacity: usize = 0,
     disposed: bool = false,
+    /// DisposeResources' hasAwaited, kept across the async continuation.
+    async_dispose_has_awaited: bool = false,
     async_dispose_resolve: ?JSValue = null,
     async_dispose_reject: ?JSValue = null,
     async_dispose_error: ?JSValue = null,
@@ -858,8 +961,6 @@ pub const RealmRecordPayload = struct {
 
 pub const PromisePayload = struct {
     result: ?JSValue = null,
-    reaction_callback: ?JSValue = null,
-    reaction_arg: ?JSValue = null,
     /// Live prefix of the subscriber list. qjs threads reaction records onto
     /// the promise with `list_add_tail`, so a pending
     /// promise absorbs N subscribers in O(N); `reactions_capacity` describes
@@ -868,10 +969,11 @@ pub const PromisePayload = struct {
     reactions: []JSValue = &.{},
     reactions_capacity: usize = 0,
     is_rejected: bool = false,
-    atomics_wait_async: bool = false,
+    /// This promise has a live entry in its realm's unhandled-rejection list.
+    unhandled_tracked: bool = false,
 
     pub const gc_edges: gc_visit.Edges = .{
-        .strong = &.{ "result", "reaction_callback", "reaction_arg" },
+        .strong = &.{"result"},
         .manual = &.{"reactions"},
     };
 
@@ -891,7 +993,6 @@ pub const PromisePayload = struct {
 };
 
 pub const ArrayBuiltinMarker = property.ArrayBuiltinMarker;
-pub const TypedArrayBuiltinMarker = property.TypedArrayBuiltinMarker;
 
 pub const RegExpLegacyStatics = struct {
     input: ?JSValue = null,
@@ -914,22 +1015,12 @@ pub const FunctionRarePayload = struct {
     source: ?JSValue = null,
     internal_callable_tag: host_function.InternalCallableTag = .none,
     array_builtin_marker: ArrayBuiltinMarker = .none,
-    typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
-    array_iterator_kind: u8 = 0,
-    iterator_identity: bool = false,
     array_iterator_next: bool = false,
     generator_next: bool = false,
     throw_type_error_intrinsic: bool = false,
-    async_iterator_async_dispose: bool = false,
-    async_generator_method: bool = false,
-    iterator_helper_method: u8 = 0,
-    async_from_sync_iterator_method: u8 = 0,
-    disposable_stack_method: u8 = 0,
-    async_disposable_stack_method: u8 = 0,
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
     typed_array_element_size: u32 = 0,
     typed_array_kind: typed_array_names.Kind = .none,
-    iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     realm_global: ?JSValue = null,
     proxy_revoke_target: ?JSValue = null,
@@ -996,6 +1087,7 @@ pub const FunctionPayload = struct {
         native_dispatch_name: atom.Atom = atom.null_atom,
         typed_array_element_size: u32 = 0,
         typed_array_kind: typed_array_names.Kind = .none,
+        constructor_kind: host_function.NativeConstructorKind = .none,
     };
 
     // Bytecode functions use Object.u.bytecode_function directly, so this

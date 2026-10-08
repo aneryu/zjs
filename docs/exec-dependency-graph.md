@@ -298,8 +298,8 @@ Object / value: `object_ops.zig`, `property_ops.zig`, `array_ops.zig`,
 `exception_ops.zig`.
 
 Domains: `promise_ops.zig`, `function_ops.zig`, `collection_ops.zig`,
-`reflect_ops.zig`, `regexp_ops.zig`, `buffer_ops.zig`, `atomics_ops.zig`,
-`date_ops.zig`, `json_ops.zig`, `math_ops.zig`, `number_ops.zig`,
+`reflect_ops.zig`, `regexp_ops.zig`, `buffer_ops.zig`, `uint8array_codec.zig`,
+`atomics_ops.zig`, `date_ops.zig`, `json_ops.zig`, `math_ops.zig`, `number_ops.zig`,
 `uri_ops.zig`, `disposable_ops.zig`, `builtin_glue.zig`.
 
 Bootstrap: `standard_globals.zig`, `internal_builtins.zig`,

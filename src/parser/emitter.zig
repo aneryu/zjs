@@ -1,7 +1,6 @@
 //! The `Emitter` facade over the Builder, control-flow frames, break/continue/return/finally lowering, and using-declaration cleanup.
 
 const std = @import("std");
-const root = @import("../parser.zig");
 const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
 const core = @import("../core/root.zig");
@@ -12,14 +11,8 @@ const opcode = bytecode.opcode;
 const Atom = atom_module.Atom;
 const parse_state = @import("parse_state.zig");
 const declarations = @import("declarations.zig");
-const identifiers = @import("identifiers.zig");
-const lookahead = @import("lookahead.zig");
-const expressions = @import("expressions.zig");
 const statements = @import("statements.zig");
 const functions = @import("functions.zig");
-const classes = @import("classes.zig");
-const modules = @import("modules.zig");
-const typescript = @import("typescript.zig");
 const atom_this = parse_state.atom_this;
 const shared_iterator_close_marker = parse_state.shared_iterator_close_marker;
 const direct_iterator_close_marker = parse_state.direct_iterator_close_marker;
@@ -48,53 +41,6 @@ fn builderAddSourceMarker(s: *State, line_num: u32, col_num: u32) Error!void {
             previous.col == @as(i32, @intCast(col_num))) return;
     }
     try v2b.addSourceMarker(@intCast(line_num), @intCast(col_num));
-}
-
-/// QuickJS-style plain opcode emission: grammar productions add source
-/// markers explicitly; `emit_op()` itself is source-less.
-fn builderEmitOp(s: *State, op_id: u8) Error!void {
-    try s.activeBuilder().emitOp(op_id);
-}
-
-/// Source-less immediate emitters, matching QuickJS emit_op + emit_u*.
-fn builderEmitOpU8(s: *State, op_id: u8, val: u8) Error!void {
-    try s.activeBuilder().emitOpU8(op_id, val);
-}
-
-fn builderEmitOpU16(s: *State, op_id: u8, val: u16) Error!void {
-    try s.activeBuilder().emitOpU16(op_id, val);
-}
-
-fn builderEmitOpU32(s: *State, op_id: u8, val: u32) Error!void {
-    try s.activeBuilder().emitOpU32(op_id, val);
-}
-
-fn builderEmitOpI32(s: *State, op_id: u8, val: i32) Error!void {
-    try s.activeBuilder().emitOpI32(op_id, val);
-}
-
-/// Source-less owned-atom emission. The grammar site owns any source
-/// marker; the Builder sink owns `atom_id` on every outcome.
-fn builderEmitAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
-    try s.activeBuilder().emitAtomOpOwned(op_id, atom_id);
-}
-
-fn builderEmitAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
-    try s.activeBuilder().emitAtomOpU8Owned(op_id, atom_id, val);
-}
-
-fn builderEmitAtomOpU16Owned(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-    try s.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val);
-}
-
-/// QuickJS `emit_goto()` is source-less. The LabelId operand remains
-/// pending until resolve_labels.
-fn builderEmitJump(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
-    try s.activeBuilder().emitJump(op_id, label);
-}
-
-fn builderNewLabel(s: *State) Error!compiler.LabelId {
-    return s.activeBuilder().newLabel();
 }
 
 /// Bind `label` at the current v2 position. A bound label is a
@@ -140,10 +86,10 @@ fn builderBindParserLabel(s: *State, label: compiler.LabelId) Error!void {
 /// marker with its Stage-4 match barrier.
 pub const Emitter = struct {
     pub fn newLabel(s: *State) Error!compiler.LabelId {
-        return builderNewLabel(s);
+        return s.activeBuilder().newLabel();
     }
     pub fn jump(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
-        try builderEmitJump(s, op_id, label);
+        try s.activeBuilder().emitJump(op_id, label);
     }
     pub fn jumpNoSource(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
         return jump(s, op_id, label);
@@ -161,13 +107,13 @@ pub const Emitter = struct {
         try s.activeBuilder().bindLabelMatchBarrier(label);
     }
     /// Redirect a pending jump to a boundary bound elsewhere. Emits nothing
-    /// and keeps the last opcode: no merge happens here (qjs patchJumpTarget).
+    /// and keeps the last opcode: no merge happens here.
     pub fn retargetLabel(s: *State, from: compiler.LabelId, to: compiler.LabelId) Error!void {
         try s.activeBuilder().retargetLabelRefs(from, to);
     }
 
     pub noinline fn op(s: *State, op_id: u8) Error!void {
-        try builderEmitOp(s, op_id);
+        try s.activeBuilder().emitOp(op_id);
     }
     pub inline fn opNoSource(s: *State, op_id: u8) Error!void {
         return op(s, op_id);
@@ -178,7 +124,7 @@ pub const Emitter = struct {
         return op(s, op_id);
     }
     pub fn opU8(s: *State, op_id: u8, val: u8) Error!void {
-        try builderEmitOpU8(s, op_id, val);
+        try s.activeBuilder().emitOpU8(op_id, val);
     }
     /// Cold-plane carrier opcode plus its sub byte; the demoted opcode had
     /// no source marker of its own.
@@ -186,7 +132,7 @@ pub const Emitter = struct {
         try s.activeBuilder().emitOpU8(op_id, val);
     }
     pub noinline fn opU16(s: *State, op_id: u8, val: u16) Error!void {
-        try builderEmitOpU16(s, op_id, val);
+        try s.activeBuilder().emitOpU16(op_id, val);
     }
     pub inline fn opU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
         return opU16(s, op_id, val);
@@ -206,26 +152,26 @@ pub const Emitter = struct {
         try s.activeBuilder().emitOpU16(op_id, argc);
     }
     pub fn opU32(s: *State, op_id: u8, val: u32) Error!void {
-        try builderEmitOpU32(s, op_id, val);
+        try s.activeBuilder().emitOpU32(op_id, val);
     }
     pub fn opU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
         try s.activeBuilder().emitOpU32(op_id, val);
     }
     /// QuickJS emits the signed literal payload directly after OP_push_i32
     pub fn opI32(s: *State, op_id: u8, val: i32) Error!void {
-        try builderEmitOpI32(s, op_id, val);
+        try s.activeBuilder().emitOpI32(op_id, val);
     }
     pub fn opAtom(s: *State, op_id: u8, atom_id: Atom) Error!void {
-        try builderEmitAtomOpOwned(s, op_id, atom_id);
+        try s.activeBuilder().emitAtomOpOwned(op_id, atom_id);
     }
     pub fn opAtomNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
         try s.activeBuilder().emitAtomOpOwned(op_id, atom_id);
     }
     pub fn opAtomU8(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
-        try builderEmitAtomOpU8Owned(s, op_id, atom_id, val);
+        try s.activeBuilder().emitAtomOpU8Owned(op_id, atom_id, val);
     }
     pub inline fn opAtomU16(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-        return builderEmitAtomOpU16Owned(s, op_id, atom_id, val);
+        return s.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val);
     }
     pub fn opAtomU16NoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
         try s.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val);
@@ -236,8 +182,8 @@ pub const Emitter = struct {
         try s.activeBuilder().emitScopeRefOpOwned(op_id, atom_id, label, scope);
     }
     /// Publish the placeholder instruction first, then append the value and
-    /// patch its cpool index: QuickJS emit_push_const ordering
-    ///, and a Builder rollback removes the
+    /// patch its cpool index: QuickJS emit_push_const ordering,
+    /// and a Builder rollback removes the
     /// instruction if the cpool grow fails.
     pub noinline fn pushConst(s: *State, value: JSValue) Error!void {
         const v2b = s.activeBuilder();
@@ -313,6 +259,7 @@ pub const ControlBlockOptions = struct {
     /// Stack values a `break` out of this frame must drop.
     drop_count: i32 = 0,
     has_iterator: bool = false,
+    is_async_iterator: bool = false,
 };
 
 pub fn pushControlBlock(s: *State, block: *BlockEnv, options: ControlBlockOptions) void {
@@ -325,6 +272,7 @@ pub fn pushControlBlock(s: *State, block: *BlockEnv, options: ControlBlockOption
         .scope_level = options.scope_level,
         .catch_marker_depth = s.active_catch_marker_depth,
         .has_iterator = options.has_iterator,
+        .is_async_iterator = options.is_async_iterator,
         .is_regular_stmt = options.is_regular_stmt,
     };
     s.top_break = block;
@@ -352,7 +300,8 @@ fn emitUnlabelledBreakCleanup(s: *State, cleanup_drops: u8) Error!void {
 }
 
 fn emitCrossFrameCleanup(s: *State, cleanup_drops: u8) Error!void {
-    if (cleanup_drops == shared_iterator_close_marker or cleanup_drops == direct_iterator_close_marker) {
+    if (cleanup_drops == shared_iterator_close_marker) return emitAsyncIteratorClose(s);
+    if (cleanup_drops == direct_iterator_close_marker) {
         try Emitter.opNoSource(s, opcode.op.iterator_close);
         return;
     }
@@ -360,6 +309,36 @@ fn emitCrossFrameCleanup(s: *State, cleanup_drops: u8) Error!void {
     while (remaining > 0) : (remaining -= 1) {
         try Emitter.opNoSource(s, opcode.op.drop);
     }
+}
+
+/// AsyncIteratorClose (§7.4.13) for a normal completion leaving `for await`:
+/// consumes the loop's `iterator, next, catch offset` slots, calls
+/// `iterator.return()`, awaits the result and requires an Object. A loop that
+/// ran to completion has already cleared its iterator slot, so nothing is
+/// called then.
+pub fn emitAsyncIteratorClose(s: *State) Error!void {
+    const return_atom = atom_module.predefinedId("return", .string) orelse return Error.ParserInvariant;
+    try Emitter.opNoSource(s, opcode.op.undefined);
+    try Emitter.opNoSource(s, opcode.op.nip_catch);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    const closed = try Emitter.newLabel(s);
+    try Emitter.opNoSource(s, opcode.op.dup);
+    try Emitter.opNoSource(s, opcode.op.is_undefined_or_null);
+    try Emitter.jumpNoSource(s, opcode.op.if_true, closed);
+    try Emitter.opAtomNoSource(s, opcode.op.get_field2, return_atom);
+    try Emitter.opNoSource(s, opcode.op.dup);
+    try Emitter.opNoSource(s, opcode.op.is_undefined_or_null);
+    const no_return = try Emitter.newLabel(s);
+    try Emitter.jumpNoSource(s, opcode.op.if_true, no_return);
+    try Emitter.callOp(s, opcode.op.call_method, 0);
+    try Emitter.opNoSource(s, opcode.op.await);
+    try Emitter.opNoSource(s, opcode.op.iterator_check_object);
+    try Emitter.jumpNoSource(s, opcode.op.goto, closed);
+    try Emitter.bind(s, no_return);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.bind(s, closed);
+    try Emitter.opNoSource(s, opcode.op.drop);
 }
 
 fn emitCatchMarkerDropsFromDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
@@ -406,16 +385,12 @@ pub fn leaveSwitchContinueCleanup(s: *State) void {
     }
 }
 
-/// qjs js_is_live_code over the temp stream:
-/// get_prev_opcode is
-/// Builder.last_opcode_pos (every emitterBindLabel invalidated it, so any merge
-/// bound at the current end already answers live, exactly like qjs OP_label
-/// being the visible prev opcode). The ref_count scan covers raw binds
-/// (emitterBindLabelRaw keeps call/delete provenance): a referenced label BOUND
-/// exactly at the current end is an incoming edge (the legacy
-/// max_absolute_target >= tail_start answer). Labels not yet bound are
-/// future handler/exit targets and are NOT incoming edges — the twin of the
-/// legacy tagged-parser-label exclusion.
+/// qjs js_is_live_code over the temp stream: get_prev_opcode is
+/// Builder.last_opcode_pos (every label bind invalidates it, so any merge
+/// bound at the current end already answers live, like qjs OP_label being
+/// the visible prev opcode). A referenced label bound exactly at the current
+/// end is an incoming edge. Labels not yet bound are future handler/exit
+/// targets and are NOT incoming edges.
 pub fn isLiveCode(s: *State) bool {
     const v2b = s.activeBuilder();
     const live = blk: {
@@ -435,12 +410,7 @@ pub fn isLiveCode(s: *State) bool {
         };
     };
     if (live) return true;
-    var label_index: u32 = 0;
-    while (label_index < v2b.label_len) : (label_index += 1) {
-        const slot = v2b.label_slots[label_index];
-        if (slot.flags.bound and slot.bound_offset == v2b.code_len and slot.ref_count > 0) return true;
-    }
-    return false;
+    return v2b.hasReferencedBindAt(v2b.code_len);
 }
 
 /// TEST HOOK: the script/plain-function epilogue tail (decision +
@@ -876,7 +846,11 @@ fn emitResolvedControlJump(
 fn emitCrossedControlBlockCleanup(s: *State, block: *const BlockEnv) Error!void {
     var dropped: i32 = 0;
     if (block.has_iterator) {
-        try Emitter.opNoSource(s, opcode.op.iterator_close);
+        if (block.is_async_iterator) {
+            try emitAsyncIteratorClose(s);
+        } else {
+            try Emitter.opNoSource(s, opcode.op.iterator_close);
+        }
         dropped = 3;
     }
     while (dropped < block.drop_count) : (dropped += 1) {

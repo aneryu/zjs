@@ -309,7 +309,6 @@ pub const GeneratorExecutionState = struct {
     // 160-byte slab class as its qjs-style field set.
     this_value: JSValue = JSValue.undefinedValue(),
     current_function: JSValue = JSValue.undefinedValue(),
-    yield_star_iterator: JSValue = JSValue.undefinedValue(),
     /// qjs JSAsyncFunctionState.argc. Once parameter initialization parks the
     /// resident frame, the separate input slice is gone; this scalar preserves
     /// mapped/unmapped `arguments` actual-count semantics on resume.
@@ -417,7 +416,7 @@ pub fn createGeneratorExecutionStateWithStorage(rt: *JSRuntime, stack_slots: usi
     const total_slots = try std.math.add(usize, stack_slots, frame_slots);
     const slot_bytes = try std.math.mul(usize, total_slots, @sizeOf(JSValue));
     const allocation_size = try std.math.add(usize, generator_execution_storage_offset, slot_bytes);
-    const bytes = try rt.allocRuntimeAlignedBytes(allocation_size, generator_execution_alignment);
+    const bytes = try rt.allocNativeAlignedBytes(allocation_size, generator_execution_alignment);
     const execution: *GeneratorExecutionState = @ptrCast(@alignCast(bytes.ptr));
     execution.* = .{
         .combined_stack_slots = stack_slot_count,
@@ -502,7 +501,6 @@ pub const GeneratorPayload = struct {
                 }
             }
             try gc_visit.value(visitor, &execution.current_function);
-            try gc_visit.value(visitor, &execution.yield_star_iterator);
         }
         try gc_visit.optionalValue(visitor, &self.async_promise);
         // Async-generator request queue values (mirrors

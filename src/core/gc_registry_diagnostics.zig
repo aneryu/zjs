@@ -20,9 +20,7 @@ const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
 const object = @import("object.zig");
 const shape = @import("shape.zig");
-const string = @import("string.zig");
 const class = @import("class.zig");
-const var_ref = @import("var_ref.zig");
 const registry_lists = @import("gc_registry_lists.zig");
 const property = @import("property.zig");
 const representation = @import("gc_representation_constants.zig");
@@ -49,7 +47,6 @@ const trace_object_shape_summary_mask = gc.trace_object_shape_summary_mask;
 const metadata_prefix_size = gc.metadata_prefix_size;
 const headerCondemned = gc.headerCondemned;
 const kindIsBlockCellKind = gc.kindIsBlockCellKind;
-const CarrierStateMask = gc.CarrierStateMask;
 const BlockHeapMod = @import("gc_block_heap.zig");
 const HeapAccountingOracle = gc.HeapAccountingOracle;
 const AllocationHandle = gc.AllocationHandle;
@@ -115,7 +112,7 @@ fn deriveHeapSpaceSnapshot(self: *const Registry, rt: *const JSRuntime) HeapSpac
 
 pub fn counterSnapshot(self: *const Registry, rt: *const JSRuntime) Stats {
     return .{
-        .peak_allocated_bytes = if (native_alloc.diagnostic_accounting_enabled) rt.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) + @sizeOf(Registry) + @sizeOf(@import("atom.zig").AtomTable) + @sizeOf(class.Table) + @sizeOf(shape.Registry) else 0,
+        .peak_allocated_bytes = if (native_alloc.diagnostic_accounting_enabled) rt.allocation_diagnostics.peak_allocated_bytes + @sizeOf(JSRuntime) + @sizeOf(Registry) + @sizeOf(@import("atom.zig").AtomTable) + @sizeOf(class.Table) + @sizeOf(shape.Registry) else 0,
         .external_bytes = self.stats.external_bytes,
         .external_untracked_bytes = self.stats.external_untracked_bytes,
         .peak_external_bytes = self.stats.peak_external_bytes,
@@ -155,7 +152,7 @@ pub fn statsSnapshot(self: *const Registry, rt: *const JSRuntime) DetailedStats 
 }
 
 /// Register a freshly allocated header whose prefix and intrusive links are
-/// already initialized. Typed Runtime allocation helpers allocations plus their owning
+/// already initialized. Typed runtime cell allocations plus their owning
 /// constructors provide this invariant, avoiding duplicate hot-path stores.
 /// Cross-module representation audit for Object's direct property pointer
 /// and allocation-layout marker. This is deliberately a whole-heap audit,
@@ -177,13 +174,13 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
     while (iterator.next()) |header| {
         if (header.metaConst().flags.kind != .object) continue;
         // A corpse condemned by the cycle this audit closes is still
-        // published (the destruction slices run later), but its storage may
+        // published (destruction runs after the audit), but its storage may
         // already be gone: a dead array's element EXTENT is returned by the
         // synchronous `sweepExtents` at finish, ahead of the owner's own
         // bitmap reclaim. Only a live owner owes the invariant. Block cells
         // are condemned in the doomed bitmap without a header stamp (S4-d),
         // so the test is the bitmap for them and the stamp for the rest.
-        // (pdfjs under ZJS_GC_ARENA_AUDIT tripped this on a 6035-element
+        // (pdfjs under the arena audit tripped this on a 6035-element
         // array, deterministically in one code layout, 2026-09-05.)
         if (ownerCondemned(header)) continue;
         const owner = object.Object.fromHeaderConst(header);
@@ -223,7 +220,7 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
         // TGC S4-b: an EXTERNAL property buffer is a `.property_storage`
         // GC cell, so the pointer must land on a published cell of that
         // kind. This is the audit that catches an install that skipped
-        // `createPropertyStorageCell` (a raw `allocRuntime` buffer has no
+        // `createPropertyStorageCell` (a raw `allocNative` buffer has no
         // prefix, so the sweep would read a neighbouring allocation's
         // bytes as a header).
         if (owner.propertyStoragePointerIsExternal(storage)) {
@@ -309,44 +306,6 @@ pub fn recordSuccess(self: *Registry, result: CollectionResult) void {
     self.stats.cycle_gc_time_ns +|= result.duration_ns;
     self.stats.freed_objects +|= result.freed_objects;
     recordPauseSample(self, result.duration_ns);
-}
-
-/// One STW slice of an incremental major cycle: begin, an increment, or
-/// the final remark. Each is its own sample in the major ring -- the ring
-/// answers "how long does this collector stop the world at once", and an
-/// incremental cycle stops it many times briefly. The per-cycle total is
-/// accumulated separately for §1.3's cumulative-STW row.
-pub const SliceKind = enum(u2) { begin, increment, destroy, finish };
-
-pub fn recordMajorSlicePause(self: *Registry, ns: u64, kind: SliceKind) void {
-    recordPauseSample(self, ns);
-    self.incremental.cycle_stw_ns += ns;
-    const slot = &self.incremental.stats.segment_max_ns[@intFromEnum(kind)];
-    if (ns > slot.*) slot.* = ns;
-    self.incremental.stats.total_stw_by_kind[@intFromEnum(kind)] +|= ns;
-    self.incremental.stats.total_segments_by_kind[@intFromEnum(kind)] +|= 1;
-}
-
-/// Cycle-completion accounting for an incremental major. Mirrors
-/// `recordSuccess` minus the ring push: the slices already recorded
-/// themselves, and pushing the cycle total as one more sample would count
-/// the same nanoseconds twice.
-pub fn recordCycleSuccess(self: *Registry, result: CollectionResult) void {
-    self.finishCycleEnvelope();
-    self.stats.last_failure = .none;
-    self.stats.cycle_gc_count +|= 1;
-    self.stats.freed_objects +|= result.freed_objects;
-    const total = self.incremental.cycle_stw_ns;
-    // `result.duration_ns` is intentionally the completion poll's
-    // pause for the host-facing call. The stats fields promise major
-    // collection time, so they own the whole cycle's accumulated STW.
-    self.stats.last_collection_time_ns = total;
-    self.stats.cycle_gc_time_ns +|= total;
-    self.incremental.stats.last_cycle_stw_ns = total;
-    if (total > self.incremental.stats.max_cycle_stw_ns) {
-        self.incremental.stats.max_cycle_stw_ns = total;
-    }
-    self.incremental.cycle_stw_ns = 0;
 }
 
 /// Credit a MINOR collection without putting its pause in the major ring.
@@ -439,22 +398,12 @@ pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
 
 fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
     var doomed_nodes: usize = 0;
-    var cursor_found = self.morgue.cursor == null;
     for (&self.morgue.by_kind, 0..) |*head, kind_index| {
         const kind: GcKind = @enumFromInt(kind_index);
         if (kind == .object and !head.isEmpty())
             return error.CorruptNonBlockObjectAuthority;
         doomed_nodes += try verifyCircularHeaderList(head, kind, false);
-        if (!cursor_found) {
-            var node = head.sentinel.next_non_object;
-            while (node) |candidate| {
-                if (candidate == &head.sentinel) break;
-                if (candidate == self.morgue.cursor.?) cursor_found = true;
-                node = candidate.nextNonObject();
-            }
-        }
     }
-    if (!cursor_found) return error.DoomedCursorMismatch;
 
     if (self.nonblock_objects) |authority| {
         const live = authority.items.items;
@@ -478,9 +427,7 @@ fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
         authority.doomed.items.len != 0
     else
         false;
-    if ((doomed_nodes != 0 or block_doomed or self.morgue.cursor != null or doomed_objects) and
-        !self.morgue.pending and self.hot.phase != .tracer_destroy)
-    {
+    if ((doomed_nodes != 0 or block_doomed or doomed_objects) and self.hot.phase != .tracer_destroy) {
         return error.DoomedPendingMismatch;
     }
 }
@@ -555,7 +502,7 @@ fn verifyPublishedHeaderRepresentation(
 /// Whole-runtime representation audit.  It covers both publication
 /// populations: the ordinary list plus bitmap-enumerated block cells, and
 /// the non-block doomed buckets that have been detached from that list but
-/// whose prefixes remain live until sliced destruction finishes. Call only
+/// whose prefixes remain live until destruction finishes. Call only
 /// at stable boundaries: remembered-map retirement clears each carrier's
 /// cache bit before clearing the map, so the two representations must agree
 /// in both directions whenever this checker runs.

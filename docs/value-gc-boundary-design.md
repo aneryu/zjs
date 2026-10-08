@@ -246,7 +246,7 @@ V2 先保留这个内部编码协议，以 RefKind 验证真实对象；是否�
 | Runtime.current_exception、handles、weakref_kept_alive | 实际字段／RootSlot.value | 可回写；kept-alive 期间是强边，不等于弱 handle |
 | RootSet providers、ValueRootBuffer | provider 回调；buffer 稳定 backing 中的实际槽 | 注册失败、容器增长及撤销生命周期另审 |
 | Runtime strings / AtomTable | stringSlot/stringField；atom body 装箱后显式写回 | 已有正确的回写适配，不删除它们 |
-| Job queue、active job、active invocation、deferred payload cleanup | 分别委托 traceRoots／PayloadVisitor | 参数为实际槽；realm 按 Header 访问；外部回调协议需明确能否保留 slot 地址 |
+| Job queue、active job、active invocation | 分别委托 traceRoots | 参数为实际槽；realm 按 Header 访问；外部回调协议需明确能否保留 slot 地址 |
 | RealmContext | 原型、global、lexicals、缓存为实际字段；module/shape 为目标 | cached proto 已访问实际 optionalObject 槽位，visitor 失败时也不依赖事后副本回写 |
 | JsonRecordRoots / JsonPendingRecordRoots | [JSON record](../src/exec/json_ops.zig) 中的真实 value、atom 字段 | 遍历读取当前列表，注册与增长的时序需审 |
 | ReplaceMatchRoots / PendingDescriptorRoots | [match 列表](../src/exec/string_ops.zig)、[descriptor 列表](../src/exec/call_runtime.zig) 的实际字段 | 不复用旧 list.items 地址跨分配 |
@@ -285,12 +285,11 @@ V3-B 的新增职责是生产 visitor 完整性与 manual 边语义，不重写�
 | 入口 | 已核对行为 | 借用契约影响 |
 | --- | --- | --- |
 | Registry.requestGC / Runtime.triggerGCOnAllocation | 设置请求；trigger 调用 requestGCForAllocation | 请求不是立刻收集，不能把每次通知误标成 GC |
-| collectBeforeObjectAllocation | 可能先 drain deferred finalizers，再 pollGC(.normal) | 既是潜在 GC 点，也是需审查的回调边界 |
-| retryHeapLimitOnce | tryRunObjectCycleRemovalWithValueRoots(.engine_active) | 限额重试是潜在 GC 点，即使外层返回 void |
-| pollGC / pollGCChecked | owner 检查、deferred cleanup、gc_driver.continuePoll | 驱动路径可收集；checked 只增加边界校验，不改变保活义务 |
-| gcSafepoint / forceGC | 分别进入 safepoint／urgent poll | 显式 GC 边界 |
-| afterCallbackBoundaryGC / beforeEventLoopIdleGC | poll 后还有预算化 cleanup／finalizer | 不能仅检查 poll 返回前的借用状态 |
-| tryRunObjectCycleRemovalWithValueRoots | 处理未完成 destruction、abort 旧 cycle、collectCycles | guard 防递归不等于通用禁止 GC 契约 |
+| collectBeforeObjectAllocation | 可能 pollGC(.normal) | 潜在 GC 点 |
+| retryHeapLimitOnce | collectFull(.engine_active) | 限额重试是潜在 GC 点，即使外层返回 void |
+| pollGC | owner 检查、gc_driver.continuePoll | 驱动路径可收集 |
+| forceGC | 进入 urgent poll | 显式 GC 边界 |
+| collectFull | 处理未完成 destruction、abort 旧 cycle、collectCycles | guard 防递归不等于通用禁止 GC 契约 |
 | collectCycles / collectMinor | 直接进入 Collector；minor 有代状态门槛 | 禁止 GC 检查需要覆盖底层入口，避免直接调用绕过 |
 | StringRope.flattenInfallible | OOM 后尝试显式 GC、重试、再次失败 panic | M 类隐藏入口；引擎调用已迁移（§8.12–8.32），仅余公开兼容入口 |
 | collectForTest | 调用收集，错误时返回 0 | 测试辅助，不把 0 当作 GC 成功的证据 |
@@ -466,7 +465,7 @@ Debug 定向命令 `mise exec -- zig build test -j32 -Dtest-filter='replacement 
 在最终地址 activate，严格 LIFO deactivate。登记和写入不分配；每次激活清空槽位，
 Runtime 单调代次防止同址复用恢复旧借用。RootedValueRef／MutableRootedValueRef
 先验证 Runtime、活跃作用域与代次，再读取真实槽位；失效作用域地址只比较、不解引用。
-引用不拥有 Runtime，禁止 Runtime 销毁后再使用。setter／登记入口拒绝 gc_running 或 trace window 中的修改；
+引用不拥有 Runtime，禁止 Runtime 销毁后再使用。setter／登记入口拒绝 gc.hot.collecting 或 trace window 中的修改；
 旧 provider／handle 的追踪期生命周期守卫见 §8.14，未把原始可写 slot 指针改成所有权类型。
 
 `JSValueHandle.takeInto` 先写入目标根再撤销源根，失败保留源所有权。
@@ -535,12 +534,12 @@ Debug 非测试契约程序也成功。未运行批门禁或全量 ReleaseFast s
 assertComplete，诊断 address/owner walkers 显式声明 partial。负向编译 fixture 只访问 value，
 却故意漏掉 visitAtom，验证检查的是完整方法集合；`test-gc-visitor-contract` 已接入全量 test。
 
-追踪期缺口已先复现：不运行 GC 而直接调用 traceProviders 时，旧 gc_running 检查允许
+追踪期缺口已先复现：不运行 GC 而直接调用 traceProviders 时，旧 gc.hot.collecting 检查允许
 provider 写根及激活新根，回归测试失败。修复新增 RootSet.trace_depth，
 Runtime 根枚举、RootSet providers／handles 枚举、payload marker 与 host scheduler callback
 都使用可嵌套窗口，defer 保证失败退栈。根／handle／原生 pin 生命周期禁止 mutator 修改，
 精确根 checked API 沿用 RootMutationDuringCollection 错误；visitor 对实际槽位的修复仍合法。
-收集、Runtime 销毁与 JS 调用准入增加独立守卫，不以 gc_running 的“已有收集则返回”代替拒绝重入。
+收集、Runtime 销毁与 JS 调用准入增加独立守卫，不以 gc.hot.collecting 的“已有收集则返回”代替拒绝重入。
 
 四个新增测试与扩展的精确根回归覆盖嵌套失败退栈、槽位修复、直接 payload callback 和正常调用恢复。
 `ZJS_TRACE_INJECT=1..10`、`ZJS_TRACE_JS_INJECT=1..2` 在同一诊断二进制、`zig build test`
@@ -705,7 +704,7 @@ check/test 13/13 步及 2145/2145 测试通过，Debug／ReleaseFast 契约程�
 退出检查 LIFO 和原始地址，拒绝重复激活；非测试 Release 构建抹除 scope 和 Runtime 链字段。
 它不充当根或 pin，不阻止显式修改原生缓冲，也不延长借用生命周期。
 
-tryRunObjectCycleRemovalWithValueRoots、pollGC、gc_driver.continuePoll、
+collectFull、pollGC、gc_driver.continuePoll、
 collectCycles、collectMinor、destroyDoomedSlice、finishPendingDestruction
 均在 collector 状态变更及提前返回之前检查；Runtime 销毁检查仍活动的 scope。
 违规请求直接 panic，不用静默跳过回收维护表面的安全。
@@ -1124,7 +1123,7 @@ Map/Set 强条目以对象地址哈希。payload 追踪发现键被重定位时�
 在原有桶数组上原地重链（不分配，不会失败）；回滚恢复旧地址只使重链成为空操作。
 iterator next 旁表按对象地址查找：新增 `has_iterator_next` 标志，晋升与回滚统一经
 `gc_weak.relocateObjectIdentities` 同时迁移弱身份与该旁表。两条回归在 minor／major 下修复前
-失败（搬迁后的键查不到、搬迁后的迭代器丢失缓存的 next），修复后通过。
+失败（搬迁后的键查不到、搬迁后的迭代器丢失缓存的 next），修复后通过。（2026-09-27：内建改为按规范持有 Iterator Record 后，iterator next 旁表及 `has_iterator_next` 已删除。）
 
 `Vm.return_value` 改由 Machine 根遍历追踪，初值为 JS undefined 而不是未定义字节；
 `HostInvocation` 空闲期间不被追踪，因此在 unpublish 时清空，避免下次发布追踪悬空值。

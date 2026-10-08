@@ -25,7 +25,7 @@ fn test262EvalScript(
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     if (args.len == 0) return zjs.JSValue.undefinedValue();
-    if (!args[0].isString()) return error.TypeError;
+    if (!args[0].isString()) return ctx.throwError("TypeError", "evalScript: source must be a string", .{});
     const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
     return ctx.evalScriptValue(args[0], .{
         .output = output,
@@ -248,7 +248,7 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     }
     for (test262_agents.agents) |agent| {
         if (agent.owner_runtime == rt) {
-            agent.done = true;
+            @atomicStore(bool, &agent.done, true, .release);
             if (agent.agent_runtime) |art| {
                 if (agent_runtimes_count < agent_runtimes.len) {
                     agent_runtimes[agent_runtimes_count] = art;
@@ -286,7 +286,9 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
 fn test262AgentInterruptHandler(rt: *zjs.JSRuntime, context: ?*anyopaque) bool {
     _ = rt;
     const agent: *Test262Agent = @ptrCast(@alignCast(context orelse return false));
-    return agent.done;
+    // Polled from the agent's own thread without the agents mutex; every
+    // writer stores `done` atomically under that mutex.
+    return @atomicLoad(bool, &agent.done, .acquire);
 }
 
 fn test262AgentRun(agent: *Test262Agent) void {
@@ -295,7 +297,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     defer {
         const io = test262AgentIo();
         test262_agents.mutex.lockUncancelable(io);
-        agent.done = true;
+        @atomicStore(bool, &agent.done, true, .release);
         agent.thread_done = true;
         if (agent.broadcast_buffer) |*buffer| {
             buffer.release();
@@ -308,7 +310,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     const allocator = test262PageAllocator();
     const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
     defer rt.destroy();
-    rt.setCanBlock(true);
+    rt.can_block = true;
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
 
     {
@@ -355,7 +357,7 @@ fn test262AgentStart(
 ) !zjs.JSValue {
     _ = output;
     _ = global;
-    if (args.len == 0) return error.TypeError;
+    if (args.len == 0) return ctx.throwError("TypeError", "agent.start: source required", .{});
     const source = try test262AgentStringValue(ctx, args[0]);
     var source_owned = true;
     errdefer if (source_owned) test262PageAllocator().free(source);
@@ -386,7 +388,7 @@ fn test262AgentBroadcast(
 ) !zjs.JSValue {
     _ = output;
     _ = global;
-    if (args.len == 0) return error.TypeError;
+    if (args.len == 0) return ctx.throwError("TypeError", "agent.broadcast: buffer required", .{});
     var shared_buffer = try ctx.retainSharedArrayBuffer(args[0]);
     defer shared_buffer.release();
     const io = test262AgentIo();
@@ -409,8 +411,8 @@ fn test262AgentReceiveBroadcast(
     global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
-    const agent = current_test262_agent orelse return error.TypeError;
-    if (args.len == 0 or !ctx.isCallable(args[0])) return error.TypeError;
+    const agent = current_test262_agent orelse return ctx.throwError("TypeError", "agent.receiveBroadcast: not inside an agent", .{});
+    if (args.len == 0 or !ctx.isCallable(args[0])) return ctx.throwError("TypeError", "agent.receiveBroadcast: callback required", .{});
 
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
@@ -484,7 +486,7 @@ fn test262AgentLeaving(
     if (current_test262_agent) |agent| {
         const io = test262AgentIo();
         test262_agents.mutex.lockUncancelable(io);
-        agent.done = true;
+        @atomicStore(bool, &agent.done, true, .release);
         test262_agents.cond.broadcast(io);
         test262_agents.mutex.unlock(io);
     }
@@ -674,10 +676,9 @@ fn hostCallAssertNotSameValue(
     global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
-    _ = ctx;
     _ = output;
     _ = global;
-    if (args.len < 2) return error.TypeError;
+    if (args.len < 2) return ctx.throwError("TypeError", "assert.notSameValue: 2 arguments required", .{});
     if (args[0].sameValue(args[1])) return error.JSException;
     return zjs.JSValue.undefinedValue();
 }
@@ -688,7 +689,7 @@ fn hostCallAssertThrows(
     global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
-    if (args.len < 2) return error.TypeError;
+    if (args.len < 2) return ctx.throwError("TypeError", "assert.throws: 2 arguments required", .{});
     const expected_name = try ctx.functionName(args[0], ctx.runtimePtr().nativeAllocator());
     defer ctx.runtimePtr().nativeAllocator().free(expected_name);
     _ = ctx.callFunction(args[1], &.{}, .{
@@ -740,7 +741,7 @@ fn hostCallIsConstructor(
 ) !zjs.JSValue {
     _ = output;
     _ = global;
-    if (args.len < 1) return error.TypeError;
+    if (args.len < 1) return ctx.throwError("TypeError", "isConstructor: 1 argument required", .{});
     return zjs.JSValue.boolean(ctx.isConstructor(args[0]));
 }
 
@@ -785,7 +786,7 @@ fn hostCallCompareArray(
 ) !zjs.JSValue {
     _ = output;
     _ = global;
-    if (args.len < 2) return error.TypeError;
+    if (args.len < 2) return ctx.throwError("TypeError", "compareArray: 2 arguments required", .{});
     if (!try ctx.isArray(args[0]) or !try ctx.isArray(args[1])) return error.JSException;
     const actual_length = try ctx.arrayLength(args[0]);
     if (actual_length != try ctx.arrayLength(args[1])) return error.JSException;
@@ -809,10 +810,12 @@ fn hostCallSetTimeout(
     const callback = if (args.len >= 1) args[0] else zjs.JSValue.undefinedValue();
     if (!ctx.isCallable(callback)) return try ctx.throwError("TypeError", "not a function", .{ .realm_global = active_global });
     var delay = try test262Int64Arg(ctx, args, 1);
-    if (delay < 1) delay = 1;
+    // Like node (and browsers' 32-bit timeout), a delay outside 1..2^31-1
+    // fires after 1 ms instead of parking the run on an unreachable deadline.
+    if (delay < 1 or delay > std.math.maxInt(i32)) delay = 1;
     const host_event_loop = runtime_layer.EventLoop.fromContext(ctx.core) orelse return ctx.throwError("TypeError", "host event loop is not installed", .{ .realm_global = active_global });
     const id = host_event_loop.takeNextTimerId();
-    try host_event_loop.enqueueTimer(ctx.core, id, callback, @intCast(delay), false);
+    try host_event_loop.enqueueTimer(ctx.core, id, callback, @intCast(delay));
     return int64ResultValue(id);
 }
 
@@ -913,7 +916,10 @@ fn stringBytes(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
 fn test262Int64Arg(ctx: *zjs.JSContext, args: []const zjs.JSValue, index: usize) !i64 {
     const value = if (index < args.len) args[index] else zjs.JSValue.undefinedValue();
     const number = try ctx.toIntegerOrInfinity(value);
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
+    if (std.math.isNan(number)) return 0;
+    // ToIntegerOrInfinity can exceed i64 (setTimeout(f, 1e300)); saturate.
+    if (number >= 0x1p63) return std.math.maxInt(i64);
+    if (number <= -0x1p63) return std.math.minInt(i64);
     return @intFromFloat(number);
 }
 
@@ -967,7 +973,7 @@ fn test262DetachArrayBuffer(
 ) !zjs.JSValue {
     _ = output;
     _ = global;
-    if (args.len < 1) return error.TypeError;
+    if (args.len < 1) return ctx.throwError("TypeError", "detachArrayBuffer: 1 argument required", .{});
     return try zjs.exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), args[0]);
 }
 
@@ -980,7 +986,7 @@ fn test262Gc(
     _ = output;
     _ = global;
     _ = args;
-    _ = try ctx.runtimePtr().tryRunObjectCycleRemovalWithValueRoots(null, .engine_active);
+    _ = try ctx.runtimePtr().collectFull(null, .engine_active);
     return zjs.JSValue.undefinedValue();
 }
 

@@ -2,24 +2,15 @@
 
 const std = @import("std");
 const root = @import("../parser.zig");
-const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
 const libs_bignum = @import("../libs/bigint.zig");
 const tok = root.token;
 const diagnostics = root.diagnostics;
 const Atom = atom_module.Atom;
 const parse_state = @import("parse_state.zig");
-const lookahead = @import("lookahead.zig");
-const emitter = @import("emitter.zig");
-const expressions = @import("expressions.zig");
-const statements = @import("statements.zig");
-const functions = @import("functions.zig");
-const classes = @import("classes.zig");
-const modules = @import("modules.zig");
-const typescript = @import("typescript.zig");
 const Error = parse_state.Error;
 const State = parse_state.State;
+const FunctionDef = parse_state.function_def_mod.FunctionDef;
 
 pub fn hasKnownBinding(s: *State, atom_id: Atom) bool {
     for (s.curFunc().closure_var) |cv| {
@@ -31,9 +22,7 @@ pub fn hasKnownBinding(s: *State, atom_id: Atom) bool {
     // and module redeclaration checks) must therefore consult the
     // declaration table directly rather than relying on parser-created
     // closure placeholders.
-    for (s.curFunc().global_vars) |gv| {
-        if (gv.var_name == atom_id) return true;
-    }
+    if (s.curFunc().findGlobalVarName(atom_id) != null) return true;
     var scope = s.scope_level;
     while (scope >= 0 and @as(usize, @intCast(scope)) < s.curFunc().scopes.len) {
         var idx = s.curFunc().scopes[@intCast(scope)].first;
@@ -63,7 +52,7 @@ pub fn hasKnownBinding(s: *State, atom_id: Atom) bool {
 /// binding turns out to be statically known.
 ///
 /// Deliberately restricted to the outermost FunctionDef of a plain
-/// script. `ensureClosureVar` is a no-op while the parser emits phase-1
+/// script. The parser resolves no closures while it emits phase-1
 /// name+scope bytecode (binding discovery belongs to the topology pass),
 /// so `hasKnownBinding` only sees THIS FunctionDef's own tables: inside a
 /// nested function it reports "no binding" for every parent-function
@@ -117,8 +106,17 @@ pub fn tokenCanStartSlashRegexp(k: tok.Kind) bool {
     return k == .slash or k == .div_assign;
 }
 
-/// leftover candidate39 still had a 757 B CurrentContext copy whose extra
-/// null/false/true/await/yield checks already live in this walk.
+/// The identifiers reserved only in strict mode code (§13.1.1).
+pub fn isStrictModeReservedWord(name: []const u8) bool {
+    const words = [_][]const u8{ "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield" };
+    for (words) |word| {
+        if (std.mem.eql(u8, name, word)) return true;
+    }
+    return false;
+}
+
+/// Whether an escaped identifier spells a reserved word (including
+/// null/false/true and the context-dependent await/yield) for a binding.
 pub noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
     if (!has_escape) return false;
     const name = s.atoms.name(atom_id) orelse return false;
@@ -159,32 +157,14 @@ pub noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: At
         std.mem.eql(u8, name, "extends") or
         std.mem.eql(u8, name, "import") or
         std.mem.eql(u8, name, "super") or
-        (strict and (std.mem.eql(u8, name, "implements") or
-            std.mem.eql(u8, name, "interface") or
-            std.mem.eql(u8, name, "let") or
-            std.mem.eql(u8, name, "package") or
-            std.mem.eql(u8, name, "private") or
-            std.mem.eql(u8, name, "protected") or
-            std.mem.eql(u8, name, "public") or
-            std.mem.eql(u8, name, "static"))) or
-        ((s.ctx.in_generator or strict) and std.mem.eql(u8, name, "yield")) or
+        (strict and isStrictModeReservedWord(name)) or
+        (s.ctx.in_generator and std.mem.eql(u8, name, "yield")) or
         ((s.ctx.in_async or s.lex.is_module or s.ctx.in_class_static_block) and std.mem.eql(u8, name, "await"));
 }
 
-pub fn escapedIdentifierIsReservedWordForShorthandBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
-    if (!has_escape) return false;
-    const name = s.atoms.name(atom_id) orelse return false;
-    return escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape) or
-        std.mem.eql(u8, name, "implements") or
-        std.mem.eql(u8, name, "interface") or
-        std.mem.eql(u8, name, "let") or
-        std.mem.eql(u8, name, "package") or
-        std.mem.eql(u8, name, "private") or
-        std.mem.eql(u8, name, "protected") or
-        std.mem.eql(u8, name, "public") or
-        std.mem.eql(u8, name, "static") or
-        std.mem.eql(u8, name, "yield");
-}
+/// A shorthand property is an IdentifierReference: the strict-only words and
+/// `yield`/`await` are reserved exactly where a binding of them would be.
+pub const escapedIdentifierIsReservedWordForShorthandBinding = escapedIdentifierIsReservedWordForBinding;
 
 /// Same reserved set as `ForBinding`. The previous extra keyword checks
 /// were already covered by that walk.
@@ -192,9 +172,16 @@ pub inline fn escapedIdentifierIsReservedWordForCurrentContext(s: *State, atom_i
     return escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape);
 }
 
+/// A binding name that strict code forbids: `eval`, `arguments`, and the
+/// strict-mode reserved words (checked again when a body turns strict).
 pub fn isInvalidStrictFunctionBindingName(s: *State, atom_id: Atom) bool {
-    _ = s;
-    return atom_id == atom_module.ids.eval_ or atom_id == atom_module.ids.arguments;
+    if (atom_id == atom_module.ids.eval_ or atom_id == atom_module.ids.arguments) return true;
+    const name = s.atoms.name(atom_id) orelse return false;
+    const strict_reserved = [_][]const u8{ "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield" };
+    for (strict_reserved) |word| {
+        if (std.mem.eql(u8, name, word)) return true;
+    }
+    return false;
 }
 
 pub fn recordInvalidStrictParameterName(s: *State, first: *?diagnostics.Position, atom_id: Atom) void {
@@ -270,16 +257,20 @@ pub fn atomNameEquals(s: *State, atom_id: Atom, name: []const u8) bool {
     return if (s.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
-fn atomsNameEqual(s: *State, left: Atom, right: Atom) bool {
-    if (left == right) return true;
-    const left_name = s.atoms.name(left) orelse return false;
-    const right_name = s.atoms.name(right) orelse return false;
-    return std.mem.eql(u8, left_name, right_name);
-}
-
-pub fn evalAnnexBBlockedFunctionName(s: *State, atom_id: Atom) bool {
-    for (s.eval_annex_b_blocked_function_names) |blocked| {
-        if (atomsNameEqual(s, atom_id, blocked)) return true;
+/// B.3.2.3: a direct eval does not hoist a block function `F` when a
+/// lexical binding of `F` lies between the eval's lexical environment and
+/// its variable environment. Those are the caller's closure rows before the
+/// first variable object or global-family row.
+pub fn evalAnnexBBlockedFunctionName(fd: *const FunctionDef, atom_id: Atom) bool {
+    if (!fd.is_direct_eval or fd.parent != null) return false;
+    for (fd.closure_var) |cv| {
+        switch (cv.closureType()) {
+            .global, .global_ref, .global_decl, .module_decl, .module_import => return false,
+            .local, .arg, .ref => {},
+        }
+        if (cv.var_name == atom_module.ids.var_object or cv.var_name == atom_module.ids.arg_var_object) return false;
+        // A simple catch parameter does not block the hoist (B.3.4).
+        if (cv.var_name == atom_id and cv.varKind() != .catch_) return cv.isLexical();
     }
     return false;
 }
@@ -299,10 +290,14 @@ pub fn formatBigIntPropertyName(s: *State, text: []const u8) Error![]const u8 {
     } else text;
     defer if (parse_text.ptr != text.ptr) s.scratch.free(parse_text);
 
-    var parsed = libs_bignum.parseAutoAlloc(s.scratch, parse_text) catch return Error.InvalidNumberLiteral;
+    var parsed = libs_bignum.parseAutoAlloc(s.scratch, parse_text, s.allocation_runtime) catch |err| return switch (err) {
+        error.Interrupted => error.Interrupted,
+        else => Error.InvalidNumberLiteral,
+    };
     defer parsed.deinit();
-    return parsed.formatBase10Alloc(s.scratch) catch |err| switch (err) {
+    return parsed.formatBase10Alloc(s.scratch, s.allocation_runtime) catch |err| switch (err) {
         error.OutOfMemory => Error.OutOfMemory,
+        error.Interrupted => Error.Interrupted,
         // Base 10 is always a valid radix.
         error.InvalidRadix => Error.ParserInvariant,
     };

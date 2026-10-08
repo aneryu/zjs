@@ -215,7 +215,6 @@ comptime {
 }
 
 pub const RawAuditEntry = struct {
-    audit_id: u64,
     base: usize,
     raw_base: usize,
     raw_bytes: usize,
@@ -226,14 +225,12 @@ pub const RawAuditEntry = struct {
 };
 
 /// Existing P1-independent accounting oracle, extended down to the raw
-/// allocation/free seam.  Its audit id is intentionally unrelated to carrier
-/// generations so a shared counter cannot make both sides agree by accident.
+/// allocation/free seam.
 pub const HeapAccountingOracle = struct {
     heap_live_bytes: usize = 0,
     old_live_bytes: usize = 0,
     large_object_bytes: usize = 0,
     raw: std.AutoHashMapUnmanaged(usize, RawAuditEntry) = .empty,
-    next_audit_id: u64 = 1,
 
     pub fn deinit(self: *HeapAccountingOracle, allocator: std.mem.Allocator) void {
         self.raw.deinit(allocator);
@@ -247,11 +244,7 @@ pub const HeapAccountingOracle = struct {
     pub fn recordRawAlloc(self: *HeapAccountingOracle, entry: RawAuditEntry) void {
         std.debug.assert(entry.base != 0 and entry.raw_base != 0 and entry.raw_bytes != 0);
         std.debug.assert(!self.raw.contains(entry.base));
-        var stored = entry;
-        stored.audit_id = self.next_audit_id;
-        self.next_audit_id +%= 1;
-        if (self.next_audit_id == 0) self.next_audit_id = 1;
-        self.raw.putAssumeCapacity(entry.base, stored);
+        self.raw.putAssumeCapacity(entry.base, entry);
     }
 
     pub fn recordRawFree(self: *HeapAccountingOracle, base: usize) void {
@@ -287,7 +280,7 @@ pub const HeapAccountingOracle = struct {
 };
 
 comptime {
-    const oracle_budget: usize = if (std.debug.runtime_safety) 56 else 48;
+    const oracle_budget: usize = if (std.debug.runtime_safety) 48 else 40;
     if (@sizeOf(HeapAccountingOracle) != oracle_budget) @compileError("heap accounting oracle budget changed");
 }
 

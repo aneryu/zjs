@@ -17,6 +17,7 @@ const buffer = @import("buffer_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const collection = @import("collection_ops.zig");
 const date = @import("date_ops.zig");
+const disposable = @import("disposable_ops.zig");
 const error_object = @import("exception_ops.zig");
 const function = @import("function_ops.zig");
 const iterator = @import("iterator_ops.zig");
@@ -24,7 +25,6 @@ const json = @import("json_ops.zig");
 const math = @import("math_ops.zig");
 const number = @import("number_ops.zig");
 const object = @import("object_ops.zig");
-const performance = @import("builtin_glue.zig");
 const primitive = @import("value_ops.zig");
 const promise = @import("promise_ops.zig");
 const reflect_proxy = @import("reflect_ops.zig");
@@ -138,7 +138,6 @@ const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries 
 pub const table: [domain_count]EntryTable = build: {
     var domains = [_]EntryTable{.{}} ** domain_count;
     domains[@intFromEnum(NativeBuiltinDomain.math)] = recordTable(&math.internal_entries);
-    domains[@intFromEnum(NativeBuiltinDomain.performance)] = recordTable(&performance.performance_internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.json)] = recordTable(&json.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.uri)] = recordTable(&uri.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.number)] = recordTable(&number.internal_entries);
@@ -157,8 +156,15 @@ pub const table: [domain_count]EntryTable = build: {
     domains[@intFromEnum(NativeBuiltinDomain.array)] = recordTable(&array.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.regexp)] = recordTable(&regexp.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.weak_ref)] = recordTable(&builtin_glue.internal_entries);
+    domains[@intFromEnum(NativeBuiltinDomain.disposable)] = recordTable(&disposable.internal_entries);
     break :build domains;
 };
+
+/// Standard native record for `domain`/`id`; null for gap or out-of-range ids.
+/// `table` has a slot for every `NativeBuiltinDomain` value.
+pub fn lookup(domain: core.function.NativeBuiltinDomain, id: u32) ?*const core.NativeEntry {
+    return table[@intCast(@intFromEnum(domain))].get(id);
+}
 
 /// A method-id enum plus the record domain its values index into.
 const IdEnumBinding = struct {
@@ -168,17 +174,17 @@ const IdEnumBinding = struct {
 };
 
 /// Method-id enums that do NOT live under `core.host_function.builtin_method_ids`
-/// (the block below discovers those automatically by domain name). `math`, `uri`
-/// and `performance` are excluded on purpose: they key their records off bare
+/// (the block below discovers those automatically by domain name). `math` and
+/// `uri` are excluded on purpose: they key their records off bare
 /// integers, so there is no enum to cross-check.
 ///
-/// `primitive_ops.Tag` is deliberately absent. It is a *class* tag, not a method
+/// `value_ops.Tag` is deliberately absent. It is a *class* tag, not a method
 /// id -- `primitiveId` composes an id as `tag * 10 + method` -- so its values
 /// (1..5) are not record ids and asserting on them would be wrong.
 const exec_side_id_enums = [_]IdEnumBinding{
-    .{ .domain = .error_object, .label = "error_ops.StaticMethod", .Ids = error_object.StaticMethod },
+    .{ .domain = .error_object, .label = "exception_ops.StaticMethod", .Ids = error_object.StaticMethod },
     .{ .domain = .function, .label = "function_ops.PrototypeMethod", .Ids = function.PrototypeMethod },
-    .{ .domain = .object, .label = "object_builtin_ops.PrototypeMethod", .Ids = object.PrototypeMethod },
+    .{ .domain = .object, .label = "object_ops.PrototypeMethod", .Ids = object.PrototypeMethod },
     .{ .domain = .collection, .label = "collection_ops.StaticMethod", .Ids = collection.StaticMethod },
 };
 
@@ -192,8 +198,8 @@ fn assertIdEnumHasRecord(comptime binding: IdEnumBinding) void {
             "` domain. `recordTable` derives each domain from its entries," ++
             " so an enum member with no `internal_entries` row has no record --" ++
             " it is an id that decodes and then misses the table," ++
-            " leaving `setNativeBuiltinIdAndRecord` with a null record and every call" ++
-            " to it in the `callNativeCallableByName` cascade. Add the row to the" ++
+            " leaving `setNativeBuiltinIdAndRecord` with a null record and the" ++
+            " function uncallable. Add the row to the" ++
             " domain's `internal_entries`, or delete the enum member.");
     }
 }
@@ -265,7 +271,7 @@ test "every engine-owned standard native domain contributes a record table" {
     const testing = std.testing;
     inline for (@typeInfo(NativeBuiltinDomain).@"enum".fields) |field| {
         const domain: NativeBuiltinDomain = @enumFromInt(field.value);
-        if (domain == .host) continue;
+        if (domain == .engine_helper) continue;
         const records = table[field.value];
         try testing.expect(records.dense.len != 0 or records.sparse.len != 0);
     }

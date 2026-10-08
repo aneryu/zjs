@@ -291,6 +291,132 @@ test "zjs CLI behavior" {
         try std.testing.expectEqualStrings("", result.stderr);
     }
 
+    // 9. Printing an object with var-ref-backed properties (the global
+    // object) prints each binding's value, not the reference cell.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{ zjs_path, "-e", "var cliPrintedGlobal = 7; print(String(globalThis).length > 0); print(globalThis);" },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "cliPrintedGlobal: 7") != null);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+
+    // 11. A full collection inside a Proxy trap keeps the trap's fresh keys
+    // alive (Object.keys holds them in a native list), and a WeakRef keeps
+    // its target until the end of the job that created it.
+    {
+        const source =
+            \\var h = { ownKeys() { return ["k_" + 1, "k_" + 2]; }, getOwnPropertyDescriptor() { gc(); return { value: 1, enumerable: true, configurable: true }; } };
+            \\var refs = []; for (var i = 0; i < 20; i++) refs.push(new WeakRef({ i })); gc();
+            \\console.log(Object.keys(new Proxy({}, h)).join(), refs.filter((r) => r.deref() !== undefined).length);
+        ;
+        const result = try std.process.run(allocator, std.testing.io, .{ .argv = &[_][]const u8{ zjs_path, "-e", source } });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expectEqualStrings("k_1,k_2 20\n", result.stdout);
+    }
+
+    // 12. One module record per file: `./x.mjs` and its absolute path are the
+    // same module, and import() inside `new Function` resolves against the
+    // calling module. Columns count code points; a lone CR ends a line.
+    {
+        const root_dir = ".zig-cache/smoke-cli-module-identity";
+        std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir ++ "/sub");
+        var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_len = try std.Io.Dir.cwd().realPathFile(std.testing.io, ".", &cwd_buffer);
+        const main_source = try std.fmt.allocPrint(allocator,
+            \\import * as a from "./x.mjs";
+            \\import * as b from "{s}/{s}/x.mjs";
+            \\const viaFunction = await new Function("return import('./sub/y.mjs')")();
+            \\print(a === b, globalThis.count, viaFunction.default);
+        , .{ cwd_buffer[0..cwd_len], root_dir });
+        defer allocator.free(main_source);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/main.mjs", .data = main_source });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/x.mjs", .data = "globalThis.count = (globalThis.count ?? 0) + 1;" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/sub/y.mjs", .data = "export default \"sub\";" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/cr.js", .data = "var u = \"\u{65e5}\u{672c}\"; var x = 1;\rthrow new Error(\"cr\");" });
+
+        const main_result = try std.process.run(allocator, std.testing.io, .{ .argv = &[_][]const u8{ zjs_path, root_dir ++ "/main.mjs" } });
+        defer allocator.free(main_result.stdout);
+        defer allocator.free(main_result.stderr);
+        try std.testing.expectEqualStrings("true 1 sub\n", main_result.stdout);
+
+        const cr_result = try std.process.run(allocator, std.testing.io, .{ .argv = &[_][]const u8{ zjs_path, "-s", root_dir ++ "/cr.js" } });
+        defer allocator.free(cr_result.stdout);
+        defer allocator.free(cr_result.stderr);
+        try std.testing.expect(std.mem.indexOf(u8, cr_result.stderr, "cr.js:2:") != null);
+    }
+
+    // 13. console.error/warn go to stderr; a failed stdout write with an
+    // unhandled rejection exits 141 without crashing in teardown; the
+    // evaluation's own error wins over a pending rejection.
+    {
+        const Case = struct { source: []const u8, close_stdout: bool, exit_code: u8, stdout: []const u8, stderr_contains: []const u8 };
+        const cases = [_]Case{
+            .{ .source = "print('a'); console.error('b'); console.warn('w'); console.log('c')", .close_stdout = false, .exit_code = 0, .stdout = "a\nc\n", .stderr_contains = "b\nw\n" },
+            .{ .source = "Promise.reject(1); 10n / 0n", .close_stdout = false, .exit_code = 1, .stdout = "", .stderr_contains = "RangeError" },
+        };
+        for (cases) |case| {
+            const result = try std.process.run(allocator, std.testing.io, .{ .argv = &[_][]const u8{ zjs_path, "-e", case.source } });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+            const exit_code = switch (result.term) {
+                .exited => |code| code,
+                else => 255,
+            };
+            try std.testing.expectEqual(case.exit_code, exit_code);
+            try std.testing.expectEqualStrings(case.stdout, result.stdout);
+            try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.stderr_contains) != null);
+        }
+    }
+
+    // 10. Invalid UTF-8 inside a string literal is a SyntaxError; `async` /
+    // `abstract` followed by a line break is not an export modifier.
+    {
+        const root_dir = ".zig-cache/smoke-cli-source-edges";
+        std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/bad_utf8.js", .data = "print(1); var s = \"\xff\";" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/dep.mjs", .data = "var abstract = 7; export default abstract\nclass A {}\n" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/main.mjs", .data = "import d from \"./dep.mjs\"; print(d);" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = root_dir ++ "/async_export.mjs", .data = "export async\nfunction f() {}\n" });
+
+        const Case = struct { file: []const u8, exit_code: u8, stdout: []const u8, stderr_contains: []const u8 };
+        const cases = [_]Case{
+            .{ .file = root_dir ++ "/bad_utf8.js", .exit_code = 1, .stdout = "", .stderr_contains = "invalid UTF-8 in source" },
+            .{ .file = root_dir ++ "/main.mjs", .exit_code = 0, .stdout = "7\n", .stderr_contains = "" },
+            .{ .file = root_dir ++ "/async_export.mjs", .exit_code = 1, .stdout = "", .stderr_contains = "SyntaxError" },
+        };
+        for (cases) |case| {
+            const result = try std.process.run(allocator, std.testing.io, .{ .argv = &[_][]const u8{ zjs_path, case.file } });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+            const exit_code = switch (result.term) {
+                .exited => |code| code,
+                else => 255,
+            };
+            try std.testing.expectEqual(case.exit_code, exit_code);
+            try std.testing.expectEqualStrings(case.stdout, result.stdout);
+            try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.stderr_contains) != null);
+        }
+    }
+
     {
         const root_dir = ".zig-cache/smoke-cli-sloppy-file";
         const temp_filename = root_dir ++ "/sloppy_assignment.js";
@@ -361,6 +487,29 @@ test "zjs CLI behavior" {
         };
         try std.testing.expectEqual(@as(u8, 0), exit_code);
         try std.testing.expectEqualStrings("string\n", result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+    // 9b. A path with a `:` is still a file URL in import.meta.url.
+    if (@import("builtin").os.tag != .windows) {
+        const root_dir = ".zig-cache/smoke-cli-colon-path";
+        const temp_filename = root_dir ++ "/a:b.mjs";
+
+        std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = temp_filename,
+            .data = "console.log(import.meta.url);\n",
+        });
+
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{ zjs_path, temp_filename },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "file:///"));
+        try std.testing.expect(std.mem.endsWith(u8, result.stdout, "/smoke-cli-colon-path/a:b.mjs\n"));
         try std.testing.expectEqualStrings("", result.stderr);
     }
 }
@@ -571,4 +720,391 @@ test "CLI nonempty block census rows reconcile with totals" {
     for (totals, 0..) |value, i| {
         if (i != 0 and i != 4) try std.testing.expectEqual(sum[i], value);
     }
+}
+
+test "zjs writes stdout at the shared file offset instead of overwriting it" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // One descriptor shared by the shell-like writer and both children, as
+    // in `{ echo; zjs a.js; zjs b.js; } > out`.
+    const out = try tmp.dir.createFile(io, "out.txt", .{ .read = true });
+    defer out.close(io);
+    try out.writeStreamingAll(io, "shell-line\n");
+    for ([_][]const u8{ "print('first-longer-line')", "print('second')" }) |source| {
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ zjs_path, "-e", source },
+            .stdout = .{ .file = out },
+        });
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+    }
+
+    const written = try tmp.dir.readFileAlloc(io, "out.txt", allocator, .limited(1024));
+    defer allocator.free(written);
+    try std.testing.expectEqualStrings("shell-line\nfirst-longer-line\nsecond\n", written);
+}
+
+test "zjs lets an importer handle a rejection its dependency left unhandled" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.mjs", .data = "globalThis.p = Promise.reject(new Error('x'));\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.mjs", .data = "import './dep.mjs'; console.log('main runs'); p.catch(e => console.log('handled', e.message));\n" });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.mjs", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-m", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("main runs\nhandled x\n", result.stdout);
+}
+
+test "zjs keeps a failed JSON module import from breaking later imports" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.json", .data = "{ not json" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "z.mjs", .data = "export const z = 5;\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.mjs", .data =
+        \\try { await import('./bad.json', { with: { type: 'json' } }); } catch (e) { console.log('bad', e.name); }
+        \\const m = await import('./z.mjs');
+        \\console.log('z', m.z);
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.mjs", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-m", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("bad SyntaxError\nz 5\n", result.stdout);
+}
+
+test "zjs re-imports a module whose JSON dependency failed with the same error" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.json", .data = "{ not json" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.mjs", .data =
+        \\import data from './bad.json' with { type: 'json' };
+        \\console.log('a body runs');
+        \\
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.mjs", .data =
+        \\for (let i = 0; i < 3; i++) {
+        \\  try { await import('./a.mjs'); console.log('loaded', i); } catch (e) { console.log('error', i, e.name); }
+        \\}
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.mjs", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-m", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("error 0 SyntaxError\nerror 1 SyntaxError\nerror 2 SyntaxError\n", result.stdout);
+}
+
+test "zjs loads a file whose name looks like a synthetic module tag as JavaScript" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "evil", .data = "hello" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "evil#type=text", .data = "export default 1;\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.mjs", .data =
+        \\import v from './evil#type=text';
+        \\const d = await import('./evil#type=text');
+        \\console.log(typeof v, typeof d.default);
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.mjs", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-m", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("number number\n", result.stdout);
+}
+
+test "zjs runs a script whose file name is not UTF-8" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Error objects build their stack from the file name; it used to fail
+    // strict UTF-8 decoding and replace every error with a URIError.
+    try tmp.dir.writeFile(io, .{ .sub_path = "\xfd.js", .data =
+        \\try { null.x; } catch (e) { print("caught", e.constructor.name); }
+        \\print(new Error("e").stack.split("\n")[0].startsWith("    at <eval> ("));
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/\xfd.js", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-s", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("caught TypeError\ntrue\n", result.stdout);
+}
+
+test "zjs keeps its exit status when stderr cannot be written" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    // Only an unwritable stdout exits like SIGPIPE (141).
+    const cases = [_]struct { script: []const u8, status: u8 }{
+        .{ .script = "exec \"$0\" missing-file.js 2>/dev/full", .status = 1 },
+        .{ .script = "exec \"$0\" -e 'Promise.reject(1)' 2>/dev/full", .status = 1 },
+        .{ .script = "exec \"$0\" 2>/dev/full", .status = 2 },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(allocator, io, .{ .argv = &.{ "sh", "-c", case.script, zjs_path } });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = case.status }, result.term);
+    }
+}
+
+test "zjs --native-stack-size 0 still bounds native recursion by the thread stack" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "--native-stack-size", "0", "-e", "try { JSON.parse('['.repeat(1e7)); } catch (e) { print(e.constructor.name); }" } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("InternalError\n", result.stdout);
+}
+
+test "zjs accepts TypeScript export merging, typed using, default overloads and type-only re-exports" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "def.ts", .data =
+        \\export default function (): number;
+        \\export default function (a?: any) { return 3; }
+        \\
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "side.ts", .data =
+        \\console.log("side");
+        \\export type X = number;
+        \\
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\export { type X } from "./side.ts";
+        \\import f from "./def.ts";
+        \\export class Foo { x = 1 }
+        \\export namespace Foo { export const tag = "ns"; export interface Opts {} }
+        \\export function F() { return 1 }
+        \\export namespace F { export const k = 2 }
+        \\export namespace N { export const a = 1 }
+        \\export namespace N { export const b = 2 }
+        \\{ using x: { [Symbol.dispose](): void } = { [Symbol.dispose]() { console.log("disposed") } }; }
+        \\const n: any = 5;
+        \\console.log(new Foo().x, Foo.tag, F(), F.k, N.a, N.b, f(), n as number ** 2);
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.ts", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqualStrings("side\ndisposed\n1 ns 1 2 1 2 3 25\n", result.stdout);
+}
+
+test "zjs rejects unsupported import attribute keys with SyntaxError" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "data.json", .data = "{\"a\":1}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "static.mjs", .data = "import d from './data.json' with { type: 'json', foo: 'x' };\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.mjs", .data =
+        \\const name = (p) => p.then(() => 'ok', (e) => e.name);
+        \\console.log(await name(import('./data.json', { with: { foo: 'x' } })),
+        \\  await name(import('./data.json', { with: { foo: 1 } })),
+        \\  await name(import('./static.mjs')),
+        \\  (await import('./data.json', { with: { type: 'json' } })).default.a);
+        \\
+    });
+    var main_path_buf: [256]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buf, ".zig-cache/tmp/{s}/main.mjs", .{tmp.sub_path});
+
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "-m", main_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("SyntaxError TypeError SyntaxError 1\n", result.stdout);
+}
+
+test "zjs host globals convert arguments and print lone surrogates" {
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const source =
+        \\const name = (f) => { try { return f(); } catch (e) { return e.name; } };
+        \\print("a\ud800b", /😀a/u);
+        \\print(btoa({ toString() { print("to-btoa"); return "x"; } }), atob({ toString() { print("to-atob"); return "YQ=="; } }), name(() => atob("Y\vQ==")), name(() => btoa()));
+        \\print(new DOMException({ toString() { return "m"; } }).message);
+    ;
+    const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "-e", source } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("a\u{FFFD}b /\u{1F600}a/u\nto-btoa\nto-atob\neA== a InvalidCharacterError TypeError\nm\n", result.stdout);
+}
+
+test "zjs reports thrown primitives and rejected primitives by value" {
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const Case = struct { source: []const u8, stderr: []const u8 };
+    for ([_]Case{
+        .{ .source = "throw 42", .stderr = "42\n" },
+        .{ .source = "throw 'str'", .stderr = "str\n" },
+        .{ .source = "throw Symbol('s')", .stderr = "Symbol(s)\n" },
+        .{ .source = "Promise.reject(2.5)", .stderr = "Possibly unhandled promise rejection: 2.5\n" },
+    }) |case| {
+        const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "-e", case.source } });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expectEqualStrings(case.stderr, result.stderr);
+    }
+}
+
+test "zjs reports top-level engine errors as JS errors" {
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const Case = struct { argv: []const []const u8, stderr: []const u8 };
+    for ([_]Case{
+        .{ .argv = &.{ "-e", "10n / 0n" }, .stderr = "RangeError: BigInt division by zero\n    at <eval> (<eval>:1:5)\n" },
+        .{ .argv = &.{ "-I", "missing-include.js", "-e", "1" }, .stderr = "zjs: unable to read missing-include.js: FileNotFound\n" },
+    }) |case| {
+        var argv: [8][]const u8 = undefined;
+        argv[0] = zjs_path;
+        @memcpy(argv[1..][0..case.argv.len], case.argv);
+        const result = try std.process.run(allocator, std.testing.io, .{ .argv = argv[0 .. case.argv.len + 1] });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expectEqualStrings(case.stderr, result.stderr);
+    }
+}
+
+test "zjs catches out-of-memory from literal creation" {
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    for ([_][]const u8{ "a.push({ x: 1 })", "a.push([])" }) |step| {
+        var source_buf: [128]u8 = undefined;
+        const source = try std.fmt.bufPrint(&source_buf, "var a = []; try {{ for (;;) {s}; }} catch (e) {{ a = null; print(e.name); }}", .{step});
+        const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "--memory-limit", "2000", "-e", source } });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("InternalError\n", result.stdout);
+    }
+}
+
+test "zjs host output keeps prints from user code run while printing or converting" {
+    // console.error writes to stderr, but a print() from Error.prepareStackTrace
+    // (run while formatting) belongs to stdout; DOMException's ToString
+    // conversions print through the invocation's writer too.
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const source =
+        \\Error.prepareStackTrace = () => { print("P"); return "S"; };
+        \\console.error(new Error("x"));
+        \\Error.prepareStackTrace = undefined;
+        \\const o = { toString() { print("T"); return "m"; } };
+        \\new DOMException(o, o);
+    ;
+    const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "-e", source } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("P\nT\nT\n", result.stdout);
+    try std.testing.expectEqualStrings("Error: x\nS\n", result.stderr);
+}
+
+test "zjs accepts --can-block with -e as its usage line advertises" {
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "--can-block", "-e", "print(1)" } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("1\n", result.stdout);
+}
+
+test "zjs -s reports an implementation-limit compile error with its filename" {
+    // The SyntaxError's filename is borrowed from the atom table, which
+    // nothing roots once compilation returned; a 65,536-local function
+    // collected it while the error was built and reported
+    // "URIError: expecting hex digit" instead.
+    const allocator = std.testing.allocator;
+    var path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&path_buf);
+    const root_dir = ".zig-cache/smoke-compile-limit";
+    const script_path = root_dir ++ "/too_many_locals.js";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "function f() {");
+    for (0..65536) |i| try source.print(allocator, "var v{d};", .{i});
+    try source.appendSlice(allocator, "}\n");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = script_path, .data = source.items });
+
+    const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "-s", script_path } });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expect(std.mem.startsWith(u8, result.stderr, "SyntaxError: implementation limit exceeded"));
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "too_many_locals.js") != null);
 }

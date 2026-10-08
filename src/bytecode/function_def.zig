@@ -13,9 +13,9 @@ const bigint_mod = @import("../core/bigint.zig");
 const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("../compiler/root.zig");
-const FunctionBytecode = bytecode.FunctionBytecode;
-const pipeline = bytecode.pipeline;
-const module = bytecode.module;
+const growable = @import("growable.zig");
+const growSliceBy = growable.growSliceBy;
+const freeGrowableSlice = growable.freeGrowableSlice;
 const function_bytecode = bytecode.function_bytecode;
 const binding_rules = bytecode.binding_rules;
 
@@ -51,6 +51,8 @@ pub const VarDef = function_bytecode_mod.VarDef;
 pub const VarScope = struct {
     parent: i32, // index into scopes of the enclosing scope
     first: i32, // index into vars of the last variable in this scope
+    /// This scope or an enclosing one in the same function is a `with` body.
+    inside_with: bool = false,
 };
 
 pub const ClosureVar = function_bytecode_mod.ClosureVar;
@@ -76,69 +78,10 @@ pub const ScopeProofTestCounters = if (builtin.is_test) struct {
     pub threadlocal var cache_hits: usize = 0;
 } else void;
 
-/// Generic geometric growth helper for FunctionDefImpl hot buffers.
-///
-/// Maintains the contract that `slice.*.len` is the *used* count while the
-/// allocator-owned backing buffer is `slice.*.ptr[0..capacity.*]`. Returns a
-/// writable view of the freshly grown tail (length `n`).
-///
-/// Each append used to do `alloc(old + n) + memcpy + free(old)`, making
-/// repeated appends O(n²). Geometric growth (capacity doubling, with an
-/// 8-element floor) reduces total cost to amortised O(1) per item.
-inline fn growSliceBy(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    slice: *[]T,
-    capacity: *usize,
-    n: usize,
-) ![]T {
-    const used = slice.len;
-    const new_used = used + n;
-    if (new_used <= capacity.*) {
-        slice.* = slice.ptr[0..new_used];
-        return slice.ptr[used..new_used];
-    }
-    var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
-    if (new_cap < new_used) new_cap = new_used;
-    const new_buf = try allocator.alloc(T, new_cap);
-    if (used != 0) @memcpy(new_buf[0..used], slice.ptr[0..used]);
-    var old_buf: []T = &.{};
-    if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-    slice.* = new_buf[0..new_used];
-    capacity.* = new_cap;
-    if (old_buf.len != 0) allocator.free(old_buf);
-    return slice.ptr[used..new_used];
-}
-
-/// Free the full backing buffer of a growable slice and reset both the
-/// visible slice and its capacity.
-fn freeGrowableSlice(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    slice: *[]T,
-    capacity: *usize,
-) void {
-    var old_buf: []T = &.{};
-    if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_buf.len != 0) allocator.free(old_buf);
-}
-
-fn freeGrowableAtomSlice(
-    allocator: std.mem.Allocator,
-    slice: *[]atom.Atom,
-    capacity: *usize,
-) void {
-    const items = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_capacity != 0) {
-        allocator.free(items.ptr[0..old_capacity]);
-    } else if (items.len != 0) {
-        allocator.free(items);
-    }
+/// Scope, variable, and argument indices are u16 bytecode operands: refuse
+/// the entry that would not fit instead of truncating it.
+fn checkU16Index(next_index: usize) error{BytecodeOverflow}!void {
+    if (next_index > std.math.maxInt(u16)) return error.BytecodeOverflow;
 }
 
 fn freeGrowableNamedSlice(
@@ -171,7 +114,6 @@ pub const FunctionDefImpl = struct {
     /// This child's slot in the parent's constant pool once appended.
     parent_cpool_idx: ?u16 = null,
     parent_scope_level: i32 = 0,
-    parent_parameter_environment_only: bool = false,
 
     // Flags — packed as in QuickJS
     is_eval: bool = false,
@@ -182,6 +124,9 @@ pub const FunctionDefImpl = struct {
     has_home_object: bool = false,
     has_prototype: bool = false,
     has_simple_parameter_list: bool = true,
+    /// `vars[0..parameter_var_count]` hold the names bound by destructuring
+    /// or rest-pattern parameters (BoundNames of the formals beyond `args`).
+    parameter_var_count: u32 = 0,
     has_parameter_expressions: bool = false,
     has_use_strict: bool = false,
     has_eval_call: bool = false,
@@ -218,15 +163,14 @@ pub const FunctionDefImpl = struct {
     /// `special_object THIS_FUNC ; put_loc` prologue materialize lazily on
     /// the first falling-through reference — mirroring qjs, where
     /// add_func_var is only called from resolve_scope_var
-    /// and add_eval_variables
-    ///, never unconditionally.
+    /// and add_eval_variables,
+    /// never unconditionally.
     is_named_func_expr: bool = false,
     func_name: atom.Atom,
 
     // Variables
     vars: []VarDef = &.{},
     vars_capacity: usize = 0,
-    vars_htab: []u32 = &.{},
     /// Newest scope-0 (function-level) row per name: the flat `find_var`
     /// pass that follows a lexical-chain miss (qjs `var_htab`). Built on
     /// demand once the function has enough rows for the linear scan to
@@ -234,6 +178,46 @@ pub const FunctionDefImpl = struct {
     /// a row never changes scope, so catching up is exact.
     function_var_index: std.AutoHashMapUnmanaged(u32, u16) = .empty,
     function_var_indexed_len: usize = 0,
+    /// Memo of one scope-chain walk (`scopeChainFirstVar`): the first var
+    /// per name along the chain from `scope_chain_start`, valid while
+    /// `vars` keeps `scope_chain_vars_len` rows.
+    scope_chain_names: std.AutoHashMapUnmanaged(u32, u16) = .empty,
+    scope_chain_start: i32 = -1,
+    scope_chain_vars_len: usize = 0,
+    /// The `scope_next` that ended the walk.
+    scope_chain_end: i32 = -1,
+    scope_chain_has_with: bool = false,
+    /// Direct-eval code whose caller's environment includes a `with` object
+    /// (seeded as a `with_object` closure variable).
+    eval_inside_with: bool = false,
+    /// `var` declarations that reused an existing parameter or function var:
+    /// the var row keeps its first origin scope, so the redeclaration check
+    /// for a later lexical declaration also consults these.
+    reused_var_origins: std.ArrayList(ReusedVarOrigin) = .empty,
+    /// Oldest `closure_var` row per name, and the rows naming a dynamic
+    /// environment object (`<with>`, `<var>`, `<arg_var>`) in row order:
+    /// the eval-root scan children repeat for every free name. Maintained
+    /// like `function_var_index` (rows are append-only, names fixed).
+    closure_row_index: std.AutoHashMapUnmanaged(u32, ClosureRowNames) = .empty,
+    /// Per indexed row: the next row with the same name, or `no_closure_row`.
+    closure_row_next: std.ArrayList(u32) = .empty,
+    closure_dynamic_env_rows: std.ArrayList(u16) = .empty,
+    closure_rows_indexed_len: usize = 0,
+    /// Oldest `closure_var` row per (closure_type, var_idx), the identity
+    /// QuickJS's get_closure_var matches on. Maintained like
+    /// `closure_row_index`.
+    closure_source_index: std.AutoHashMapUnmanaged(u32, u16) = .empty,
+    closure_sources_indexed_len: usize = 0,
+    /// Parse-time index over `global_vars` (append-only, names and
+    /// lexicality fixed at append): first row per name and whether any row
+    /// of that name is lexical.
+    global_var_names: std.AutoHashMapUnmanaged(u32, GlobalVarName) = .empty,
+    global_vars_indexed_len: usize = 0,
+    /// Newest `vars` row per (scope, name), for the scope-chain lookup of
+    /// large functions: one probe per scope on the chain. Rows are
+    /// append-only and never change name or scope, so catching up is exact.
+    scope_var_index: std.AutoHashMapUnmanaged(u64, u16) = .empty,
+    scope_var_indexed_len: usize = 0,
     var_count: i32 = 0,
     args: []VarDef = &.{},
     args_capacity: usize = 0,
@@ -339,7 +323,7 @@ pub const FunctionDefImpl = struct {
         self.filename = atom.null_atom;
         self.script_or_module = atom.null_atom;
         // A root emitter attaches its Builder before the first token is
-        // lexed (`ParseState.initRootEmitter`), so an initializer that
+        // lexed (`State.ensureBuilderForFd`), so an initializer that
         // fails after that point owns one exactly like a fully built
         // FunctionDef does. Release it on the same terms as `deinit`.
         if (self.builder) |v2b| {
@@ -351,22 +335,24 @@ pub const FunctionDefImpl = struct {
         self.scope_count = 0;
     }
 
-    /// Append a `VarScope` to `scopes`. Mirrors `push_scope`
-    ///: the new scope records its parent index
+    /// Append a `VarScope` to `scopes`. Mirrors `push_scope`:
+    /// the new scope records its parent index
     /// and inherits the current visible binding head. Returns the index
     /// of the newly added scope (== new `scope_level`).
     pub fn appendScope(self: *FunctionDefImpl, parent: i32) !i32 {
+        try checkU16Index(self.scopes.len);
         self.invalidateScopeLinkCache();
         const tail = try growSliceBy(VarScope, self.allocator, &self.scopes, &self.scopes_capacity, 1);
-        tail[0] = .{ .parent = parent, .first = self.scope_first };
+        const inside_with = parent >= 0 and self.scopes[@intCast(parent)].inside_with;
+        tail[0] = .{ .parent = parent, .first = self.scope_first, .inside_with = inside_with };
         self.scope_count += 1;
         const idx: i32 = @intCast(self.scopes.len - 1);
         return idx;
     }
 
     /// Destructively rebuild the final scope linkage once, exactly where
-    /// QuickJS does so at the start of `js_create_function`
-    ///. From this point onward `scopes[].first`
+    /// QuickJS does so at the start of `js_create_function`.
+    /// From this point onward `scopes[].first`
     /// and `VarDef.scope_next` are the sole lexical-chain authority.
     pub fn rebuildFinalScopeLinks(self: *FunctionDefImpl) error{InvalidScope}!void {
         self.invalidateScopeLinkCache();
@@ -527,6 +513,8 @@ pub const FunctionDefImpl = struct {
         self.global_vars = &.{};
         self.global_vars_capacity = 0;
         self.global_var_count = 0;
+        self.global_var_names.clearRetainingCapacity();
+        self.global_vars_indexed_len = 0;
         for (globals) |*gv| {
             gv.var_name = atom.null_atom;
         }
@@ -657,15 +645,27 @@ pub const FunctionDefImpl = struct {
             scope_idx = vd.scope_next;
         }
 
+        const old_head = self.scopes[@intCast(argument_scope_level)].first;
         const idx = try self.appendVar(.{
             .var_name = atom.ids.arguments,
             .scope_level = argument_scope_level,
-            .scope_next = self.scopes[@intCast(argument_scope_level)].first,
+            .scope_next = old_head,
             .is_lexical = true,
             .var_kind = .normal,
         });
         self.scopes[@intCast(argument_scope_level)].first = idx;
         self.arguments_arg_idx = @intCast(idx);
+        // A scope nested in the parameter list (a class expression in a
+        // default) ends its chain at the argument scope's old head; only a
+        // chain into scope 1 can name a scope-1 variable, so retarget those.
+        if (old_head >= 0) {
+            for (self.scopes[2..]) |*scope| {
+                if (scope.first == old_head) scope.first = idx;
+            }
+            for (self.vars[0..@intCast(idx)]) |*vd| {
+                if (vd.scope_level >= 2 and vd.scope_next == old_head) vd.scope_next = idx;
+            }
+        }
         try self.validateFinalScopeLinks();
     }
 
@@ -683,12 +683,13 @@ pub const FunctionDefImpl = struct {
         return self.vars[idx].scope_next != 0;
     }
 
-    /// Append a `VarDef` to `vars`. Mirrors `add_var`
-    ///. The caller is responsible for setting
+    /// Append a `VarDef` to `vars`. Mirrors `add_var`.
+    /// The caller is responsible for setting
     /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom id
     /// is copied by value; the atom table is not consulted.
     /// Returns the index of the new var.
     pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
+        try checkU16Index(self.vars.len);
         self.invalidateScopeLinkCache();
         const tail = try growSliceBy(VarDef, self.allocator, &self.vars, &self.vars_capacity, 1);
         tail[0] = var_def;
@@ -709,6 +710,7 @@ pub const FunctionDefImpl = struct {
     /// QuickJS function metadata; parser lowering resolves matching
     /// identifier references to `get_arg*` opcodes.
     pub fn appendArg(self: *FunctionDefImpl, var_def: VarDef) !i32 {
+        try checkU16Index(self.args.len);
         const tail = try growSliceBy(VarDef, self.allocator, &self.args, &self.args_capacity, 1);
         tail[0] = var_def;
         tail[0].var_name = var_def.var_name;
@@ -812,6 +814,9 @@ pub const FunctionDefImpl = struct {
     /// The newest function-level (`scope_level == 0`) var named `name`:
     /// QuickJS's `find_var` after the finalized lexical chain missed.
     /// Small functions scan; large ones consult `function_var_index`.
+    /// A function-level var named `name`, newest first. A function
+    /// expression's own name is not one: it lives outside the parameters and
+    /// vars (§10.2.11) and is found last (`lookupCurrentFunctionName`).
     pub fn findFunctionVar(self: *FunctionDefImpl, name: atom.Atom) ?u16 {
         if (self.vars.len < function_var_index_threshold) return self.scanFunctionVar(name);
         if (self.function_var_indexed_len < self.vars.len) {
@@ -825,7 +830,7 @@ pub const FunctionDefImpl = struct {
         while (i > 0) {
             i -= 1;
             const vd = &self.vars[i];
-            if (vd.var_name == name and vd.scope_level == 0) return @intCast(i);
+            if (vd.var_name == name and vd.scope_level == 0 and vd.var_kind != .function_name) return @intCast(i);
         }
         return null;
     }
@@ -838,9 +843,175 @@ pub const FunctionDefImpl = struct {
         try self.function_var_index.ensureUnusedCapacity(allocator, @intCast(self.vars.len - self.function_var_indexed_len));
         for (self.vars[self.function_var_indexed_len..], self.function_var_indexed_len..) |vd, i| {
             // Later rows overwrite earlier ones: newest wins, as in the scan.
-            if (vd.scope_level == 0) self.function_var_index.putAssumeCapacity(vd.var_name.raw(), @intCast(i));
+            if (vd.scope_level == 0 and vd.var_kind != .function_name) self.function_var_index.putAssumeCapacity(vd.var_name.raw(), @intCast(i));
         }
         self.function_var_indexed_len = self.vars.len;
+    }
+
+    pub const ScopeChainLookup = union(enum) {
+        /// The chain holds a `with` object; walk it to thread the object.
+        walk,
+        found: u16,
+        /// Not on the chain; the walk ended at `end` (-1 or the argument
+        /// scope marker).
+        missing: i32,
+    };
+
+    /// The first var named `name` walking `scope_next` from `start_scope`'s
+    /// newest var, memoized per start scope: resolving many captures from
+    /// one scope would otherwise walk its whole chain once per capture.
+    /// Requires final scope links.
+    pub fn scopeChainFirstVar(self: *FunctionDefImpl, start_scope: i32, name: atom.Atom) !ScopeChainLookup {
+        if (self.scope_chain_start != start_scope or self.scope_chain_vars_len != self.vars.len) {
+            self.scope_chain_names.clearRetainingCapacity();
+            self.scope_chain_start = -1;
+            self.scope_chain_has_with = false;
+            var var_idx = self.scopes[@intCast(start_scope)].first;
+            while (var_idx >= 0) {
+                const vd = self.vars[@intCast(var_idx)];
+                if (vd.var_name == atom.ids.with_object) self.scope_chain_has_with = true;
+                const entry = try self.scope_chain_names.getOrPut(self.artifacts, vd.var_name.raw());
+                if (!entry.found_existing) entry.value_ptr.* = @intCast(var_idx);
+                var_idx = vd.scope_next;
+            }
+            self.scope_chain_end = var_idx;
+            self.scope_chain_start = start_scope;
+            self.scope_chain_vars_len = self.vars.len;
+        }
+        if (self.scope_chain_has_with) return .walk;
+        if (self.scope_chain_names.get(name.raw())) |row| return .{ .found = row };
+        return .{ .missing = self.scope_chain_end };
+    }
+
+    /// The newest var named `name` declared directly in `scope`.
+    pub fn newestVarInScope(self: *FunctionDefImpl, scope: i32, name: atom.Atom) !?u16 {
+        if (self.scope_var_indexed_len < self.vars.len) {
+            const allocator = self.artifacts;
+            try self.scope_var_index.ensureUnusedCapacity(allocator, @intCast(self.vars.len - self.scope_var_indexed_len));
+            for (self.vars[self.scope_var_indexed_len..], self.scope_var_indexed_len..) |vd, i| {
+                // Later rows overwrite earlier ones: newest wins on a tie.
+                self.scope_var_index.putAssumeCapacity(scopeVarKey(vd.scope_level, vd.var_name), @intCast(i));
+            }
+            self.scope_var_indexed_len = self.vars.len;
+        }
+        return self.scope_var_index.get(scopeVarKey(scope, name));
+    }
+
+    fn scopeVarKey(scope: i32, name: atom.Atom) u64 {
+        return (@as(u64, @as(u32, @bitCast(scope))) << 32) | name.raw();
+    }
+
+    pub const GlobalVarName = struct { first: u32, has_lexical: bool };
+
+    pub const ClosureRowNames = struct { first: u16, last: u16 };
+    pub const ReusedVarOrigin = struct { name: atom.Atom, scope: i32 };
+    pub const no_closure_row: u32 = std.math.maxInt(u32);
+
+    pub const ClosureRowIterator = struct {
+        next_rows: []const u32,
+        row: u32,
+
+        pub fn next(self: *ClosureRowIterator) ?u16 {
+            if (self.row == no_closure_row) return null;
+            const row = self.row;
+            self.row = self.next_rows[row];
+            return @intCast(row);
+        }
+    };
+
+    /// The first `global_vars` row named `name` and whether any is lexical.
+    pub fn findGlobalVarName(self: *FunctionDefImpl, name: atom.Atom) ?GlobalVarName {
+        if (self.global_vars.len < function_var_index_threshold) return self.scanGlobalVarName(name);
+        self.catchUpGlobalVarIndex() catch return self.scanGlobalVarName(name);
+        return self.global_var_names.get(name.raw());
+    }
+
+    fn scanGlobalVarName(self: *const FunctionDefImpl, name: atom.Atom) ?GlobalVarName {
+        var found: ?GlobalVarName = null;
+        for (self.global_vars, 0..) |gv, i| {
+            if (gv.var_name != name) continue;
+            if (found) |*f| {
+                f.has_lexical = f.has_lexical or gv.is_lexical;
+            } else {
+                found = .{ .first = @intCast(i), .has_lexical = gv.is_lexical };
+            }
+        }
+        return found;
+    }
+
+    fn catchUpGlobalVarIndex(self: *FunctionDefImpl) !void {
+        if (self.global_vars_indexed_len == self.global_vars.len) return;
+        const allocator = self.artifacts;
+        try self.global_var_names.ensureUnusedCapacity(allocator, @intCast(self.global_vars.len - self.global_vars_indexed_len));
+        for (self.global_vars[self.global_vars_indexed_len..], self.global_vars_indexed_len..) |gv, i| {
+            const entry = self.global_var_names.getOrPutAssumeCapacity(gv.var_name.raw());
+            if (entry.found_existing) {
+                entry.value_ptr.has_lexical = entry.value_ptr.has_lexical or gv.is_lexical;
+            } else {
+                entry.value_ptr.* = .{ .first = @intCast(i), .has_lexical = gv.is_lexical };
+            }
+        }
+        self.global_vars_indexed_len = self.global_vars.len;
+    }
+
+    /// The oldest `closure_var` row named `name`.
+    pub fn findClosureRow(self: *FunctionDefImpl, name: atom.Atom) error{ OutOfMemory, BytecodeOverflow }!?u16 {
+        try self.catchUpClosureRowIndex();
+        const rows = self.closure_row_index.get(name.raw()) orelse return null;
+        return rows.first;
+    }
+
+    /// Every `closure_var` row named `name`, oldest first.
+    pub fn closureRowsNamed(self: *FunctionDefImpl, name: atom.Atom) error{ OutOfMemory, BytecodeOverflow }!ClosureRowIterator {
+        try self.catchUpClosureRowIndex();
+        const rows = self.closure_row_index.get(name.raw()) orelse return .{ .next_rows = &.{}, .row = no_closure_row };
+        return .{ .next_rows = self.closure_row_next.items, .row = rows.first };
+    }
+
+    /// The oldest `closure_var` row of type `closure_type` whose `var_idx`
+    /// is `var_idx`.
+    pub fn findClosureSource(self: *FunctionDefImpl, closure_type: ClosureType, var_idx: u16) error{OutOfMemory}!?u16 {
+        if (self.closure_sources_indexed_len != self.closure_var.len) {
+            const allocator = self.artifacts;
+            try self.closure_source_index.ensureUnusedCapacity(allocator, @intCast(self.closure_var.len - self.closure_sources_indexed_len));
+            for (self.closure_var[self.closure_sources_indexed_len..], self.closure_sources_indexed_len..) |cv, i| {
+                const entry = self.closure_source_index.getOrPutAssumeCapacity(closureSourceKey(cv.closureType(), cv.var_idx));
+                if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
+            }
+            self.closure_sources_indexed_len = self.closure_var.len;
+        }
+        return self.closure_source_index.get(closureSourceKey(closure_type, var_idx));
+    }
+
+    fn closureSourceKey(closure_type: ClosureType, var_idx: u16) u32 {
+        return @as(u32, @intFromEnum(closure_type)) << 16 | var_idx;
+    }
+
+    /// The rows naming a dynamic environment object, in row order.
+    pub fn closureDynamicEnvRows(self: *FunctionDefImpl) error{ OutOfMemory, BytecodeOverflow }![]const u16 {
+        try self.catchUpClosureRowIndex();
+        return self.closure_dynamic_env_rows.items;
+    }
+
+    fn catchUpClosureRowIndex(self: *FunctionDefImpl) error{ OutOfMemory, BytecodeOverflow }!void {
+        if (self.closure_rows_indexed_len == self.closure_var.len) return;
+        if (self.closure_var.len > std.math.maxInt(u16) + 1) return error.BytecodeOverflow;
+        const allocator = self.artifacts;
+        try self.closure_row_index.ensureUnusedCapacity(allocator, @intCast(self.closure_var.len - self.closure_rows_indexed_len));
+        try self.closure_row_next.ensureTotalCapacity(allocator, self.closure_var.len);
+        for (self.closure_var[self.closure_rows_indexed_len..], self.closure_rows_indexed_len..) |cv, i| {
+            const row: u16 = @intCast(i);
+            self.closure_row_next.appendAssumeCapacity(no_closure_row);
+            const entry = self.closure_row_index.getOrPutAssumeCapacity(cv.var_name.raw());
+            if (entry.found_existing) {
+                self.closure_row_next.items[entry.value_ptr.last] = row;
+                entry.value_ptr.last = row;
+            } else entry.value_ptr.* = .{ .first = row, .last = row };
+            if (cv.var_name == atom.ids.with_object or cv.var_name == atom.ids.var_object or cv.var_name == atom.ids.arg_var_object) {
+                try self.closure_dynamic_env_rows.append(allocator, row);
+            }
+        }
+        self.closure_rows_indexed_len = self.closure_var.len;
     }
 
     /// Find a var by name, searching newest-first. Returns the var
@@ -862,6 +1033,15 @@ pub const FunctionDefImpl = struct {
             if (self.args[i].var_name == name) return @intCast(i);
         }
         return -1;
+    }
+
+    /// B.3.2.1 "parameterNames does not contain F": names bound by a
+    /// destructuring or rest pattern in the formals live in `vars`, not `args`.
+    pub fn isPatternParameterName(self: *const FunctionDefImpl, name: atom.Atom) bool {
+        for (self.vars[0..@min(self.parameter_var_count, self.vars.len)]) |vd| {
+            if (vd.var_name == name) return true;
+        }
+        return false;
     }
 
     pub fn appendCpool(self: *FunctionDefImpl, value: JSValue) !u32 {
@@ -921,8 +1101,15 @@ pub const FunctionDefImpl = struct {
         }
 
         freeGrowableNamedSlice(VarDef, self.allocator, &self.vars, &self.vars_capacity);
-        if (self.vars_htab.len != 0) self.allocator.free(self.vars_htab);
         self.function_var_index.deinit(self.artifacts);
+        self.closure_row_index.deinit(self.artifacts);
+        self.closure_row_next.deinit(self.artifacts);
+        self.closure_source_index.deinit(self.artifacts);
+        self.global_var_names.deinit(self.artifacts);
+        self.scope_var_index.deinit(self.artifacts);
+        self.scope_chain_names.deinit(self.artifacts);
+        self.reused_var_origins.deinit(self.artifacts);
+        self.closure_dynamic_env_rows.deinit(self.artifacts);
         self.function_var_indexed_len = 0;
 
         freeGrowableNamedSlice(VarDef, self.allocator, &self.args, &self.args_capacity);
@@ -956,7 +1143,6 @@ pub const FunctionDefImpl = struct {
             self.allocator.destroy(child);
         }
 
-        self.vars_htab = &.{};
         self.discard_next = null;
         self.source_text = null;
         if (old_child_list_capacity != 0) self.allocator.free(old_child_list.ptr[0..old_child_list_capacity]);

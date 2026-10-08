@@ -40,7 +40,33 @@ pub fn cloneBigIntValue(allocator: std.mem.Allocator, value: JSValue) !bignum.Bi
     return error.TypeError;
 }
 
-pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: JSValue) !void {
+/// A read-only view of a BigInt value for comparing, formatting or
+/// converting it: a heap BigInt's limbs are borrowed (no copy, whatever the
+/// size), a short BigInt is materialized into one owned limb. `deinit`
+/// releases only what the view owns. The borrowed limbs stay valid only while
+/// the value is live and unmodified, so do not allocate JS values in between.
+pub const BigIntView = struct {
+    int: bignum.BigInt,
+    owned: bool,
+
+    pub fn init(allocator: std.mem.Allocator, value: JSValue) !BigIntView {
+        if (value.as(.short_big_int)) |short| return .{ .int = try bignum.BigInt.fromIntAlloc(allocator, short), .owned = true };
+        if (value.isBigInt()) {
+            if (value.refHeader()) |header| {
+                const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
+                return .{ .int = big.borrowedValue(allocator), .owned = false };
+            }
+        }
+        return error.TypeError;
+    }
+
+    pub fn deinit(self: *BigIntView) void {
+        if (self.owned) self.int.deinit();
+    }
+};
+
+/// `interrupt`: null, or a runtime polled through the quadratic conversion.
+pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: JSValue, interrupt: anytype) !void {
     if (value.as(.short_big_int)) |bigint_value| {
         var bigint_buf: [32]u8 = undefined;
         const printed = dtoa.formatInt64(&bigint_buf, bigint_value);
@@ -49,7 +75,7 @@ pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u
     if (!value.isBigInt()) return error.TypeError;
     const header = value.refHeader() orelse return error.TypeError;
     const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
-    const printed = try big.borrowedValue(allocator).formatBase10Alloc(allocator);
+    const printed = try big.borrowedValue(allocator).formatBase10Alloc(allocator, interrupt);
     defer allocator.free(printed);
     try buffer.appendSlice(allocator, printed);
 }

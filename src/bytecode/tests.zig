@@ -138,7 +138,7 @@ test "bytecode module record add failure releases duplicated atom references" {
     var name_roots = core.runtime.rootAtoms(.{ &import_name, &local_name });
     name_roots.activate(rt);
 
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, record.addImport(0, import_name, local_name, 0, false));
     rt.setNativeBytesLimitForTest(null);
 
@@ -280,16 +280,16 @@ test "createFunctionBytecode rejects a cross-runtime compile context before movi
     _ = try fd.appendScope(-1);
     try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
 
-    const owner_bytes = owner_rt.diagnostics.allocations.allocated_bytes;
-    const foreign_bytes = foreign_rt.diagnostics.allocations.allocated_bytes;
+    const owner_bytes = owner_rt.allocation_diagnostics.allocated_bytes;
+    const foreign_bytes = foreign_rt.allocation_diagnostics.allocated_bytes;
     try std.testing.expectError(
         error.InvalidBytecode,
         pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = foreign_realm }),
     );
     try std.testing.expect(fd.builder != null);
     try std.testing.expectEqual(name, fd.func_name);
-    try std.testing.expectEqual(owner_bytes, owner_rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(foreign_bytes, foreign_rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(owner_bytes, owner_rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(foreign_bytes, foreign_rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "FunctionBytecode uses the exact QJS base and optional inline tails" {
@@ -310,7 +310,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     };
 
     for (cases) |case| {
-        const before_bytes = rt.diagnostics.allocations.allocated_bytes;
+        const before_bytes = rt.allocation_diagnostics.allocated_bytes;
         const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
             .has_debug = case.debug,
             .has_extension = case.extension,
@@ -360,7 +360,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(case.extension, fb.hotExtension() != null);
 
         fb.destroyUnpublishedFixture(rt);
-        try std.testing.expectEqual(before_bytes, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(before_bytes, rt.allocation_diagnostics.allocated_bytes);
     }
 
     try std.testing.expectEqual(
@@ -618,7 +618,6 @@ test "CallFacts is one 16-bit execution snapshot" {
     defer fb.destroyUnpublishedFixture(rt);
 
     const first_execution: bytecode.function_bytecode.ExecutionFlags = .{
-        .has_mapped_arguments = true,
         .strict_simple_inline_eligible = true,
         .raw_this_inline_exact_args_leaf = true,
         .exact_args_leaf_kind = .raw_this,
@@ -738,7 +737,7 @@ test "non-empty W1c5 fixture does not force the optional extension" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const before_bytes = rt.diagnostics.allocations.allocated_bytes;
+    const before_bytes = rt.allocation_diagnostics.allocated_bytes;
     const code = [_]u8{bytecode.opcode.op.return_undef};
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
         .byte_code = &code,
@@ -760,7 +759,7 @@ test "non-empty W1c5 fixture does not force the optional extension" {
     try std.testing.expectEqualSlices(u8, &code, fb.byteCode());
 
     fb.destroyUnpublishedFixture(rt);
-    try std.testing.expectEqual(before_bytes, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(before_bytes, rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "FunctionBytecode FAM builder zeroes a reused slab payload without touching metadata" {
@@ -1573,7 +1572,7 @@ test "FunctionDef source replacement preserves the prior NUL owner across OOM an
     try fd.replaceSourceText("old source");
     const old_ptr = fd.source_text.?.ptr;
 
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, fd.replaceSourceText("replacement source"));
     rt.setNativeBytesLimitForTest(null);
@@ -1601,7 +1600,7 @@ test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
     try emitTestBody(&failed_fd, &.{bytecode.opcode.op.return_undef}, &.{});
     try failed_fd.replaceSourceText("failed attempt");
 
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     const failed_result = pipeline.finalize.createFunctionBytecode(&failed_fd, .{ .realm = realm });
     rt.setNativeBytesLimitForTest(null);
@@ -2469,7 +2468,6 @@ test "mapped frames use the exact compile-time open-binding count for every fram
             .flags = .{ .func_kind = kind },
         });
         defer function.destroyUnpublishedFixture(rt);
-        function.setExecutionFlags(.{ .has_mapped_arguments = kind == .normal });
         try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(function));
     }
 
@@ -2683,8 +2681,8 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-replacement");
-    const base_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const base_count = rt.diagnostics.allocations.allocation_count;
+    const base_bytes = rt.allocation_diagnostics.allocated_bytes;
+    const base_count = rt.allocation_diagnostics.allocation_count;
 
     var bc = bytecode.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     var bc_live = true;
@@ -2721,8 +2719,8 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
 
     bc.deinit();
     bc_live = false;
-    try std.testing.expectEqual(base_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(base_count, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(base_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.allocation_diagnostics.allocation_count);
 }
 
 test "capacity-carry install with zero used length still owns and frees the backing" {
@@ -2730,8 +2728,8 @@ test "capacity-carry install with zero used length still owns and frees the back
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-zero-used");
-    const base_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const base_count = rt.diagnostics.allocations.allocation_count;
+    const base_bytes = rt.allocation_diagnostics.allocated_bytes;
+    const base_count = rt.allocation_diagnostics.allocation_count;
 
     var bc = bytecode.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     var bc_live = true;
@@ -2749,8 +2747,8 @@ test "capacity-carry install with zero used length still owns and frees the back
 
     bc.deinit();
     bc_live = false;
-    try std.testing.expectEqual(base_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(base_count, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(base_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.allocation_diagnostics.allocation_count);
 }
 
 test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
@@ -2758,8 +2756,8 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-phase-3-replacement");
-    const base_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const base_count = rt.diagnostics.allocations.allocation_count;
+    const base_bytes = rt.allocation_diagnostics.allocated_bytes;
+    const base_count = rt.allocation_diagnostics.allocation_count;
 
     var bc = bytecode.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     var bc_live = true;
@@ -2778,8 +2776,8 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     @memcpy(fresh_code, bc.code);
     const fresh_atoms = try rt.allocNative(core.atom.Atom, bc.atom_operands.len);
     for (fresh_atoms) |*slot| slot.* = name;
-    const bytes_with_both_generations = rt.diagnostics.allocations.allocated_bytes;
-    const count_with_both_generations = rt.diagnostics.allocations.allocation_count;
+    const bytes_with_both_generations = rt.allocation_diagnostics.allocated_bytes;
+    const count_with_both_generations = rt.allocation_diagnostics.allocation_count;
 
     bc.installCodeWithCapacity(fresh_code, fresh_code.len);
     bc.installAtomOperandsWithCapacity(fresh_atoms, fresh_atoms.len);
@@ -2792,19 +2790,19 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     const fresh_atom_charge = fresh_atoms.len * @sizeOf(core.atom.Atom);
     try std.testing.expectEqual(
         bytes_with_both_generations - carried_code_charge - carried_atom_charge,
-        rt.diagnostics.allocations.allocated_bytes,
+        rt.allocation_diagnostics.allocated_bytes,
     );
-    try std.testing.expectEqual(count_with_both_generations - 2, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(count_with_both_generations - 2, rt.allocation_diagnostics.allocation_count);
     try std.testing.expectEqual(
         base_bytes + fresh_code_charge + fresh_atom_charge,
-        rt.diagnostics.allocations.allocated_bytes,
+        rt.allocation_diagnostics.allocated_bytes,
     );
-    try std.testing.expectEqual(base_count + 2, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(base_count + 2, rt.allocation_diagnostics.allocation_count);
 
     bc.deinit();
     bc_live = false;
-    try std.testing.expectEqual(base_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(base_count, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(base_bytes, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.allocation_diagnostics.allocation_count);
 }
 
 test "four-ledger phase-boundary ownership accounting compile-only" {

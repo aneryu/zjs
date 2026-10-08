@@ -47,16 +47,16 @@ These are the only identities a v2 producer may create. Every later stage
 | Identity | Definition | Role |
 | --- | --- | --- |
 | `LabelId` | `src/compiler/labels.zig` — function-scoped `enum(u32)` creation index | **Jump identity.** The 4-byte operand of every jump-format instruction holds the `LabelId` (little-endian) until final emission. Stable across detach/splice: a moved block keeps its `LabelId`s; only slot offsets rebind. |
-| bound label (a `LabelSlot` with `flags.bound`) | `bound_offset` is the temporary-stream position of the bind | **Block boundary.** The bind slot subsumes the in-stream `op.label` pseudo-op of the deleted legacy emitter; it is the boundary key both resolve passes consume. `emitterBindLabel` = bind **and** invalidate `last_opcode_pos` (control-flow merge, qjs `emit_label`); `emitterBindLabelRaw` = bind only (provenance-preserving, qjs `emit_label_raw`; used by the optional-chain close). |
+| bound label (a `LabelSlot` with `flags.bound`) | `bound_offset` is the temporary-stream position of the bind | **Block boundary.** The bind slot subsumes the in-stream `op.label` pseudo-op of the deleted legacy emitter; it is the boundary key both resolve passes consume. `Emitter.bind` = bind **and** invalidate `last_opcode_pos` (control-flow merge, qjs `emit_label`); `Emitter.bindRaw` = bind only (provenance-preserving, qjs `emit_label_raw`; used by the optional-chain close). |
 | aux label | same `LabelId`, referenced through a `RelocEntry` of kind `.aux32` | The `scope_make_ref` secondary operand (op + atom(4) + label(4) + scope(2)); `Builder.emitScopeRefOpOwned`. The put side **binds** it (qjs `put_lvalue` `emit_label`). |
 | `ref_count` | `LabelSlot.ref_count`, bumped on every referencing emission, decremented on rollback/detach/dead-code removal, moved wholesale by `Builder.retargetLabelRefs` | qjs `update_label` bookkeeping: the liveness input of both resolve passes (a boundary whose labels all have zero references is dead, quickjs.c `skip_dead_code`) and the short-form bookkeeping of `resolve_labels` (see section 5). |
 | `backward_target` flag | set when a reference is emitted against an already-bound label (and on splice when the bound target precedes the operand) | Conservative loop marker for short-form bookkeeping. **Never a correctness input**; rollback deliberately does not clear it. |
 | source event | `SourceSlot { temp_offset, line, col }` | pc2line identity. Bound to the logical output event order, **not** to a byte pc of any final stream; final emission maps events to output positions (QuickJS shape — no old-PC relocation chain). Markers with `line <= 0 or col <= 0` are dropped at the sink. |
-| `last_opcode_pos` | `Builder.last_opcode_pos`, qjs `fd->last_opcode_pos` | The **sole target fact** for speculative-LHS rewinds (`getLValue`) and the straight-line half of liveness. Invalidated (−1) at every merge bind, `truncateTail`, `detachTail`, `spliceSegment`. |
+| `last_opcode_pos` | `Builder.last_opcode_pos`, qjs `fd->last_opcode_pos` | The **sole target fact** for speculative-LHS rewinds (`getLValue`) and the straight-line half of liveness. Invalidated (−1) at every merge bind, `truncateLastOpcodePreserveSources`, `detachTail`, `spliceSegment`. |
 
 **The byte-PC rule.** Byte offsets of the temporary stream may appear in v2
 parser arms only as *stream-editing coordinates*: snapshot lengths,
-speculative-LHS tail classification / `truncateTail` positions, the
+speculative-LHS tail classification / `truncateLastOpcodePreserveSources` positions, the
 optional-chain pseudo-getter rewrite (`v2b.code[last_opcode_pos]`), the
 switch case-tail scan (`caseTailCanFallthrough`), the class brand-prologue
 opcode patch, and liveness/terminal queries (`isLiveCode` and class-init
@@ -97,7 +97,7 @@ want rolled back*. All committed snapshot/detach sites comply (§4.5,
 revert. Any future producer that binds first and snapshots at the same
 `code_len` is defective by contract.
 
-### 2.2 Tail truncation (`Builder.truncateTail`)
+### 2.2 Tail truncation (`Builder.truncateLastOpcodePreserveSources`)
 
 The qjs `fd->byte_code.size = fd->last_opcode_pos` rewind. Legal **only** for
 tails carrying no relocations and no binds: the newest reloc's operand is the
@@ -155,10 +155,10 @@ state must be restored (the optional-chain label, §4.5).
 ### 2.5 Parser-facing wrappers
 
 The `emitter*` free functions in `src/parser.zig` map Builder errors into parser
-errors and split marker'd vs `NoSource` emission: `emitterJump`/`emitterOp`
+errors and split marker'd vs `NoSource` emission: `Emitter.jump`/`Emitter.op`
 etc. add a source event at the current token first; the `NoSource` twins do
-not; `emitterOpAt` pins one opcode to an explicit source event (assignment /
-update operators); `emitterRetargetLabel` wraps `Builder.retargetLabelRefs`. The
+not; `Emitter.opAt` pins one opcode to an explicit source event (assignment /
+update operators); `Emitter.retargetLabel` wraps `Builder.retargetLabelRefs`. The
 former `v2_available and s.emit_v2` runtime gates are gone with the legacy
 compiler, and so is the whole `appendBytesNoSource` raw-byte family (together
 with the incrementally-maintained flow-tail summary it fed): the Builder path
@@ -215,7 +215,9 @@ commit history carries them.
 - Identities: `if_false_label` (created after the condition, jump
   `if_false`); with `else`: `else_goto_label` (`goto` over the else) and
   the if_false label binds at the else entry; the merge bind closes whichever
-  label is open. One wrapper scope for the whole statement (qjs shape).
+  label is open. No statement-wide scope: only an Annex B
+  `if (x) function f() {}` clause gets its own block scope (B.3.3), which
+  keeps large functions under the u16 scope-index limit.
 - Rollback: none needed (no speculation).
 
 ### 4.2 conditional `?:` — `parseCondExpr`
@@ -247,7 +249,7 @@ commit history carries them.
   chain label and the caller-visible label pointer must both revert (the
   label itself vanishes via the `label_len` restore). Snapshot precedes every
   bind the sequence performs → boundary-bind caveat satisfied.
-- Chain close: `emitterBindLabelRaw` (raw bind: the preceding getter stays
+- Chain close: `Emitter.bindRaw` (raw bind: the preceding getter stays
   visible as provenance), then the pseudo-getter rewrite
   `get_field → get_field_opt_chain` / `get_array_el → get_array_el_opt_chain`
   by patching `v2b.code[last_opcode_pos]`, else `invalidateLastOpcode`. Byte
@@ -320,7 +322,7 @@ commit history carries them.
 - Epilogue (**deliberate, documented shape deviation**): qjs binds the
   default label backwards with an in-stream patch (the "ugly patch"). v2
   label discipline forbids patching a jump's PC, so the no-match references
-  are moved onto the default label's identity with `emitterRetargetLabel`
+  are moved onto the default label's identity with `Emitter.retargetLabel`
   (`Builder.retargetLabelRefs`) — the unmatched-dispatch boundary and the
   default body are one program point, so references change *identity*, not
   operand bytes. With no default clause, the no-match labels simply bind at
@@ -424,19 +426,19 @@ commit history carries them.
 
 - Mechanism: `Builder.last_opcode_pos` is the sole target fact (qjs
   `get_lvalue`). Getter removal = ledger take-back (`takeLastAtomOwned`)
-  **then** `truncateTail(pos)` — the qjs
+  **then** `truncateLastOpcodePreserveSources(pos)` — the qjs
   `fd->byte_code.size = fd->last_opcode_pos` rewind. Legal because the getter
   is a single trailing instruction: no relocs, no binds in the tail
-  (truncateTail's O(1)/Debug guards enforce it). `keep` re-emits the getter
+  (truncateLastOpcodePreserveSources's O(1)/Debug guards enforce it). `keep` re-emits the getter
   via `reemitLValueGetter` with a dup'd atom (get_field2 /
   scope_get_private_field2 / get_array_el3 / to_propkey+dup3+get_super_value
   / get_ref_value). Update/compound operators pin their op to the operator
-  source event via `emitterOpAt`. The direct-binding `scope_get_var` form is
+  source event via `Emitter.opAt`. The direct-binding `scope_get_var` form is
   the first case of `getLValue` (with-scope chains upgrade the descriptor to
   `ref_value` plus a `scope_make_ref` aux label, §4.18). An errdefer releases
   the descriptor atom on failure.
 
-### 4.20 detach — `emitterDetachTail` consumers
+### 4.20 detach — `Emitter.detachTail` consumers
 
 - Contract: mark snapshot taken at the segment start **before** any emission
   or bind of the segment; empty tail short-circuits (for-update); segment
@@ -446,7 +448,7 @@ commit history carries them.
   Consumers: the classic-`for` update clause and the class deferred-runtime
   block.
 
-### 4.21 splice — `emitterSpliceSegment` consumers
+### 4.21 splice — `Emitter.spliceSegment` consumers
 
 - Contract: splice after the body/`define_class`+brand prologue; no operand
   rewriting (function-global `LabelId`s); consumed on success; error paths
@@ -482,13 +484,13 @@ The resume group is a single, unconditional emission path — there is no
 V2-suffixed twin of any of these functions and no forward-jump patching
 anywhere in the group:
 
-- `initial_yield` — emitted in `parseFunction`;
+- `initial_yield` — emitted in `parseFunctionHead`;
 - `yield` expression — the resume split is a real `LabelId` pair;
 - `await` unary — plain op emission;
 - `yield*` delegation — `emitYieldStarDelegation` is the one implementation,
   a complete `LabelId` twin of the qjs TOK_YIELD delegation machine;
 - `using`-await — `emitUsingAwaitIfNeeded` carries a
-  `emitterNewLabel`/`emitterJump`/`emitterBindLabel` triple.
+  `Emitter.newLabel`/`Emitter.jump`/`Emitter.bind` triple.
 
 No identity kinds beyond section 1 were required.
 

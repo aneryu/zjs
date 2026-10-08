@@ -3,7 +3,6 @@
 //! `reclaimNow` is the precise-scan discipline: anything the test still
 //! holds must be named in a `rootValues` / `rootObjects` frame.
 
-const std = @import("std");
 const zjs = @import("zjs");
 const core = zjs.core;
 
@@ -35,7 +34,7 @@ pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.
     errdefer rt.releaseWeakIdentity(key_identity);
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.items.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
+    const inserted_holder = !collection.isBorrowedReferenceHolder();
     try rt.registerBorrowedReferenceHolder(collection);
     errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(collection);
     try collection.ensureWeakCollectionEntryCapacity(rt, index + 1);
@@ -47,16 +46,4 @@ pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.
         .value = value,
     };
     try rt.registerBorrowedReferenceHolder(collection);
-}
-
-/// Drive an open incremental major cycle to completion. Threshold-triggered
-/// collections under the tracer begin a cycle and finish it at a later poll;
-/// tests that assert on freed counts after a crossing call this to reach the
-/// poll where the result lands.
-pub fn finishGcCycles(rt: anytype) void {
-    var polls: usize = 0;
-    while (rt.gc.morgue.pending) : (polls += 1) {
-        std.debug.assert(polls < 100_000);
-        _ = rt.pollGC(null, .safepoint) catch return;
-    }
 }

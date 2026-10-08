@@ -108,57 +108,81 @@ pub const BigInt = struct {
         return compareParts(self.negative, self.limbs, other.negative, other.limbs);
     }
 
-    pub fn formatBase10Alloc(self: BigInt, allocator: std.mem.Allocator) ![]u8 {
-        return self.formatBaseAlloc(allocator, 10);
+    pub fn formatBase10Alloc(self: BigInt, allocator: std.mem.Allocator, interrupt: anytype) ![]u8 {
+        return self.formatBaseAlloc(allocator, 10, interrupt);
     }
 
-    pub fn formatBaseAlloc(self: BigInt, allocator: std.mem.Allocator, base: u8) ![]u8 {
+    /// Radix text of the value. A non-power-of-two radix is quadratic in
+    /// the limb count, so `interrupt` (null, or a runtime with
+    /// `pollNativeWork`) is polled per limb step.
+    pub fn formatBaseAlloc(self: BigInt, allocator: std.mem.Allocator, base: u8, interrupt: anytype) ![]u8 {
         if (base < 2 or base > 36) return error.InvalidRadix;
         if (self.isZero()) {
             const out = try allocator.alloc(u8, 1);
             out[0] = '0';
             return out;
         }
+        if (std.math.isPowerOfTwo(base)) return self.formatPowerOfTwoBaseAlloc(allocator, base);
         var work = try self.absCloneWithAllocator(allocator);
         defer work.deinit();
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(allocator);
         if (self.negative) try out.append(allocator, '-');
-        if (base == 10) {
-            var chunks = std.ArrayList(u64).empty;
-            defer chunks.deinit(allocator);
-            while (!work.isZero()) {
-                const remainder = try work.divRemSmallInPlace(10_000_000_000_000_000_000);
-                try chunks.append(allocator, remainder);
-            }
-            var index = chunks.items.len;
-            while (index > 0) {
-                index -= 1;
-                var buf: [24]u8 = undefined;
-                if (index == chunks.items.len - 1) {
-                    // A u64 needs at most 20 decimal bytes; this buffer cannot
-                    // exhaust, so NoSpaceLeft must not escape the formatter.
-                    const text = std.fmt.bufPrint(&buf, "{d}", .{chunks.items[index]}) catch unreachable;
-                    try out.appendSlice(allocator, text);
-                } else {
-                    const text = std.fmt.bufPrint(&buf, "{d:0>19}", .{chunks.items[index]}) catch unreachable;
-                    try out.appendSlice(allocator, text);
-                }
-            }
-            return try out.toOwnedSlice(allocator);
+        // Divide by the largest power of `base` that fits in a u64 and emit
+        // that many digits per division, not one division per digit.
+        const radix: u64 = base;
+        var chunk_base: u64 = radix;
+        var chunk_digits: usize = 1;
+        while (chunk_base <= std.math.maxInt(u64) / radix) {
+            chunk_base *= radix;
+            chunk_digits += 1;
         }
-        var digits = std.ArrayList(u8).empty;
-        defer digits.deinit(allocator);
-        while (!work.isZero()) {
-            const remainder = try work.divRemSmallInPlace(base);
-            try digits.append(allocator, if (remainder < 10) @intCast('0' + remainder) else @intCast('a' + remainder - 10));
+        var chunks = std.ArrayList(u64).empty;
+        defer chunks.deinit(allocator);
+        var len = work.limbs.len;
+        while (len != 0) {
+            try chunks.append(allocator, try divRemByLimbInPlace(work.limbs[0..len], chunk_base, interrupt));
+            while (len != 0 and work.limbs[len - 1] == 0) len -= 1;
         }
-        var index = digits.items.len;
+        var index = chunks.items.len;
         while (index > 0) {
             index -= 1;
-            try out.append(allocator, digits.items[index]);
+            // Every chunk below the leading one is zero-padded to full width.
+            const min_digits: usize = if (index == chunks.items.len - 1) 1 else chunk_digits;
+            var buf: [64]u8 = undefined;
+            var pos: usize = buf.len;
+            var value = chunks.items[index];
+            while (value != 0 or buf.len - pos < min_digits) {
+                const digit: u8 = @intCast(value % radix);
+                value /= radix;
+                pos -= 1;
+                buf[pos] = if (digit < 10) '0' + digit else 'a' + digit - 10;
+            }
+            try out.appendSlice(allocator, buf[pos..]);
         }
         return try out.toOwnedSlice(allocator);
+    }
+
+    /// Radix 2/4/8/16/32: each digit is a fixed bit field, so read the fields
+    /// directly instead of dividing (linear rather than quadratic).
+    fn formatPowerOfTwoBaseAlloc(self: BigInt, allocator: std.mem.Allocator, base: u8) ![]u8 {
+        const width: usize = std.math.log2_int(u8, base);
+        const top = self.limbs[self.limbs.len - 1];
+        const bit_length = (self.limbs.len - 1) * limb_bits + (limb_bits - @clz(top));
+        const digit_count = (bit_length + width - 1) / width;
+        const out = try allocator.alloc(u8, digit_count + @intFromBool(self.negative));
+        var pos: usize = 0;
+        if (self.negative) {
+            out[0] = '-';
+            pos = 1;
+        }
+        var index = digit_count;
+        while (index > 0) : (pos += 1) {
+            index -= 1;
+            const digit: u8 = @intCast(bitField(self.limbs, index * width, width));
+            out[pos] = if (digit < 10) '0' + digit else 'a' + digit - 10;
+        }
+        return out;
     }
 
     pub fn pow(self: BigInt, exponent: BigInt, allocator: std.mem.Allocator) !BigInt {
@@ -267,21 +291,15 @@ pub const BigInt = struct {
             return BigInt.fromIntAlloc(allocator, if (self.negative) -1 else 0);
         }
         if (!self.negative) return self.shrAbs(allocator, shift);
-        var abs_value = try self.absCloneWithAllocator(allocator);
-        defer abs_value.deinit();
-        var divisor = try pow2(allocator, shift);
-        defer divisor.deinit();
-        const div_rem = try divRemAbsAlloc(allocator, abs_value, divisor, .both);
-        var quotient = div_rem[0];
-        var remainder = div_rem[1];
-        defer remainder.deinit();
-        if (!remainder.isZero()) {
-            var one = try BigInt.fromIntAlloc(allocator, 1);
-            defer one.deinit();
-            const next = try addAlloc(allocator, quotient, one);
-            quotient.deinit();
-            quotient = next;
-        }
+        // Floor division of a negative value: -(|x| >> s), minus one more when
+        // any shifted-out bit of |x| is set.
+        var quotient = try self.shrAbs(allocator, shift);
+        errdefer quotient.deinit();
+        const limb_shift = shift / limb_bits;
+        const low_mask = (@as(Limb, 1) << @intCast(shift % limb_bits)) - 1;
+        const truncated = self.limbs[limb_shift] & low_mask != 0 or
+            std.mem.indexOfNone(Limb, self.limbs[0..limb_shift], &.{0}) != null;
+        if (truncated) try addSmallInPlace(&quotient, 1);
         quotient.negative = !quotient.isZero();
         return quotient;
     }
@@ -326,6 +344,10 @@ pub const BigInt = struct {
             const v: f64 = @floatFromInt(self.limbs[0]);
             return if (self.negative) -v else v;
         }
+        const sign: u64 = @intFromBool(self.negative);
+        // Overflow to infinity needs only the bit length, not the sticky scan
+        // over every lower limb.
+        if (self.bitLengthAbs() - 1 > 1023) return @bitCast((sign << 63) | (@as(u64, 0x7ff) << 52));
         var sticky: Limb = 0;
         for (self.limbs[0 .. n - 2]) |limb| sticky |= limb;
         const a1 = self.limbs[n - 1];
@@ -335,8 +357,6 @@ pub const BigInt = struct {
         const low: u64 = if (shift == 0) a0 else a0 << shift;
         mant |= @intFromBool(low != 0);
         var e: i32 = @intCast(self.bitLengthAbs() - 1);
-        const sign: u64 = @intFromBool(self.negative);
-        if (e > 1023) return @bitCast((sign << 63) | (@as(u64, 0x7ff) << 52));
         // 63 bits with sticky, then shr_rndn by 10 -> 53 bits (ties to even).
         mant = (mant >> 1) | (mant & 1);
         const addend: u64 = ((mant >> 10) & 1) + ((1 << 9) - 1);
@@ -396,7 +416,9 @@ pub const BigInt = struct {
         const limbs = try allocator.alloc(Limb, count);
         @memcpy(limbs, self.limbs[0..count]);
         const remaining_bits = bits % limb_bits;
-        if (remaining_bits != 0) {
+        // Only the limb holding bit `bits - 1` is partial; a shorter value
+        // keeps every limb it has.
+        if (remaining_bits != 0 and count == needed) {
             const mask: Limb = (@as(Limb, 1) << @intCast(remaining_bits)) - 1;
             limbs[count - 1] &= mask;
         }
@@ -412,21 +434,6 @@ pub const BigInt = struct {
         var out = try self.cloneWithAllocator(allocator);
         out.negative = false;
         return out;
-    }
-
-    fn divRemSmallInPlace(self: *BigInt, divisor: Limb) !Limb {
-        var remainder: DoubleLimb = 0;
-        var index = self.limbs.len;
-        while (index > 0) {
-            index -= 1;
-            const current = (remainder << limb_bits) | self.limbs[index];
-            self.limbs[index] = @intCast(current / divisor);
-            remainder = current % divisor;
-        }
-        const owned = self.*;
-        self.* = .{ .allocator = owned.allocator };
-        self.* = try normalize(owned);
-        return @intCast(remainder);
     }
 
     fn shrAbs(self: BigInt, allocator: std.mem.Allocator, shift: usize) !BigInt {
@@ -503,28 +510,30 @@ pub fn parseBase10(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
 }
 
 pub fn parseBase10Alloc(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
-    return parseBaseAlloc(allocator, bytes, 10);
+    return parseBaseAlloc(allocator, bytes, 10, null);
 }
 
-pub fn parseAutoAlloc(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
+/// A decimal string is quadratic in its length, so `interrupt` (null, or a
+/// runtime with `pollNativeBulkWork`) is polled per digit chunk.
+pub fn parseAutoAlloc(allocator: std.mem.Allocator, bytes: []const u8, interrupt: anytype) !BigInt {
     const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'x' or trimmed[1] == 'X')) {
-        return parseBaseAlloc(allocator, trimmed[2..], 16);
+        return parseDigitsAlloc(allocator, trimmed[2..], 16, interrupt);
     }
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'o' or trimmed[1] == 'O')) {
-        return parseBaseAlloc(allocator, trimmed[2..], 8);
+        return parseDigitsAlloc(allocator, trimmed[2..], 8, interrupt);
     }
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'b' or trimmed[1] == 'B')) {
-        return parseBaseAlloc(allocator, trimmed[2..], 2);
+        return parseDigitsAlloc(allocator, trimmed[2..], 2, interrupt);
     }
-    return parseBaseAlloc(allocator, trimmed, 10);
+    return parseBaseAlloc(allocator, trimmed, 10, interrupt);
 }
 
 pub fn pow2(allocator: std.mem.Allocator, bits: usize) !BigInt {
     const limb_index = bits / limb_bits;
     // Materializing 2^bits allocates limb_index+1 limbs; qjs reaches the same
-    // js_bigint_new cap when asUintN/asIntN materialize the modulus
-    //. Fixes BigInt.asUintN(2**32, -1n) hanging.
+    // js_bigint_new cap when asUintN/asIntN materialize the modulus.
+    // Fixes BigInt.asUintN(2**32, -1n) hanging.
     try checkLimbCount(limb_index + 1);
     const offset: u6 = @intCast(bits % limb_bits);
     const limbs = try allocator.alloc(Limb, limb_index + 1);
@@ -541,9 +550,7 @@ pub fn compareParts(lhs_negative: bool, lhs_limbs: []const Limb, rhs_negative: b
 
 /// Single-limb divisor: one high-to-low pass over the numerator instead of the
 /// bit loop. This is qjs's shape for the same case -- `mp_div1norm`
-/// walks limbs, not bits -- and it is the same kernel
-/// `divRemSmallInPlace` already uses for base conversion, lifted to an
-/// allocating caller.
+/// walks limbs, not bits.
 ///
 /// The caller has already returned for `lhs < rhs`, so the quotient has at
 /// least one limb. Its exact length is known up front -- the top quotient digit
@@ -606,6 +613,32 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
     return @intCast(remainder);
 }
 
+/// `limbs / divisor` in place, returning the remainder: base conversion's
+/// kernel. The divisor is normalized once, so each limb takes one
+/// reciprocal step (qjs `mp_div1norm`) rather than a 128-bit division:
+/// dividing `limbs << shift` by `divisor << shift` gives the same quotient
+/// and the remainder shifted by `shift`.
+fn divRemByLimbInPlace(limbs: []Limb, divisor: Limb, interrupt: anytype) error{Interrupted}!Limb {
+    std.debug.assert(divisor != 0 and limbs.len != 0);
+    const shift: u6 = @intCast(@clz(divisor));
+    const normalized = divisor << shift;
+    const reciprocal = normalizedReciprocalInit(normalized);
+    // The limb shifted out of the top. Below `2^shift <= 2^63 <= normalized`.
+    var remainder: Limb = if (shift == 0) 0 else limbs[limbs.len - 1] >> @intCast(limb_bits - @as(u7, shift));
+    var index = limbs.len;
+    while (index > 0) {
+        if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.pollNativeWork();
+        index -= 1;
+        // `limbs[index - 1]` is read before its own step overwrites it.
+        var low = limbs[index] << shift;
+        if (shift != 0 and index > 0) low |= limbs[index - 1] >> @intCast(limb_bits - @as(u7, shift));
+        const step = divTwoByOneReciprocal(remainder, low, normalized, reciprocal);
+        limbs[index] = step.quotient;
+        remainder = step.remainder;
+    }
+    return remainder >> shift;
+}
+
 /// Which halves of a division the caller will use. `div` and `rem` each keep
 /// exactly one, and materializing the other means an allocation and a copy that
 /// are thrown away immediately.
@@ -618,8 +651,8 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
 /// tested.
 pub const DivOutput = enum { quotient, remainder, both };
 
-/// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`
-///. `divisor` must have its high bit set.
+/// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`.
+/// `divisor` must have its high bit set.
 ///
 /// The value is `floor((2^128 - 1) / divisor) - 2^64`, built as qjs builds it
 /// -- numerator `((-divisor - 1) : -1)` -- so no 129-bit intermediate is
@@ -855,8 +888,8 @@ fn unshiftedLimbAt(normalized: []const Limb, index: usize, shift: u6) Limb {
 /// `numerator -= divisor * qhat` across `divisor.len + 1` limbs. Returns true
 /// when the result went negative, meaning `qhat` was one too large.
 ///
-/// One fused wrapping `u128` chain per limb, mirroring qjs `mp_sub_mul1`
-///. The previous shape split the same computation into a
+/// One fused wrapping `u128` chain per limb, mirroring qjs `mp_sub_mul1`.
+/// The previous shape split the same computation into a
 /// product carry plus two `@subWithOverflow` results, and LLVM materialized
 /// each of those overflow bits into a register, spilled it to the stack, then
 /// re-narrowed and masked it -- six instructions per limb of pure overhead plus
@@ -1002,13 +1035,21 @@ pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
     return normalize(.{ .negative = lhs.negative != rhs.negative, .limbs = limbs, .allocator = allocator });
 }
 
-fn parseBaseAlloc(allocator: std.mem.Allocator, bytes: []const u8, base: u32) !BigInt {
+fn parseBaseAlloc(allocator: std.mem.Allocator, bytes: []const u8, base: u32, interrupt: anytype) !BigInt {
     var text = std.mem.trim(u8, bytes, " \t\r\n");
     var negative = false;
     if (text.len != 0 and (text[0] == '-' or text[0] == '+')) {
         negative = text[0] == '-';
         text = text[1..];
     }
+    var out = try parseDigitsAlloc(allocator, text, base, interrupt);
+    out.negative = negative and !out.isZero();
+    return out;
+}
+
+/// A bare run of `base` digits: no sign and no surrounding white space, as
+/// after a `0x`/`0o`/`0b` prefix (StringIntegerLiteral, §7.1.14).
+fn parseDigitsAlloc(allocator: std.mem.Allocator, text: []const u8, base: u32, interrupt: anytype) !BigInt {
     if (text.len == 0) return error.InvalidBigInt;
     // qjs js_atobigint: skip leading zeros, bound the
     // digit count, then bound the estimated bit width (radix 10 uses
@@ -1020,15 +1061,66 @@ fn parseBaseAlloc(allocator: std.mem.Allocator, bytes: []const u8, base: u32) !B
     const log2_radix: usize = 32 - @clz(base - 1);
     const estimated_bits = if (base == 10) (digits.len * 27 + 7) / 8 else digits.len * log2_radix;
     try checkLimbCount((estimated_bits + limb_bits - 1) / limb_bits);
+    return if (std.math.isPowerOfTwo(base))
+        try parsePowerOfTwoDigits(allocator, digits, base)
+    else
+        try parseDigitChunks(allocator, digits, base, interrupt);
+}
+
+/// Radix 2/4/8/16/32: pack each digit's bits straight into the limbs.
+fn parsePowerOfTwoDigits(allocator: std.mem.Allocator, digits: []const u8, base: u32) !BigInt {
+    const width: usize = std.math.log2_int(u32, base);
+    const limb_count = (digits.len * width + limb_bits - 1) / limb_bits;
+    const limbs = try allocator.alloc(Limb, limb_count);
+    errdefer allocator.free(limbs);
+    @memset(limbs, 0);
+    for (digits, 0..) |ch, i| {
+        const digit = std.fmt.charToDigit(ch, @intCast(base)) catch return error.InvalidBigInt;
+        const bit = (digits.len - 1 - i) * width;
+        const limb = bit / limb_bits;
+        const offset: u6 = @intCast(bit % limb_bits);
+        limbs[limb] |= @as(Limb, digit) << offset;
+        // A digit straddling a limb boundary spills its high bits over.
+        if (@as(usize, offset) + width > limb_bits) limbs[limb + 1] |= @as(Limb, digit) >> @intCast(limb_bits - @as(usize, offset));
+    }
+    return normalize(.{ .limbs = limbs, .allocator = allocator });
+}
+
+/// Other radixes: fold as many digits as fit in a limb into one
+/// multiply-add, instead of one bignum pass per digit.
+fn parseDigitChunks(allocator: std.mem.Allocator, digits: []const u8, base: u32, interrupt: anytype) !BigInt {
     var out = BigInt{ .allocator = allocator };
     errdefer out.deinit();
-    for (text) |ch| {
+    const radix: Limb = base;
+    var chunk: Limb = 0;
+    var chunk_scale: Limb = 1;
+    for (digits) |ch| {
         const digit = std.fmt.charToDigit(ch, @intCast(base)) catch return error.InvalidBigInt;
-        try mulSmallInPlace(&out, base);
-        try addSmallInPlace(&out, digit);
+        chunk = chunk * radix + digit;
+        chunk_scale *= radix;
+        if (chunk_scale > std.math.maxInt(Limb) / radix) {
+            if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.pollNativeBulkWork(out.limbs.len * @sizeOf(Limb));
+            try mulSmallInPlace(&out, chunk_scale);
+            try addSmallInPlace(&out, chunk);
+            chunk = 0;
+            chunk_scale = 1;
+        }
     }
-    out.negative = negative and !out.isZero();
+    if (chunk_scale != 1) {
+        try mulSmallInPlace(&out, chunk_scale);
+        try addSmallInPlace(&out, chunk);
+    }
     return out;
+}
+
+/// `width` bits of the magnitude starting at bit `bit` (width <= 8).
+fn bitField(limbs: []const Limb, bit: usize, width: usize) Limb {
+    const limb = bit / limb_bits;
+    const offset: u6 = @intCast(bit % limb_bits);
+    var value = limbs[limb] >> offset;
+    if (@as(usize, offset) + width > limb_bits and limb + 1 < limbs.len)
+        value |= limbs[limb + 1] << @intCast(limb_bits - @as(usize, offset));
+    return value & ((@as(Limb, 1) << @intCast(width)) - 1);
 }
 
 fn addAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
@@ -1185,7 +1277,7 @@ test "bigint functionality" {
     defer two.deinit();
     var big = try forty.add(two);
     defer big.deinit();
-    const big_text = try big.formatBase10Alloc(std.testing.allocator);
+    const big_text = try big.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(big_text);
     try std.testing.expectEqualStrings("42", big_text);
     var zero = try BigInt.fromInt(std.testing.allocator, 0);
@@ -1193,7 +1285,7 @@ test "bigint functionality" {
     try std.testing.expectError(error.DivisionByZero, big.div(zero));
     var huge = try parseBase10(std.testing.allocator, "12345678901234567890123456789012345678901234567890");
     defer huge.deinit();
-    const huge_text = try huge.formatBase10Alloc(std.testing.allocator);
+    const huge_text = try huge.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(huge_text);
     try std.testing.expectEqualStrings("12345678901234567890123456789012345678901234567890", huge_text);
     var divisor = try BigInt.fromInt(std.testing.allocator, 97);
@@ -1202,9 +1294,9 @@ test "bigint functionality" {
     defer quotient.deinit();
     var remainder = try huge.rem(divisor);
     defer remainder.deinit();
-    const quotient_text = try quotient.formatBase10Alloc(std.testing.allocator);
+    const quotient_text = try quotient.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(quotient_text);
-    const remainder_text = try remainder.formatBase10Alloc(std.testing.allocator);
+    const remainder_text = try remainder.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(remainder_text);
     try std.testing.expectEqualStrings("127275040218913071032200585453735522462899325442", quotient_text);
     try std.testing.expectEqualStrings("16", remainder_text);
@@ -1216,9 +1308,9 @@ test "bigint functionality" {
     defer neg_q.deinit();
     var neg_r = try neg_seven.rem(three);
     defer neg_r.deinit();
-    const neg_q_text = try neg_q.formatBase10Alloc(std.testing.allocator);
+    const neg_q_text = try neg_q.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(neg_q_text);
-    const neg_r_text = try neg_r.formatBase10Alloc(std.testing.allocator);
+    const neg_r_text = try neg_r.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(neg_r_text);
     try std.testing.expectEqualStrings("-2", neg_q_text);
     try std.testing.expectEqualStrings("-1", neg_r_text);

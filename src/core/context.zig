@@ -4,7 +4,7 @@
 //! registry, lexical state, pending exception, and class prototypes form one
 //! realm and must be read together; `RealmRef` is the retained cross-job/
 //! callback handle, while raw RealmContext pointers are borrowed. QuickJS source
-//! map: `JSContext` realm fields at quickjs.c. Core owns this type;
+//! map: `JSContext` realm fields. Core owns this type;
 //! exec/runtime/binding may consume it. Fixed global construction is delegated
 //! through engine_services; Realm ownership and bootstrap rollback stay here.
 
@@ -13,9 +13,9 @@ const std = @import("std");
 
 const atom = @import("atom.zig");
 const errors = @import("errors.zig");
-const exception_state = @import("exception.zig");
 const execution = @import("execution.zig");
 const class = @import("class.zig");
+const context_registry = @import("context_registry.zig");
 const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const Object = object_mod.Object;
@@ -27,6 +27,7 @@ const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
+const objectFromValue = @import("value_semantics.zig").objectFromValue;
 
 pub const RealmValueSlot = enum(u8) {
     throw_type_error_intrinsic,
@@ -48,11 +49,16 @@ pub const RealmValueSlot = enum(u8) {
     async_generator_function_constructor,
     async_generator_function_prototype,
     iterator_helper_prototype,
-    iterator_concat_prototype,
+    /// Internal Array of the intrinsic %Int8Array% .. %BigUint64Array%,
+    /// indexed by `typed_array_names.Kind` (one slot keeps the layout pins).
+    typed_array_constructors,
     wrap_for_valid_iterator_prototype,
-    reserved_legacy_file_prototype,
+    /// %Iterator%, for `Iterator.prototype.constructor` (§27.1.4.1).
+    iterator_constructor,
     regexp_constructor,
     promise_constructor,
+    array_buffer_constructor,
+    shared_array_buffer_constructor,
     callsite_prototype,
     count,
 };
@@ -63,7 +69,6 @@ pub const BacktraceFrame = struct {
     line_num: i32,
     col_num: i32,
     pc: usize = 0,
-    pc_source: ?*const usize = null,
     location_data: ?*const anyopaque = null,
     location_resolver: ?BacktraceLocationResolver = null,
     /// Owned function value used to resolve the display name lazily when a
@@ -72,13 +77,8 @@ pub const BacktraceFrame = struct {
     function_value: JSValue = JSValue.undefinedValue(),
     is_native: bool = false,
 
-    pub fn currentPc(self: BacktraceFrame) usize {
-        return if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
-    }
-
     pub fn location(self: BacktraceFrame) BacktraceLocation {
-        const pc = self.currentPc();
-        if (self.location_resolver) |resolver| return resolver(self.location_data, pc);
+        if (self.location_resolver) |resolver| return resolver(self.location_data, self.pc);
         return .{ .line_num = self.line_num, .col_num = self.col_num };
     }
 };
@@ -309,19 +309,22 @@ pub const RealmContext = struct {
 
     comptime {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        std.debug.assert(@sizeOf(@This()) == 1344);
+        std.debug.assert(@sizeOf(@This()) == 1376);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "runtime") == 824);
-        std.debug.assert(@offsetOf(@This(), "modules") == 168);
-        std.debug.assert(@offsetOf(@This(), "publication_state") == 1328);
-        std.debug.assert(@offsetOf(@This(), "global") == 1280);
-        std.debug.assert(trace_list_previous_offset == 1336);
+        std.debug.assert(@offsetOf(@This(), "runtime") == 752);
+        std.debug.assert(@offsetOf(@This(), "modules") == 640);
+        std.debug.assert(@offsetOf(@This(), "publication_state") == 1360);
+        std.debug.assert(@offsetOf(@This(), "global") == 728);
+        std.debug.assert(trace_list_previous_offset == 1368);
         std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
+        // The tail hole must not overlap a declared field.
+        for (@typeInfo(@This()).@"struct".fields) |field| {
+            std.debug.assert(@offsetOf(@This(), field.name) + @sizeOf(field.type) <= trace_list_previous_offset);
+        }
     }
 
-    /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
-    /// collector node. Keep this first; `Runtime allocation helpers` places the common
-    /// lifetime metadata immediately before it.
+    /// QuickJS `JSContext.header`: realm identity is itself a GC cell. Keep
+    /// this first; the GC finds the realm through its embedded header.
     header: gc.Header align(16) = .{},
     runtime: *JSRuntime,
     /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
@@ -347,7 +350,10 @@ pub const RealmContext = struct {
     /// per promise, appended when it rejects unhandled, removed when that
     /// same promise later gets handled; every remaining entry is reported.
     unhandled_rejections: []UnhandledRejectionEntry = &.{},
-    unhandled_rejections_capacity: usize = 0,
+    unhandled_rejections_capacity: u32 = 0,
+    /// Entries whose promise was handled after it was recorded. They stay in
+    /// the list (so handling is O(1)) until `compactUnhandledRejections`.
+    unhandled_rejections_dead: u32 = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
     /// contexts enable it; validation and embedding-style contexts keep it off.
@@ -376,8 +382,8 @@ pub const RealmContext = struct {
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
     /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
-    /// standard constructor / prototype / host helper on each eval call. Owned
-    /// by the context: freed in `destroy`.
+    /// standard constructor / prototype / host helper on each eval call. A
+    /// traced edge of the realm; `deinitResources` clears it.
     global: ?*Object = null,
     /// Top-level lexical environment for script `let` / `const` bindings.
     /// `var` and function declarations still live on `global`.
@@ -389,7 +395,7 @@ pub const RealmContext = struct {
     host_scheduler: ?HostScheduler = null,
     module_source_loader: ?*const ModuleSourceLoader = null,
 
-    pub const trace_list_previous_offset: usize = 1336;
+    pub const trace_list_previous_offset: usize = 1368;
 
     /// O(1) list predecessor stored in the compact layout's tail hole.
     pub inline fn traceListPreviousPtr(self: *RealmContext) *?*gc.Header {
@@ -466,14 +472,14 @@ pub const RealmContext = struct {
         }
         errdefer self.deinitClassPrototypeSlots();
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(RealmContext));
-        // If a later step fails, createWithPublication still raw-frees via
-        // destroyRuntime (initialized=false). Unlink first so gc.deinit
+        // If a later step fails, createWithPublication still frees the cell
+        // with `gc.destroyCell` (initialized=false). Unlink first so gc.deinit
         // cannot destroyFromHeader the same cell.
         errdefer rt.gc.unlinkObjectWithBytes(&self.header, @sizeOf(RealmContext));
-        rt.linkConstructingContext(self);
-        errdefer rt.unlinkConstructingContext(self);
+        context_registry.linkConstructing(rt, self);
+        errdefer context_registry.unlinkConstructing(rt, self);
         // Host create-ref is a root (gc-invariants.md). Membership on
-        // `constructing_context_head` is not. Register the provider by
+        // `contexts.constructing_head` is not. Register the provider by
         // ownership here; `publishLive` re-registers idempotently.
         try rt.registerRootProvider(self.rootProvider());
     }
@@ -489,9 +495,9 @@ pub const RealmContext = struct {
         // This is the sole fallible step. If it triggers collection, the realm
         // remains absent from every live traversal.
         try self.runtime.registerRootProvider(self.rootProvider());
-        self.runtime.unlinkConstructingContext(self);
+        context_registry.unlinkConstructing(self.runtime, self);
         self.publication_state = .live;
-        self.runtime.linkContext(self);
+        context_registry.linkLive(self.runtime, self);
     }
 
     pub fn finishConstruction(self: *RealmContext) !void {
@@ -500,15 +506,6 @@ pub const RealmContext = struct {
         if (self.publication_state != .constructing) return error.InvalidBuiltinRegistry;
         self.construction_complete = true;
         try self.publishLive();
-    }
-
-    pub fn finishConstructionChecked(self: *RealmContext) !void {
-        try self.runtime.requireOwnerThread();
-        return self.finishConstruction();
-    }
-
-    pub fn publicationState(self: *const RealmContext) RealmPublicationState {
-        return self.publication_state;
     }
 
     pub fn isLive(self: *const RealmContext) bool {
@@ -548,18 +545,14 @@ pub const RealmContext = struct {
         return self.interrupt_counter <= 0;
     }
 
-    /// Public name of the slow leg for dispatchers that tick inline.
-    pub fn pollInterruptSlowPublic(self: *RealmContext) bool {
-        return self.pollInterruptSlow();
-    }
-
     noinline fn pollInterruptSlow(self: *RealmContext) bool {
         self.interrupt_counter = interrupt_counter_reset;
-        // The young budget's safepoint: the interpreter's own cadence, between
+        // The young budget's safepoint, and the one for major requests no
+        // allocation boundary serves: the interpreter's own cadence, between
         // instructions. Safe only because the builtin dispatch funnel roots
         // receivers and arguments -- without that a minor here reclaims
         // objects a running builtin is still walking.
-        if (self.runtime.gc.shouldTryMinor()) {
+        if (self.runtime.gc.shouldTryMinor() or self.runtime.gc.hasPendingMajorRequest()) {
             _ = self.runtime.pollGC(null, .safepoint) catch {};
         }
         // Stress mode wants the collection window everywhere, not once per
@@ -657,21 +650,10 @@ pub const RealmContext = struct {
         self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
     }
 
-    pub fn clearClassPrototype(self: *RealmContext, class_id: class.ClassId) void {
-        self.runtime.assertOwnerThread();
-        const index: usize = @intCast(class_id);
-        if (index >= self.class_prototypes.len) return;
-        self.class_prototypes[index] = JSValue.nullValue();
-    }
-
     pub fn classPrototypeObject(self: *RealmContext, class_id: class.ClassId) ?*Object {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return null;
-        const value = self.class_prototypes[index];
-        if (!value.is(.object)) return null;
-        const header = value.refHeader() orelse return null;
-        if (header.meta().flags.kind != .object) return null;
-        return Object.fromHeader(header);
+        return objectFromValue(self.class_prototypes[index]);
     }
 
     pub fn setNativeErrorPrototype(self: *RealmContext, kind: NativeErrorKind, prototype: *Object) void {
@@ -684,11 +666,7 @@ pub const RealmContext = struct {
 
     pub fn nativeErrorPrototypeObject(self: *RealmContext, kind: NativeErrorKind) ?*Object {
         if (kind == .count) return null;
-        const value = self.native_error_prototypes[@intFromEnum(kind)];
-        if (!value.is(.object)) return null;
-        const header = value.refHeader() orelse return null;
-        if (header.meta().flags.kind != .object) return null;
-        return Object.fromHeader(header);
+        return objectFromValue(self.native_error_prototypes[@intFromEnum(kind)]);
     }
 
     pub fn initializeInitialShapes(
@@ -804,9 +782,9 @@ pub const RealmContext = struct {
         const rt = self.runtime;
         rt.assertOwnerThread();
         switch (self.publication_state) {
-            .constructing => rt.unlinkConstructingContext(self),
+            .constructing => context_registry.unlinkConstructing(rt, self),
             .live => {
-                rt.unlinkContext(self);
+                context_registry.unlinkLive(rt, self);
                 rt.unregisterRootProvider(self.rootProvider());
             },
             .finalizing => unreachable,
@@ -817,12 +795,12 @@ pub const RealmContext = struct {
         self.modules.deinit();
         self.host_scheduler = null;
         self.module_source_loader = null;
-        self.clearUnhandledRejection();
+        self.releaseUnhandledRejectionList();
         self.lexicals = null;
         self.global = null;
         self.clearIntrinsicBootstrapValues();
         if (self.regexp_legacy_statics) |legacy| {
-            rt.destroyRuntime(object_mod.RegExpLegacyStatics, legacy);
+            rt.destroyNative(object_mod.RegExpLegacyStatics, legacy);
             self.regexp_legacy_statics = null;
         }
         self.deinitClassPrototypeSlots();
@@ -851,7 +829,7 @@ pub const RealmContext = struct {
         std.debug.assert(!self.host_api_release_consumed);
         self.host_api_release_consumed = true;
         // Drop the host create-ref root. Heap RealmRef edges remain and are
-        // traced as child edges, not as membership on `context_head`. An
+        // traced as child edges, not as membership on `contexts.live_head`. An
         // installed host scheduler keeps the provider until it is cleared.
         if (self.host_scheduler == null) self.dropHostRootProvider();
     }
@@ -871,23 +849,12 @@ pub const RealmContext = struct {
         rt.gc.destroyCell(RealmContext, self);
     }
 
-    pub fn createValueHandle(self: *RealmContext, value: JSValue) !runtime_mod.JSValueHandle {
-        return self.runtime.createValueHandle(value);
-    }
-
-    pub fn takeValueHandle(self: *RealmContext, value: JSValue) !runtime_mod.JSValueHandle {
-        return self.runtime.takeValueHandle(value);
-    }
-
     pub fn traceRoots(self: *RealmContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         if (self.publication_state != .live) return;
-        // Cycle-collector child edges already include the module registry and
-        // the five initial Shapes. Mirror them on the root Interface only when
-        // tracing roots are live; default `rc` keeps this function's .text.
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            var module_iter = self.modules.iterator();
-            while (module_iter.next()) |record| try visitor.moduleRoot(record);
-        }
+        // Child edges already include the module registry and the five
+        // initial Shapes; the root walk mirrors them.
+        var module_iter = self.modules.iterator();
+        while (module_iter.next()) |record| try visitor.moduleRoot(record);
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
@@ -900,13 +867,11 @@ pub const RealmContext = struct {
             try visitor.optionalObject(&self.cached_function_proto);
         if (self.cached_promise_proto != null)
             try visitor.optionalObject(&self.cached_promise_proto);
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            if (self.array_shape) |owned| try visitor.shapeRoot(owned);
-            if (self.arguments_shape) |owned| try visitor.shapeRoot(owned);
-            if (self.mapped_arguments_shape) |owned| try visitor.shapeRoot(owned);
-            if (self.regexp_shape) |owned| try visitor.shapeRoot(owned);
-            if (self.regexp_result_shape) |owned| try visitor.shapeRoot(owned);
-        }
+        if (self.array_shape) |owned| try visitor.shapeRoot(owned);
+        if (self.arguments_shape) |owned| try visitor.shapeRoot(owned);
+        if (self.mapped_arguments_shape) |owned| try visitor.shapeRoot(owned);
+        if (self.regexp_shape) |owned| try visitor.shapeRoot(owned);
+        if (self.regexp_result_shape) |owned| try visitor.shapeRoot(owned);
         for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
         if (self.regexp_legacy_statics) |legacy| {
             if (legacy.input) |*value| try visitor.value(value);
@@ -929,7 +894,7 @@ pub const RealmContext = struct {
         try host_scheduler.traceRoots(host_scheduler.ptr, visitor);
     }
 
-    /// Infallible owned-edge enumeration used by the RC cycle collector.  The
+    /// Infallible owned-edge enumeration used by the tracing collector. The
     /// runtime context-list link is deliberately absent: it is membership, not
     /// ownership.
     pub fn traceChildEdgesNoFail(self: *RealmContext, visitor: anytype) void {
@@ -976,7 +941,7 @@ pub const RealmContext = struct {
 
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         const self: *RealmContext = @ptrCast(@alignCast(context));
-        // Membership on `context_head` is not a root (gc-invariants.md). This
+        // Membership on `contexts.live_head` is not a root (gc-invariants.md). This
         // provider is the host create-ref; once that ref is consumed the
         // realm stays alive only through heap RealmRef edges.
         if (self.host_api_release_consumed) {
@@ -993,17 +958,17 @@ pub const RealmContext = struct {
     }
 
     pub fn throwValue(self: *RealmContext, value: JSValue) JSValue {
-        exception_state.install(self.runtime, value);
+        self.runtime.exception.install(value);
         return JSValue.exception();
     }
 
     pub fn setExceptionUncatchable(self: *RealmContext, uncatchable: bool) void {
         std.debug.assert(!uncatchable or self.hasException());
-        exception_state.setUncatchable(self.runtime, uncatchable);
+        self.runtime.exception.uncatchable = uncatchable;
     }
 
     pub fn exceptionIsUncatchable(self: RealmContext) bool {
-        return self.hasException() and self.runtime.current_exception_uncatchable;
+        return self.hasException() and self.runtime.exception.uncatchable;
     }
 
     /// Record that the pending exception is the engine's out-of-memory
@@ -1011,23 +976,23 @@ pub const RealmContext = struct {
     /// it: `throwValue` resets the flag, like it does the uncatchable one.
     pub fn markExceptionOutOfMemory(self: *RealmContext) void {
         std.debug.assert(self.hasException());
-        exception_state.markOutOfMemory(self.runtime);
+        self.runtime.exception.out_of_memory = true;
     }
 
     pub fn exceptionIsOutOfMemory(self: RealmContext) bool {
-        return self.hasException() and self.runtime.current_exception_out_of_memory;
+        return self.hasException() and self.runtime.exception.out_of_memory;
     }
 
     pub fn hasException(self: RealmContext) bool {
-        return !self.runtime.current_exception.is(.uninitialized);
+        return self.runtime.exception.isSet();
     }
 
     pub fn takeException(self: *RealmContext) JSValue {
-        return exception_state.take(self.runtime);
+        return self.runtime.exception.take();
     }
 
     pub fn clearException(self: *RealmContext) void {
-        exception_state.clear(self.runtime);
+        self.runtime.exception.clear();
     }
 
     pub fn recordUnhandledRejection(self: *RealmContext, value: JSValue) void {
@@ -1041,15 +1006,38 @@ pub const RealmContext = struct {
     /// failure silently drops the entry, exactly as the qjs CLI's unchecked
     /// malloc does.
     pub fn recordUnhandledPromiseRejection(self: *RealmContext, promise: ?JSValue, value: JSValue) void {
-        if (promise) |promise_value| {
-            for (self.unhandled_rejections) |entry| {
-                if (entry.promise.same(promise_value)) return;
-            }
+        const payload = if (promise) |promise_value| trackedPromisePayload(promise_value) else null;
+        if (payload) |tracked| {
+            if (tracked.unhandled_tracked) return;
         }
+        // Only the list records the rejection. Mirroring it as the pending
+        // exception would leave a native call that rejected a promise
+        // returning normally with an exception installed.
         self.appendUnhandledRejection(promise, value) catch return;
-        if (!self.hasException()) {
-            _ = self.throwValue(value);
+        if (payload) |tracked| tracked.unhandled_tracked = true;
+    }
+
+    fn trackedPromisePayload(value: JSValue) ?*object_mod.PromisePayload {
+        if (!value.is(.object)) return null;
+        const header = value.refHeader() orelse return null;
+        return Object.fromHeader(header).promisePayload();
+    }
+
+    fn unhandledRejectionIsLive(entry: UnhandledRejectionEntry) bool {
+        const payload = trackedPromisePayload(entry.promise) orelse return true;
+        return payload.unhandled_tracked;
+    }
+
+    /// Drops entries whose promise has been handled since it was recorded.
+    fn compactUnhandledRejections(self: *RealmContext) void {
+        var live: usize = 0;
+        for (self.unhandled_rejections) |entry| {
+            if (!unhandledRejectionIsLive(entry)) continue;
+            self.unhandled_rejections[live] = entry;
+            live += 1;
         }
+        self.unhandled_rejections = self.unhandled_rejections[0..live];
+        self.unhandled_rejections_dead = 0;
     }
 
     /// A realm is a traced owner that can be old (child realms are not
@@ -1063,14 +1051,14 @@ pub const RealmContext = struct {
     fn appendUnhandledRejection(self: *RealmContext, promise: ?JSValue, value: JSValue) !void {
         const index = self.unhandled_rejections.len;
         if (index + 1 > self.unhandled_rejections_capacity) {
-            var next_capacity = if (self.unhandled_rejections_capacity == 0) @as(usize, 4) else self.unhandled_rejections_capacity * 2;
+            var next_capacity: usize = if (self.unhandled_rejections_capacity == 0) 4 else @as(usize, self.unhandled_rejections_capacity) * 2;
             while (next_capacity < index + 1) : (next_capacity *= 2) {}
             const next = try self.runtime.allocNative(UnhandledRejectionEntry, next_capacity);
             const old = self.unhandled_rejections;
             const old_capacity = self.unhandled_rejections_capacity;
             @memcpy(next[0..old.len], old);
             self.unhandled_rejections = next[0..old.len];
-            self.unhandled_rejections_capacity = next_capacity;
+            self.unhandled_rejections_capacity = std.math.cast(u32, next_capacity) orelse return error.OutOfMemory;
             if (old_capacity != 0) self.runtime.freeNative(UnhandledRejectionEntry, old.ptr[0..old_capacity]);
         }
         self.unhandled_rejections = self.unhandled_rejections.ptr[0 .. index + 1];
@@ -1087,19 +1075,22 @@ pub const RealmContext = struct {
     /// only — entries for other promises stay tracked (even with a sameValue
     /// reason).
     pub fn removeUnhandledPromiseRejection(self: *RealmContext, promise_value: JSValue) void {
-        const entries = self.unhandled_rejections;
-        for (entries, 0..) |entry, index| {
-            if (!entry.promise.same(promise_value)) continue;
-            const old_len = entries.len;
-            if (index + 1 < old_len) {
-                @memmove(entries[index .. old_len - 1], entries[index + 1 .. old_len]);
-            }
-            self.unhandled_rejections = entries[0 .. old_len - 1];
-            return;
-        }
+        const payload = trackedPromisePayload(promise_value) orelse return;
+        if (!payload.unhandled_tracked) return;
+        payload.unhandled_tracked = false;
+        self.unhandled_rejections_dead += 1;
+        if (@as(usize, self.unhandled_rejections_dead) * 2 > self.unhandled_rejections.len) self.compactUnhandledRejections();
     }
 
-    pub fn hasUnhandledRejection(self: RealmContext) bool {
+    /// Whether a recorded rejection is still unhandled. The promise may have
+    /// been handled from another realm's code, which marks the promise but
+    /// counts the dead entry on that realm, so liveness is read from the
+    /// promise itself.
+    pub fn hasUnhandledRejection(self: *RealmContext) bool {
+        const entries = self.unhandled_rejections;
+        if (entries.len == 0) return false;
+        if (unhandledRejectionIsLive(entries[0])) return true;
+        self.compactUnhandledRejections();
         return self.unhandled_rejections.len != 0;
     }
 
@@ -1107,9 +1098,15 @@ pub const RealmContext = struct {
     /// caller); reporting loops call this until the list drains, matching
     /// js_std_promise_rejection_check's in-order walk (quickjs-libc.c:4281).
     pub fn takeUnhandledRejection(self: *RealmContext) JSValue {
+        if (self.unhandled_rejections_dead != 0 or
+            (self.unhandled_rejections.len != 0 and !unhandledRejectionIsLive(self.unhandled_rejections[0])))
+        {
+            self.compactUnhandledRejections();
+        }
         const entries = self.unhandled_rejections;
         if (entries.len == 0) return JSValue.undefinedValue();
         const entry = entries[0];
+        if (trackedPromisePayload(entry.promise)) |payload| payload.unhandled_tracked = false;
         if (entries.len > 1) {
             @memmove(entries[0 .. entries.len - 1], entries[1..entries.len]);
         }
@@ -1118,38 +1115,22 @@ pub const RealmContext = struct {
     }
 
     pub fn clearUnhandledRejection(self: *RealmContext) void {
+        for (self.unhandled_rejections) |entry| {
+            if (trackedPromisePayload(entry.promise)) |payload| payload.unhandled_tracked = false;
+        }
+        self.releaseUnhandledRejectionList();
+    }
+
+    /// Frees the list without reading its promises: at realm teardown the
+    /// whole-heap sweep may already have freed them.
+    fn releaseUnhandledRejectionList(self: *RealmContext) void {
         const rt = self.runtime;
         const entries = self.unhandled_rejections;
         const capacity = self.unhandled_rejections_capacity;
         self.unhandled_rejections = &.{};
         self.unhandled_rejections_capacity = 0;
+        self.unhandled_rejections_dead = 0;
         if (capacity != 0) rt.freeNative(UnhandledRejectionEntry, entries.ptr[0..capacity]);
-    }
-
-    pub fn classPrototypeSlotCount(self: RealmContext) usize {
-        return self.class_prototypes.len;
-    }
-
-    pub fn pushBacktraceFrame(
-        self: *RealmContext,
-        function_name: atom.Atom,
-        filename: atom.Atom,
-        line_num: i32,
-        col_num: i32,
-    ) !void {
-        try self.pushBacktraceFrameWithResolver(function_name, filename, line_num, col_num, null, null);
-    }
-
-    pub fn pushBacktraceFrameWithResolver(
-        self: *RealmContext,
-        function_name: atom.Atom,
-        filename: atom.Atom,
-        line_num: i32,
-        col_num: i32,
-        location_data: ?*const anyopaque,
-        location_resolver: ?BacktraceLocationResolver,
-    ) !void {
-        try self.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, JSValue.undefinedValue());
     }
 
     pub fn pushActiveBacktraceFrame(self: *RealmContext, frame: *ActiveBacktraceFrame) void {
@@ -1160,7 +1141,11 @@ pub const RealmContext = struct {
         execution.unlinkActiveBacktrace(self.runtime, frame);
     }
 
-    pub fn snapshotBacktraceFrames(self: *RealmContext) ![]BacktraceFrame {
+    /// The innermost `max_frames` active frames, oldest first. Callers print
+    /// at most `Error.stackTraceLimit` frames; bounding the snapshot keeps an
+    /// error thrown at recursion depth n (a stack overflow) from costing
+    /// O(n^2): the indexed resolver walks its group from the top per index.
+    pub fn snapshotBacktraceFrames(self: *RealmContext, max_frames: usize) ![]BacktraceFrame {
         // Each active node now resolves a whole frame GROUP (a VM invocation's
         // inline Entry chain + its L0 frame), enumerated innermost-first via the
         // indexed resolver until it returns null. A `backtrace_barrier` frame
@@ -1170,35 +1155,32 @@ pub const RealmContext = struct {
             var active = self.runtime.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
-                while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
+                while (active_count < max_frames) : (index += 1) {
+                    const snapshot = frame.resolver(frame.data, index) orelse break;
                     if (snapshot.backtrace_barrier) break :count;
                     active_count += 1;
                 }
+                if (active_count == max_frames) break;
                 active = frame.previous;
             }
         }
 
-        const total = self.runtime.backtrace_frames.len + active_count;
-        if (total == 0) return &.{};
-        const frames = try self.runtime.allocNative(BacktraceFrame, total);
+        if (active_count == 0) return &.{};
+        const frames = try self.runtime.allocNative(BacktraceFrame, active_count);
 
-        for (self.runtime.backtrace_frames, 0..) |frame, idx| {
-            frames[idx] = self.dupBacktraceFrame(frame);
-        }
-
-        // Fill the active section so the innermost frame lands LAST (the array
-        // order is [persistent (outer)..., oldest-active...innermost]), the same
-        // order the previous per-node walk produced.
+        // Fill so the innermost frame lands LAST (oldest-active...innermost).
         var active_index = active_count;
         {
             var active = self.runtime.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
-                while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
+                while (active_index > 0) : (index += 1) {
+                    const snapshot = frame.resolver(frame.data, index) orelse break;
                     if (snapshot.backtrace_barrier) break :fill;
                     active_index -= 1;
-                    frames[self.runtime.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
+                    frames[active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
                 }
+                if (active_index == 0) break;
                 active = frame.previous;
             }
         }
@@ -1207,20 +1189,6 @@ pub const RealmContext = struct {
 
     pub fn freeBacktraceFrameSnapshot(self: *RealmContext, frames: []BacktraceFrame) void {
         if (frames.len != 0) self.runtime.freeNative(BacktraceFrame, frames);
-    }
-
-    fn dupBacktraceFrame(self: *RealmContext, frame: BacktraceFrame) BacktraceFrame {
-        return .{
-            .function_name = self.runtime.atoms.noteHolderStore(frame.function_name),
-            .filename = self.runtime.atoms.noteHolderStore(frame.filename),
-            .line_num = frame.line_num,
-            .col_num = frame.col_num,
-            .pc = frame.currentPc(),
-            .location_data = frame.location_data,
-            .location_resolver = frame.location_resolver,
-            .function_value = if (frame.function_value.is(.object)) frame.function_value else JSValue.undefinedValue(),
-            .is_native = frame.is_native,
-        };
     }
 
     fn dupActiveBacktraceFrameFromSnapshot(self: *RealmContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
@@ -1237,53 +1205,11 @@ pub const RealmContext = struct {
         };
     }
 
-    /// Push a backtrace frame whose display name is resolved lazily from
-    /// `function_value` (an object) only when a backtrace is materialized.
-    /// `function_name` stays the fallback for non-object function values.
-    pub fn pushBacktraceFrameLazyName(
-        self: *RealmContext,
-        function_name: atom.Atom,
-        filename: atom.Atom,
-        line_num: i32,
-        col_num: i32,
-        location_data: ?*const anyopaque,
-        location_resolver: ?BacktraceLocationResolver,
-        function_value: JSValue,
-    ) !void {
-        try execution.appendStoredBacktrace(self.runtime, .{
-            .function_name = self.runtime.atoms.noteHolderStore(function_name),
-            .filename = self.runtime.atoms.noteHolderStore(filename),
-            .line_num = line_num,
-            .col_num = col_num,
-            .location_data = location_data,
-            .location_resolver = location_resolver,
-            .function_value = execution.storedFunctionValue(function_value),
-        });
-    }
-
-    pub fn popBacktraceFrame(self: *RealmContext) void {
-        execution.popStoredBacktrace(self.runtime);
-    }
-
-    pub fn updateBacktracePc(self: *RealmContext, pc: usize) void {
-        execution.setStoredBacktracePc(self.runtime, pc);
-    }
-
-    pub fn borrowBacktracePc(self: *RealmContext, pc_source: *const usize) void {
-        execution.borrowStoredBacktracePc(self.runtime, pc_source);
-    }
-
-    pub fn updateBacktraceLocation(self: *RealmContext, pc: usize, line_num: i32, col_num: i32) void {
-        execution.setStoredBacktraceLocation(self.runtime, pc, line_num, col_num);
-    }
-
+    /// The thrown exception if one is pending, otherwise the oldest
+    /// unhandled rejection. Takes only the value it returns.
     pub fn takePendingException(self: *RealmContext) JSValue {
-        if (self.hasUnhandledRejection()) {
-            const rejection = self.takeUnhandledRejection();
-            if (self.hasException()) self.clearException();
-            return rejection;
-        }
-        return self.takeException();
+        if (self.hasException()) return self.takeException();
+        return self.takeUnhandledRejection();
     }
 
     /// Bind and bootstrap this Realm explicitly; never select another empty Realm.

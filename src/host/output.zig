@@ -4,10 +4,7 @@ const core = zjs.core;
 const std = @import("std");
 const builtin_dispatch = zjs.exec.builtin_dispatch;
 const exception_ops = zjs.exec.exception_ops;
-const error_stack_ops = zjs.exec.exception_ops;
 const value_ops = zjs.exec.value_ops;
-const property_ops = zjs.exec.property_ops;
-const call_runtime = zjs.exec.call_runtime;
 const HostError = zjs.HostError;
 
 const console_descriptor: core.property.AutoInit = .{
@@ -22,24 +19,36 @@ pub fn install(ctx: *core.JSContext, global: *core.Object) !void {
 }
 
 fn defineOutput(rt: *core.JSRuntime, target: *core.Object, global: *core.Object, name: []const u8) !void {
+    return defineOutputWithEntry(rt, target, global, name, &output_host_entry);
+}
+
+fn defineOutputWithEntry(rt: *core.JSRuntime, target: *core.Object, global: *core.Object, name: []const u8, entry: *const core.NativeEntry) !void {
     const key = try rt.internAtom(name);
     var roots = core.runtime.rootAtoms(.{&key});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    try target.defineHostAutoInitPropertyWithEntry(rt, key, name, 1, core.property.Flags.data(.all), core.host_function.ids.output, false, global, &output_host_entry);
+    try target.defineHostAutoInitPropertyWithEntry(rt, key, name, 1, core.property.Flags.data(.all), core.host_function.ids.output, false, global, entry);
 }
 
 fn materializeConsole(header: *core.gc.Header) !core.JSValue {
     const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", header));
+    const rt = ctx.runtime;
+    // Exact slots: a collection inside `defineOutput` may move both objects.
+    var roots: core.runtime.ExactValueRoots(1) = .{};
+    roots.activate(rt) catch return error.InvalidBuiltinRegistry;
+    defer roots.deactivate();
     const global = ctx.global orelse return error.InvalidBuiltinRegistry;
-    const prototype = zjs.exec.object_ops.objectPrototypeFromGlobal(ctx.runtime, global);
-    const object = try core.Object.createWithOwnPropertyCapacity(ctx.runtime, core.class.ids.object, prototype, 3);
-    var rooted_object: ?*core.Object = object;
-    var roots = core.runtime.rootObjects(.{&rooted_object});
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-    for ([_][]const u8{ "log", "warn", "error" }) |name| try defineOutput(ctx.runtime, object, global, name);
-    return object.value();
+    roots.storage[0] = (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, zjs.exec.object_ops.objectPrototypeFromGlobal(rt, global), 3)).value();
+    const Method = struct { name: []const u8, entry: *const core.NativeEntry };
+    for ([_]Method{
+        .{ .name = "log", .entry = &output_host_entry },
+        .{ .name = "warn", .entry = &error_output_host_entry },
+        .{ .name = "error", .entry = &error_output_host_entry },
+    }) |method| {
+        const console = core.Object.fromHeader(roots.storage[0].refHeader().?);
+        try defineOutputWithEntry(rt, console, ctx.global orelse return error.InvalidBuiltinRegistry, method.name, method.entry);
+    }
+    return roots.storage[0];
 }
 
 pub const tests = if (@import("builtin").is_test) struct {
@@ -78,7 +87,40 @@ pub const tests = if (@import("builtin").is_test) struct {
     }
 } else struct {};
 
-/// NB2: `print` and `console.log/warn/error` share one static managed entry.
+/// `console.warn` / `console.error` write to stderr, after flushing stdout so
+/// the two streams keep their program order on a shared terminal.
+pub const error_output_host_entry: core.NativeEntry = .{
+    .target = core.NativeEntry.code(&errorOutputHostThunk),
+    .kind = .managed,
+    .arity = 1,
+};
+
+fn errorOutputHostThunk(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    entry: *const core.NativeEntry,
+    func_obj: ?*core.Object,
+) callconv(.c) core.JSValue {
+    _ = this_value;
+    _ = entry;
+    _ = func_obj;
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    if (builtin_dispatch.vmCallerView(ctx).output) |stdout_writer| {
+        stdout_writer.flush() catch |err| return builtin_dispatch.hostErrorToValue(ctx, global, err);
+    }
+    var buffer: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writerStreaming(std.Io.Threaded.global_single_threaded.io(), &buffer);
+    // Prints go to stderr; user code reached while printing (an inspected
+    // getter, Error.prepareStackTrace) keeps the invocation's own writer.
+    const result = hostOutputValues(ctx, global, builtin_dispatch.vmCallerView(ctx).output, &stderr_writer.interface, argv[0..argc]) catch |err|
+        return builtin_dispatch.hostErrorToValue(ctx, global, err);
+    stderr_writer.interface.flush() catch |err| return builtin_dispatch.hostErrorToValue(ctx, global, err);
+    return result;
+}
+
+/// NB2: `print` and `console.log` share one static managed entry.
 /// The host output writer is the active invocation's (`vmCallerView`), so
 /// no registry, no per-runtime record, no environment.
 pub const output_host_entry: core.NativeEntry = .{
@@ -99,15 +141,19 @@ fn outputHostThunk(
     _ = entry;
     _ = func_obj;
     const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-    const result = hostOutputValues(ctx, global, builtin_dispatch.vmCallerView(ctx).output, argv[0..argc]) catch |err|
+    const output = builtin_dispatch.vmCallerView(ctx).output;
+    const result = hostOutputValues(ctx, global, output, output, argv[0..argc]) catch |err|
         return builtin_dispatch.hostErrorToValue(ctx, global, err);
     return result;
 }
 
+/// Print `values` to `destination`. `caller_output` is the writer user code
+/// run during printing uses for its own print() calls.
 fn hostOutputValues(
     ctx: *core.JSContext,
     global: *core.Object,
-    output: ?*std.Io.Writer,
+    caller_output: ?*std.Io.Writer,
+    destination: ?*std.Io.Writer,
     values: []const core.JSValue,
 ) HostError!core.JSValue {
     const global_value = [_]core.JSValue{global.value()};
@@ -115,17 +161,15 @@ fn hostOutputValues(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (output) |writer| {
+    if (destination) |writer| {
         for (0..values.len) |i| {
             if (i != 0) writer.writeByte(' ') catch |err|
                 return exception_ops.throwHostError(ctx, global, err);
             // qjs js_print (quickjs-libc.c:4063): a string argument is
             // written raw; everything else is the JS_PrintValue inspector
             // dump (`{ a: 1 }`, `[Function f]`, `Error: msg` + stack).
-            printHostArgument(ctx, global, output, writer, values[i]) catch |err| switch (err) {
-                error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
-                error.OutOfMemory => return error.OutOfMemory,
-            };
+            printHostArgument(ctx, global, caller_output, writer, values[i]) catch |err|
+                return exception_ops.throwHostError(ctx, global, err);
         }
         writer.writeByte('\n') catch |err|
             return exception_ops.throwHostError(ctx, global, err);
@@ -133,7 +177,7 @@ fn hostOutputValues(
     return core.JSValue.undefinedValue();
 }
 
-// ----- merged from print_inspector.zig -----
+// ----- Value printer (print / console inspector) -----
 // CLI `print` / `console.log` value inspector: the QuickJS `JS_PrintValue`
 // dump reproduced byte for byte, so a benchmark
 // driver or a test262 harness line reads the same under both shells.
@@ -145,10 +189,11 @@ fn hostOutputValues(
 // enumerable properties only, no `raw_dump`.
 //
 // Cold path: only the CLI output builtins reach it. Allocation is limited to
-// the BigInt decimal text and, for an Error receiver, whatever
-// `error_stack_ops.errorStackGetter` materializes (a freshly built `stack`
-// string, and a re-entrant `Error.prepareStackTrace` call when the host
-// installed one).
+// cold cases: the BigInt decimal text, atom names and UTF-16 name buffers
+// longer than 256 bytes, a Date's ISO string, and, for an Error receiver,
+// whatever `exception_ops.errorStackGetter` materializes (a freshly built
+// `stack` string, and a re-entrant `Error.prepareStackTrace` call when the
+// host installed one).
 const value_format = core.value_format;
 const date_ops = zjs.exec.date_ops;
 const regexp_adapter = zjs.exec.regexp_ops;
@@ -238,7 +283,8 @@ const Units = union(enum) {
         };
     }
 };
-fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
+/// Escape and print the first `len` units for a `"`-quoted string.
+fn printUnits(s: *State, units: Units, len: usize) Error!void {
     var i: usize = 0;
     while (i < len) : (i += 1) {
         var c: u32 = units.at(i);
@@ -256,7 +302,7 @@ fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
             try s.putc(e);
             continue;
         }
-        if (c == sep) {
+        if (c == '"') {
             try s.putc('\\');
             try s.putc(@intCast(c));
             continue;
@@ -294,12 +340,11 @@ fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
 /// `js_print_string`: quoted, escaped, cut at
 /// `max_string_length` with the `... N more characters` tail.
 fn printString(s: *State, value: core.JSValue) Error!void {
-    if (!value.isString()) return s.puts("<invalid string tag>");
     const units = Units{ .string = value };
     const total = units.len();
     const shown = @min(total, default_max_string_length);
     try s.putc('"');
-    try printUnits(s, units, shown, '"');
+    try printUnits(s, units, shown);
     try s.putc('"');
     if (total > default_max_string_length) {
         const n = total - default_max_string_length;
@@ -309,7 +354,7 @@ fn printString(s: *State, value: core.JSValue) Error!void {
 
 /// `js_print_raw_string`: the string text as-is.
 fn printRawString(s: *State, value: core.JSValue) Error!void {
-    if (!value.isString()) return;
+    std.debug.assert(value.isString());
     const snapshot = [_]core.JSValue{value};
     const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshot }};
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
@@ -317,21 +362,22 @@ fn printRawString(s: *State, value: core.JSValue) Error!void {
     defer roots.deactivate(s.rt);
     const units = Units{ .string = value };
     var index: usize = 0;
-    while (index < units.len()) : (index += 1) {
-        var codepoint: u32 = units.at(index);
-        if (std.unicode.utf16IsHighSurrogate(@intCast(codepoint))) {
-            if (index + 1 == units.len()) break;
-            const low = units.at(index + 1);
-            if (!std.unicode.utf16IsLowSurrogate(low)) break;
-            codepoint = 0x10000 + (((codepoint & 0x3ff) << 10) | (low & 0x3ff));
-            index += 1;
-        } else if (std.unicode.utf16IsLowSurrogate(@intCast(codepoint))) {
-            // Preserve the former Utf16LeIterator error boundary: raw output
-            // stops at an unpaired surrogate; quoted output escapes it.
-            break;
+    while (index < units.len()) try putUnitRaw(s, nextCodePoint(units, &index));
+}
+
+/// The code point at `index.*`, pairing a surrogate pair, and advance past
+/// it. A lone surrogate is returned as is.
+fn nextCodePoint(units: Units, index: *usize) u32 {
+    const unit: u32 = units.at(index.*);
+    index.* += 1;
+    if (std.unicode.utf16IsHighSurrogate(@intCast(unit)) and index.* < units.len()) {
+        const low: u32 = units.at(index.*);
+        if (std.unicode.utf16IsLowSurrogate(@intCast(low))) {
+            index.* += 1;
+            return 0x10000 + (((unit & 0x3ff) << 10) | (low & 0x3ff));
         }
-        try putUnitRaw(s, codepoint);
     }
+    return unit;
 }
 
 /// `is_ascii_ident`: bare key or quoted key.
@@ -366,13 +412,22 @@ fn printAtom(s: *State, atom_id: core.Atom) Error!void {
 fn printNameBytes(s: *State, bytes: []const u8) Error!void {
     if (isAsciiIdent(bytes)) return s.puts(bytes);
     try s.putc('"');
-    var units_buf: [256]u16 = undefined;
-    if (std.unicode.utf8ToUtf16Le(&units_buf, bytes)) |n| {
-        try printUnits(s, .{ .utf16 = units_buf[0..n] }, n, '"');
+    // `wtf8ToWtf16Le` does not bound its output; UTF-16 never needs more
+    // units than the UTF-8 input has bytes.
+    var stack_units: [256]u16 = undefined;
+    const allocator = s.rt.nativeAllocator();
+    const units_buf = if (bytes.len <= stack_units.len)
+        stack_units[0..bytes.len]
+    else
+        try allocator.alloc(u16, bytes.len);
+    defer if (units_buf.ptr != &stack_units) allocator.free(units_buf);
+    // Atom names are WTF-8: a lone surrogate prints as its `\uXXXX` escape.
+    if (std.unicode.wtf8ToWtf16Le(units_buf, bytes)) |n| {
+        try printUnits(s, .{ .utf16 = units_buf[0..n] }, n);
     } else |_| {
-        // Longer or malformed names: escape byte-wise without the surrogate
-        // pairing; the byte view still quotes and escapes every ASCII case.
-        try printUnits(s, .{ .latin1 = bytes }, bytes.len, '"');
+        // Malformed names: escape byte-wise without the surrogate pairing;
+        // the byte view still quotes and escapes every ASCII case.
+        try printUnits(s, .{ .latin1 = bytes }, bytes.len);
     }
     try s.putc('"');
 }
@@ -383,10 +438,8 @@ fn printNameBytes(s: *State, bytes: []const u8) Error!void {
 /// Proxy is registered under `Object` in qjs (quickjs.c JS_CLASS_PROXY), and
 /// the zjs-only classes take the obvious name (not verified against qjs).
 fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
-    if (class_id != core.class.ids.proxy) {
-        if (s.rt.classes.className(class_id)) |name_atom| {
-            if (name_atom != core.atom.null_atom) return printAtom(s, name_atom);
-        }
+    if (s.rt.classes.className(class_id)) |name_atom| {
+        if (name_atom != core.atom.null_atom) return printAtom(s, name_atom);
     }
     const fallback: []const u8 = switch (class_id) {
         core.class.ids.proxy, core.class.ids.global_object, core.class.ids.module_ns => "Object",
@@ -401,7 +454,6 @@ fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
         core.class.ids.async_generator => "AsyncGenerator",
         core.class.ids.weak_ref => "WeakRef",
         core.class.ids.finalization_registry => "FinalizationRegistry",
-        core.class.ids.dom_exception => "DOMException",
         core.class.ids.call_site => "CallSite",
         core.class.ids.raw_json => "RawJSON",
         core.class.ids.disposable_stack => "DisposableStack",
@@ -436,8 +488,8 @@ fn ownOrProtoDataString(object: *const core.Object, atom_id: core.Atom) ?core.JS
     var hops: usize = 0;
     while (owner) |current| : (hops += 1) {
         if (current.findProperty(atom_id)) |index| {
-            // zjs keeps the intrinsic prototypes' `name` (and a function's
-            // `prototype`) as lazy auto_init slots where qjs has a plain
+            // zjs keeps the intrinsic prototypes' `name` as a lazy auto_init
+            // slot where qjs has a plain
             // value; materialising through the own read is the same
             // data-property answer qjs sees.
             const value = if (current.isAutoInitAt(index))
@@ -455,20 +507,17 @@ fn ownOrProtoDataString(object: *const core.Object, atom_id: core.Atom) ?core.JS
 
 /// `js_print_regexp`: the pattern with `/`, line
 /// terminators and the `[/]` bracket case escaped, then the flag letters in
-/// the `lre` bit order (g i m s u y d, then bit 7 — which is the named-groups
-/// bit — printed as `v`; the real unicode-sets bit is never shown. That is
-/// what qjs prints, so it is what this prints).
+/// the `lre` bit order (g i m s u y d, then `v` for unicode-sets).
 fn printRegExp(s: *State, object: *const core.Object) Error!void {
     const regexp_bc = object.regexpCompiledBytecode();
-    const source_value = object.regexpSource();
-    if (regexp_bc.len == 0 or source_value == null) return s.puts("[uninitialized_regexp]");
-    if (!source_value.?.isString()) return s.puts("[uninitialized_regexp]");
-    const snapshot = [_]core.JSValue{source_value.?};
+    const source = object.regexpSource() orelse return s.puts("[uninitialized_regexp]");
+    if (regexp_bc.len == 0 or !source.isString()) return s.puts("[uninitialized_regexp]");
+    const snapshot = [_]core.JSValue{source};
     const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshot }};
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(s.rt);
     defer roots.deactivate(s.rt);
-    const units = Units{ .string = source_value.? };
+    const units = Units{ .string = source };
     const flags = regexp_adapter.flagsFromBytecode(regexp_bc);
     const n = units.len();
     try s.putc('/');
@@ -478,8 +527,7 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
         var bra = false;
         var i: usize = 0;
         while (i < n) {
-            var c: u32 = units.at(i);
-            i += 1;
+            var c = nextCodePoint(units, &i);
             var c2: ?u32 = null;
             switch (c) {
                 '\\' => {
@@ -534,12 +582,13 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
     }
 }
 
-/// `js_putc` on a code unit: qjs writes the unit's low byte; a non-ASCII
-/// unit is emitted as UTF-8 instead of a stray byte.
+/// `js_putc` on a code point: qjs writes the unit's low byte; a non-ASCII
+/// code point is emitted as UTF-8 instead of a stray byte, and a lone
+/// surrogate as U+FFFD.
 fn putUnitRaw(s: *State, c: u32) Error!void {
     if (c < 0x80) return s.putc(@intCast(c));
     var utf8: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(@intCast(c), &utf8) catch return;
+    const n = std.unicode.utf8Encode(@intCast(c), &utf8) catch return s.puts("\u{FFFD}");
     try s.puts(utf8[0..n]);
 }
 
@@ -569,7 +618,16 @@ fn printError(s: *State, object: *const core.Object) Error!void {
     // same captured text, so read it through the native getter when no own
     // data `stack` shadows it.
     const stack_value: ?core.JSValue = ownOrProtoDataString(object, core.atom.ids.stack) orelse blk: {
-        const got = error_stack_ops.errorStackGetter(s.ctx, s.output, s.global, @constCast(object).value()) catch break :blk null;
+        const got = exception_ops.errorStackGetter(s.ctx, s.output, s.global, @constCast(object).value()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                // A throwing stack formatter must not leave its exception
+                // pending behind the printer: print the error without it.
+                // An uncatchable interrupt stays pending for the caller.
+                if (s.ctx.hasException() and !s.ctx.exceptionIsUncatchable()) s.ctx.clearException();
+                break :blk null;
+            },
+        };
         break :blk if (got.isString()) got else null;
     };
     if (stack_value) |stack| {
@@ -579,18 +637,7 @@ fn printError(s: *State, object: *const core.Object) Error!void {
         var len = units.len();
         if (len > 0 and units.at(len - 1) == '\n') len -= 1;
         var i: usize = 0;
-        while (i < len) : (i += 1) {
-            const c: u32 = units.at(i);
-            if (std.unicode.utf16IsHighSurrogate(@intCast(c)) and i + 1 < len and
-                std.unicode.utf16IsLowSurrogate(@intCast(units.at(i + 1))))
-            {
-                const c1: u32 = units.at(i + 1);
-                try putUnitRaw(s, 0x10000 + (((c & 0x3ff) << 10) | (c1 & 0x3ff)));
-                i += 1;
-            } else {
-                try putUnitRaw(s, c);
-            }
-        }
+        while (i < len) try putUnitRaw(s, nextCodePoint(units, &i));
     }
 }
 
@@ -717,7 +764,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
     } else if (class_id == core.class.ids.regexp) {
         try printRegExp(s, object);
         comma_state = 2;
-    } else if (class_id == core.class.ids.date and dateIsoText(s, object)) {
+    } else if (class_id == core.class.ids.date and try dateIsoText(s, object)) {
         comma_state = 2;
     } else if (class_id == core.class.ids.error_) {
         try printError(s, object);
@@ -760,7 +807,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
                 },
                 .var_ref => {
                     const cell = object.asVarRefAt(index).?;
-                    try printValueRec(s, cell.valueRef());
+                    try printValueRec(s, cell.varRefValue());
                 },
                 .auto_init => try s.puts("[autoinit]"),
                 .data => try printValueRec(s, object.asDataAt(index).?),
@@ -780,10 +827,12 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
 /// The `JS_CLASS_DATE` arm: `get_date_string(..., 0x23)`
 /// — toISOString without side effects; a NaN time value falls back to the
 /// generic `Date {  }` dump. Returns false when nothing was written.
-fn dateIsoText(s: *State, object: *const core.Object) bool {
-    const text = date_ops.isoStringForInspector(s.rt, object) catch return false;
-    const value = text orelse return false;
-    printRawString(s, value) catch return true;
+fn dateIsoText(s: *State, object: *const core.Object) Error!bool {
+    const text = date_ops.isoStringForInspector(s.rt, object) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    try printRawString(s, text orelse return false);
     return true;
 }
 
@@ -818,9 +867,9 @@ fn printValueRec(s: *State, value: core.JSValue) Error!void {
         return s.putc('n');
     }
     if (value.isBigInt()) {
-        var big = value_ops.cloneBigIntValue(s.rt, value) catch return error.OutOfMemory;
+        var big = core.value_format.BigIntView.init(s.rt.nativeAllocator(), value) catch return error.OutOfMemory;
         defer big.deinit();
-        const text = big.formatBase10Alloc(s.rt.nativeAllocator()) catch return error.OutOfMemory;
+        const text = big.int.formatBase10Alloc(s.rt.nativeAllocator(), null) catch return error.OutOfMemory;
         defer s.rt.nativeAllocator().free(text);
         try s.puts(text);
         return s.putc('n');

@@ -143,7 +143,7 @@ pub const VarRef = struct {
         // cell's VALUE is NEVER itself a cell — every write path unwraps an
         // incoming cell value first (replaceAdapterOwned / execPutVarRef),
         // and the direct-eval const view pvalue-ALIASES its target cell instead
-        // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
+        // (eval_entry.directEvalOuterVarRefView), so readers do qjs's bare
         // `*var_ref->pvalue` with no chase. Debug-resident
         // so a regression that would silently corrupt the read fast path traps.
         if (comptime builtin.mode == .Debug) {

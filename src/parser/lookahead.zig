@@ -3,19 +3,12 @@
 const std = @import("std");
 const root = @import("../parser.zig");
 const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
 const simple_token = @import("../simple_token.zig");
 const lexer_mod = root.lexer;
 const tok = root.token;
 const diagnostics = root.diagnostics;
 const parse_state = @import("parse_state.zig");
 const identifiers = @import("identifiers.zig");
-const emitter = @import("emitter.zig");
-const expressions = @import("expressions.zig");
-const statements = @import("statements.zig");
-const functions = @import("functions.zig");
-const classes = @import("classes.zig");
-const modules = @import("modules.zig");
 const typescript = @import("typescript.zig");
 const Error = parse_state.Error;
 const FeatureImpl = parse_state.FeatureImpl;
@@ -100,8 +93,14 @@ pub fn checkArrowHead(s: *State, return_type_forbidden: bool) Error!bool {
         const balanced = scanBalancedToken(s, true) catch |err| return lookaheadErrorAsNoMatch(err);
         if (!balanced.closed) return false;
         if (balanced.following == .arrow) return true;
-        // TypeScript `(...): R => body`.
-        if (balanced.following == .colon and !return_type_forbidden) return typescript.tsParenArrowHeadWithReturnType(s);
+        if (return_type_forbidden) return false;
+        // TypeScript `(...): R => body`; only `=>` must stay on the line, so
+        // the return-type colon may follow a line break.
+        if (balanced.following == .colon) return typescript.tsParenArrowHeadWithReturnType(s);
+        if (balanced.following == .newline) {
+            const across_lines = scanBalancedToken(s, false) catch |err| return lookaheadErrorAsNoMatch(err);
+            if (across_lines.closed and across_lines.following == .colon) return typescript.tsParenArrowHeadWithReturnType(s);
+        }
         return false;
     }
     if (s.peekKind() == .ident) return try checkIdentArrowHead(s);
@@ -138,7 +137,7 @@ pub fn mapLookaheadLexerError(s: *State, err: lexer_mod.Error) Error {
             .offset = s.lex.mark_pos,
             .line = s.lex.mark_line,
             .column = s.lex.mark_col,
-        }, State.decoratorDiagnosticMessage(s.lex.source, err, s.lex.mark_pos) orelse @errorName(err)),
+        }, State.decoratorDiagnosticMessage(s.lex.source, err, s.lex.mark_pos) orelse State.failureMessage(err)),
     };
 }
 
@@ -171,7 +170,28 @@ fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous
     s.lex.rescanRegexpInto(lookahead_token, slash_offset) catch |err| return mapLookaheadLexerError(s, err);
 }
 
-pub fn skipFunctionInPredeclareScan(s: *State) Error!void {
+/// Skip the function a `function` token heads, the lexer sitting just past
+/// that token. A token-level scan also meets `function` as a property name
+/// (`e.function`, `{ function: 1 }`, a class field `function = 1`); those
+/// head nothing and are left for the caller to scan past as a plain token.
+pub fn skipFunctionInPredeclareScan(s: *State, before_keyword: ?tok.Kind) Error!void {
+    if (s.runtime) |rt| {
+        if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+    }
+    if (before_keyword) |previous| {
+        if (previous == .dot or previous == .question_mark_dot) return;
+    }
+    const after_keyword = takeLexerCursorSnapshot(s);
+    const next_kind = blk: {
+        var next = try s.lex.next();
+        defer s.lex.freeToken(&next);
+        break :blk next.kind;
+    };
+    restoreLexerCursorSnapshot(s, after_keyword);
+    switch (next_kind) {
+        .colon, .comma, .rbrace, .rparen, .rbracket, .semicolon, .assign, .question => return,
+        else => {},
+    }
     while (true) {
         var t = try s.lex.next();
         defer s.lex.freeToken(&t);
@@ -201,6 +221,10 @@ pub fn skipFunctionInPredeclareScan(s: *State) Error!void {
 }
 
 pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
+    // Nested substitutions recurse; bound the native stack like `advance`.
+    if (s.runtime) |rt| {
+        if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+    }
     const first_part = first.payload.str.template orelse return Error.ParserInvariant;
     switch (first_part) {
         .no_substitution, .tail => return,
@@ -217,9 +241,7 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
                 .eof => {
                     return;
                 },
-                .kw_function => {
-                    try skipFunctionInPredeclareScan(s);
-                },
+                .kw_function => try skipFunctionInPredeclareScan(s, previous_token_kind),
                 .template => {
                     try skipTemplateInPredeclareScan(s, t);
                     previous_token_kind = .template;
@@ -427,27 +449,51 @@ const BalancedTokenScan = struct {
     has_top_level_ellipsis: bool = false,
     has_assignment: bool = false,
     failure: ?DiagnosticToken = null,
+    /// The closer the innermost open delimiter needed when `failure` was hit.
+    expected_close: tok.Kind = .eof,
 };
 
 /// QuickJS-shaped balanced-token scan. The parser's current token stays
 /// borrowed and valid; only the lexer cursor moves, and is restored on
 /// return. No parser snapshot, token duplication, emission rollback, or
 /// per-token `State.advance` work is needed.
+fn closerOf(opening: tok.Kind) tok.Kind {
+    return switch (opening) {
+        .lparen => .rparen,
+        .lbracket => .rbracket,
+        .lbrace => .rbrace,
+        else => unreachable,
+    };
+}
+
 fn scanBalancedAfterOpening(s: *State, opening: tok.Kind, no_line_terminator: bool) Error!BalancedTokenScan {
-    // Match QuickJS's fixed local state[256], including its underflow
-    // sentinel. The opening token has already advanced lex.pos.
-    var delimiters: [256]u8 = undefined;
-    delimiters[0] = 0;
-    delimiters[1] = @intCast(@intFromEnum(opening));
-    var level: usize = 2;
+    // The closers of the open delimiters, above an `.eof` sentinel; the
+    // opening token has already advanced lex.pos. The scan is iterative, so
+    // nesting is bounded only by the recursive parse that follows it.
+    var fallback = std.heap.stackFallback(256 * @sizeOf(tok.Kind), s.scratch);
+    const allocator = fallback.get();
+    var closers: std.ArrayList(tok.Kind) = .empty;
+    defer closers.deinit(allocator);
+    try closers.appendSlice(allocator, &.{ .eof, closerOf(opening) });
+    // Parallel to `closers`: whether a `/` right after that closer starts a
+    // regexp. A `)` ending an if/while/for/with head and a `}` ending a block
+    // statement are followed by a statement, so `if (t) /re/.test(t)` and
+    // `{} /re/g` hold regexps; after any other `)` or `}` a slash divides.
+    var fallback_flags = std.heap.stackFallback(256, s.scratch);
+    const flags_allocator = fallback_flags.get();
+    var regexp_after_close: std.ArrayList(bool) = .empty;
+    defer regexp_after_close.deinit(flags_allocator);
+    try regexp_after_close.appendSlice(flags_allocator, &.{ false, false });
     var previous_token_kind: ?tok.Kind = opening;
+    var slash_after_statement_closer = false;
     var result = BalancedTokenScan{};
 
-    while (level > 1) {
+    while (closers.items.len > 1) {
         var scratch = s.lex.next() catch |err| return mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&scratch);
 
-        try rescanLookaheadTokenIfRegexp(s, &scratch, previous_token_kind);
+        try rescanLookaheadTokenIfRegexp(s, &scratch, if (slash_after_statement_closer) .semicolon else previous_token_kind);
+        slash_after_statement_closer = false;
         const diagnostic_token = diagnosticTokenFromToken(&scratch);
         if (scratch.kind == .template) {
             // Treat the complete template as one balanced item. The helper
@@ -466,40 +512,33 @@ fn scanBalancedAfterOpening(s: *State, opening: tok.Kind, no_line_terminator: bo
 
         const kind = scratch.kind;
 
+        var closed_statement_part = false;
         switch (kind) {
             .lparen, .lbracket, .lbrace => {
-                if (level >= delimiters.len) {
+                try closers.append(allocator, closerOf(kind));
+                const before = previous_token_kind orelse .semicolon;
+                try regexp_after_close.append(flags_allocator, switch (kind) {
+                    .lparen => before == .kw_if or before == .kw_while or before == .kw_for or before == .kw_with,
+                    .lbrace => switch (before) {
+                        .rparen, .lbrace, .rbrace, .semicolon, .arrow, .kw_else, .kw_do, .kw_try, .kw_finally => true,
+                        else => false,
+                    },
+                    else => false,
+                });
+            },
+            .rparen, .rbracket, .rbrace, .eof => {
+                if (kind == .eof or closers.getLast() != kind) {
                     result.failure = diagnostic_token;
+                    result.expected_close = closers.getLast();
                     return result;
                 }
-                delimiters[level] = @intCast(@intFromEnum(kind));
-                level += 1;
+                _ = closers.pop();
+                closed_statement_part = regexp_after_close.pop() orelse false;
             },
-            .rparen, .rbracket, .rbrace => {
-                if (level <= 1) {
-                    result.failure = diagnostic_token;
-                    return result;
-                }
-                const expected: u8 = switch (kind) {
-                    .rparen => '(',
-                    .rbracket => '[',
-                    .rbrace => '{',
-                    else => unreachable,
-                };
-                level -= 1;
-                if (delimiters[level] != expected) {
-                    result.failure = diagnostic_token;
-                    return result;
-                }
-            },
-            .eof => {
-                result.failure = diagnostic_token;
-                return result;
-            },
-            .semicolon => if (level == 2) {
+            .semicolon => if (closers.items.len == 2) {
                 result.has_top_level_semicolon = true;
             },
-            .ellipsis => if (level == 2) {
+            .ellipsis => if (closers.items.len == 2) {
                 result.has_top_level_ellipsis = true;
             },
             .assign => result.has_assignment = true,
@@ -510,7 +549,8 @@ fn scanBalancedAfterOpening(s: *State, opening: tok.Kind, no_line_terminator: bo
             .kw_of
         else
             kind;
-        if (level <= 1) {
+        slash_after_statement_closer = closed_statement_part;
+        if (closers.items.len <= 1) {
             result.closed = true;
         }
     }

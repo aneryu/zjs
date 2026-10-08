@@ -1,9 +1,6 @@
 //! `CallSite`: one resolved native -> JS call target (native-boundary design
-//! section 6). It merges the three former entry paths -- the embedder's
-//! `JSContext.callFunction` (`callFromHost` + the resident `HostInvocation`),
-//! the builtin-callback `SyncInternalCallSite`, and the authoritative root
-//! path `callValueOrBytecodeRoot` -- into one resolution product with two
-//! ways in:
+//! section 6), shared by the embedder's `JSContext.callFunction`, builtin
+//! callbacks and the root path `callValueOrBytecodeRoot`, with two ways in:
 //!
 //! - an invocation is active (a builtin running under the dispatch loop, or
 //!   a host function that JS called): push a `.native_boundary` Entry on
@@ -31,9 +28,7 @@ const inline_calls = @import("inline_calls.zig");
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
 
-const exceptions = @import("exception_ops.zig");
-
-const HostError = exceptions.HostError;
+const HostError = exception_ops.HostError;
 const JSValue = core.JSValue;
 
 pub const BytecodeRoute = struct {
@@ -344,7 +339,7 @@ pub inline fn callOnceInto(
     out: *JSValue,
 ) HostError!void {
     const rt = ctx.runtime;
-    const outermost = rt.call_depth == 0 and rt.native_call_depth == 0 and rt.active_invocation == null;
+    const outermost = !rt.isExecuting();
     try callOnceIntoInternal(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
     if (outermost) {
         const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = @as([*]JSValue, @ptrCast(out))[0..1] }};
@@ -576,15 +571,15 @@ inline fn resolveRoute(
     return .{ .bytecode = route };
 }
 
-// ----- merged from host_invocation.zig -----
+// ----- Resident host invocation -----
 // Resident host invocation (P4, native-boundary plan): the execution root
 // the embedder's `JSContext.callFunction` reuses across calls.
 //
-// Every embedder call used to build a fresh execution root
-// (`runWithArgsState`: frame arena mark, Frame, Machine with its 4 KiB
-// chunk array + first 4 KiB chunk, backtrace view, ActiveInvocation) and
-// tear it all down again -- ~1500 instructions per call against QuickJS's
-// ~290 for `JS_Call`. This keeps ONE Machine per runtime alive between
+// Building a fresh execution root per embedder call (`runWithArgsState`:
+// frame arena mark, Frame, Machine with its 4 KiB chunk array + first 4 KiB
+// chunk, backtrace view, ActiveInvocation) and tearing it down again costs
+// ~1500 instructions per call against QuickJS's ~290 for `JS_Call`. This
+// keeps ONE Machine per runtime alive between
 // calls and enters the callee exactly the way a builtin enters a callback:
 // push an Entry with `.native_boundary` return and run the dispatch loop
 // until it pops (`runSyncInlineRouteCopiedArgs`).
@@ -602,10 +597,6 @@ inline fn resolveRoute(
 // - `(ctx, global, output)` are re-targeted per call at depth 0; the
 // Machine only ever holds chunk storage between calls.
 const stack_mod = @import("stack.zig");
-const active_invocation_trace = if (core.runtime.value_root_frames_enabled)
-    @import("inline_calls.zig")
-else
-    struct {};
 var host_idle_function: bytecode.FunctionBytecode = undefined;
 pub const HostInvocation = struct {
     idle_frame: frame_mod.Frame,
@@ -623,10 +614,12 @@ pub const HostInvocation = struct {
     /// (ctx, output, global) against the Machine on every call.
     retarget_epoch: u32 = 0,
     /// Lean frame (`inline_calls.LeanFrame`) of the last one-shot callee,
-    /// keyed by the callee value, its FunctionBytecode and its capture base
-    /// (a collected closure whose address is reused cannot alias all three
-    /// with a different frame shape). Only read while a call is live, when
-    /// the embedder holds the callee.
+    /// keyed by the callee value, its FunctionBytecode and its capture base.
+    /// Those are bare addresses, so the frame is only valid while
+    /// `one_shot_pin` keeps that callee (and with it its FunctionBytecode)
+    /// alive: `oneShotRouteResolve` drops it together with the pin. Otherwise
+    /// a collected callee's addresses could be reused by a function whose
+    /// frame needs more slots than the cached carve.
     lean: inline_calls.LeanFrame = undefined,
     lean_callee: core.JSValue = core.JSValue.undefinedValue(),
     lean_valid: bool = false,
@@ -682,10 +675,8 @@ pub const HostInvocation = struct {
             .machine = &self.machine,
             .current_backtrace_view = &self.root_view,
         };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            self.invocation.header = .{ .traceRoots = active_invocation_trace.traceRoots };
-            self.invocation.previous = null;
-        }
+        self.invocation.header = .{ .traceRoots = inline_calls.traceRoots };
+        self.invocation.previous = null;
         return self;
     }
 
@@ -701,8 +692,8 @@ pub const HostInvocation = struct {
 
     /// Runtime-owned singleton, created on first use.
     pub inline fn acquire(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
-        if (rt.host_invocation) |ptr| {
-            const self: *HostInvocation = @ptrCast(@alignCast(ptr));
+        if (rt.host_invocation) |resident| {
+            const self: *HostInvocation = @ptrCast(@alignCast(resident.ptr));
             std.debug.assert(!self.published and self.machine.depth == 0);
             if (!self.machine.alreadyTargets(ctx, output, global)) {
                 self.machine.retarget(ctx, output, global);
@@ -715,8 +706,7 @@ pub const HostInvocation = struct {
 
     noinline fn acquireSlow(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
         const self = try create(rt, ctx, output, global);
-        rt.host_invocation = self;
-        rt.host_invocation_retire = retire;
+        rt.host_invocation = .{ .ptr = self, .retire = retire };
         return self;
     }
 
@@ -785,6 +775,7 @@ pub const HostInvocation = struct {
         self.one_shot_global = null;
         self.one_shot_pin.deinit();
         self.one_shot_pin = .{};
+        self.lean_valid = false;
         const resolved = inline_calls.resolveInlineFunction(global, callee) orelse return null;
         // The cache keys on the callee's address; only plain objects and
         // arrays are nursery-allocated, so a callable never moves.

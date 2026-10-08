@@ -1,11 +1,6 @@
-//! Weak object identities and the intrusive weak-holder chain.
-//!
-//! The fields stay on `JSRuntime` (`weak_reference_holder_head` / `_tail`,
-//! `weak_object_ids`, `weak_id_objects`, `next_weak_id`). The runtime struct
-//! is auto-layout and `vm_stack` is `align(64)`, so grouping those fields
-//! would repack the cold tail. This module owns register, unlink, and the
-//! paired map update. Borrowed-holder tables and WeakRef [[KeptAlive]] stay
-//! where they are.
+//! Weak object identities and the intrusive weak-holder chain
+//! (`JSRuntime.weak`). This module owns register, unlink, and the paired map
+//! update. Borrowed-holder tables and WeakRef [[KeptAlive]] live elsewhere.
 //!
 //! An object identity is `weak_id << 1`. Ids are monotonic and are not reused.
 //! Both maps are updated together: a failed second insert rolls the first
@@ -14,9 +9,43 @@
 
 const std = @import("std");
 const object_mod = @import("object.zig");
-const property_state = @import("property_state.zig");
 const Object = object_mod.Object;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
+
+/// Weak slots (WeakRef/WeakMap/WeakSet/FinalizationRegistry/WeakRootSlot)
+/// store `weak_id << 1` instead of the header address, so a recycled
+/// allocation can never alias a stale identity and lookups are O(1).
+pub const Registry = struct {
+    /// Intrusive chain of live weak-capable payload objects.
+    holder_head: ?*Object = null,
+    holder_tail: ?*Object = null,
+    /// Header address -> weak id.
+    object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Weak id -> object; a hit is the liveness test.
+    id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
+    next_id: usize = 1,
+    /// Removals since both maps were last rehashed. A std hash map removal
+    /// leaves a tombstone and never regrows, and weak ids only increase, so
+    /// without a rehash churn fills the tables with tombstones and every
+    /// lookup of an absent key probes the whole table.
+    removals_since_rehash: usize = 0,
+
+    pub fn deinit(self: *Registry, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.holder_head == null and self.holder_tail == null);
+        self.object_ids.deinit(allocator);
+        self.id_objects.deinit(allocator);
+    }
+
+    /// Allocation-free; amortized O(1) per removal.
+    fn noteRemoval(self: *Registry) void {
+        self.removals_since_rehash += 1;
+        const capacity = @max(self.object_ids.capacity(), self.id_objects.capacity());
+        if (self.removals_since_rehash * 4 < capacity) return;
+        self.removals_since_rehash = 0;
+        if (self.object_ids.capacity() != 0) self.object_ids.rehash(std.hash_map.AutoContext(usize){});
+        if (self.id_objects.capacity() != 0) self.id_objects.rehash(std.hash_map.AutoContext(usize){});
+    }
+};
 
 /// Link a weak-capable payload for its lifetime. Allocation-free. The weak
 /// pass walks the chain without splicing it.
@@ -27,22 +56,18 @@ pub fn registerHolder(rt: *JSRuntime, object: *Object) void {
     std.debug.assert(link.previous == null);
     std.debug.assert(link.next == null);
 
-    link.previous = rt.weak_reference_holder_tail;
-    if (rt.weak_reference_holder_tail) |tail| {
+    link.previous = rt.weak.holder_tail;
+    if (rt.weak.holder_tail) |tail| {
         const tail_link = tail.weakReferenceHolderLink().?;
         std.debug.assert(tail_link.registered);
         tail_link.next = object;
     } else {
-        rt.weak_reference_holder_head = object;
+        rt.weak.holder_head = object;
     }
-    rt.weak_reference_holder_tail = object;
+    rt.weak.holder_tail = object;
     link.registered = true;
     // The object unlinks itself at death (`unregisterHolder`).
     object.markNeedsFinalizer(rt);
-}
-
-pub fn holderHead(rt: *const JSRuntime) ?*Object {
-    return rt.weak_reference_holder_head;
 }
 
 pub fn unregisterHolder(rt: *JSRuntime, object: *Object) void {
@@ -55,54 +80,49 @@ pub fn unregisterHolder(rt: *JSRuntime, object: *Object) void {
         std.debug.assert(previous_link.registered);
         previous_link.next = link.next;
     } else {
-        std.debug.assert(rt.weak_reference_holder_head == object);
-        rt.weak_reference_holder_head = link.next;
+        std.debug.assert(rt.weak.holder_head == object);
+        rt.weak.holder_head = link.next;
     }
     if (link.next) |next| {
         const next_link = next.weakReferenceHolderLink().?;
         std.debug.assert(next_link.registered);
         next_link.previous = link.previous;
     } else {
-        std.debug.assert(rt.weak_reference_holder_tail == object);
-        rt.weak_reference_holder_tail = link.previous;
+        std.debug.assert(rt.weak.holder_tail == object);
+        rt.weak.holder_tail = link.previous;
     }
     link.previous = null;
     link.next = null;
     link.registered = false;
 }
 
-pub fn deinitIds(rt: *JSRuntime, allocator: std.mem.Allocator) void {
-    rt.weak_object_ids.deinit(allocator);
-    rt.weak_id_objects.deinit(allocator);
-}
-
 /// Even identities only. Symbol identities (low bit set) are not in this table.
 pub fn objectFromIdentity(rt: *const JSRuntime, identity: usize) ?*Object {
     if ((identity & 1) != 0) return null;
-    return rt.weak_id_objects.get(identity >> 1);
+    return rt.weak.id_objects.get(identity >> 1);
 }
 
 /// Encoded weak identity (`weak_id << 1`). First registration allocates a
 /// fresh id. The second map insert rolls back the first on failure, and
-/// `next_weak_id` advances only after both inserts succeed.
+/// `next_id` advances only after both inserts succeed.
 pub fn registerObject(rt: *JSRuntime, object: *Object) !usize {
     const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
     if (object.flags.has_weak_id) {
-        const weak_id = rt.weak_object_ids.get(address).?;
+        const weak_id = rt.weak.object_ids.get(address).?;
         return weak_id << 1;
     }
-    const weak_id = rt.next_weak_id;
-    try rt.weak_object_ids.put(rt.nativeAllocator(), address, weak_id);
-    rt.weak_id_objects.put(rt.nativeAllocator(), weak_id, object) catch |err| {
-        _ = rt.weak_object_ids.remove(address);
+    const weak_id = rt.weak.next_id;
+    try rt.weak.object_ids.put(rt.nativeAllocator(), address, weak_id);
+    rt.weak.id_objects.put(rt.nativeAllocator(), weak_id, object) catch |err| {
+        _ = rt.weak.object_ids.remove(address);
         return err;
     };
-    rt.next_weak_id += 1;
+    rt.weak.next_id += 1;
     object.flags.has_weak_id = true;
     // The finalizer bit stays. Death returns the id from the destructor
     // (`takeObject`), which only runs for the finalizer set. Clearing the bit
     // here would leave this pair pointing at freed memory, and a hit in
-    // `weak_id_objects` is the liveness test.
+    // `id_objects` is the liveness test.
     object.markNeedsFinalizer(rt);
     return weak_id << 1;
 }
@@ -110,7 +130,7 @@ pub fn registerObject(rt: *JSRuntime, object: *Object) !usize {
 pub fn peekObject(rt: *const JSRuntime, object: *const Object) ?usize {
     if (!object.flags.has_weak_id) return null;
     const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
-    const weak_id = rt.weak_object_ids.get(address) orelse return null;
+    const weak_id = rt.weak.object_ids.get(address) orelse return null;
     return weak_id << 1;
 }
 
@@ -119,7 +139,6 @@ pub fn peekObject(rt: *const JSRuntime, object: *const Object) ?usize {
 /// come through here so no table is left naming the husk.
 pub fn relocateObjectIdentities(rt: *JSRuntime, previous: *const Object, current: *Object) void {
     relocateObject(rt, previous, current);
-    property_state.relocateIteratorNext(rt, previous, current);
 }
 
 /// Move the address half of an existing identity without changing the id or
@@ -131,23 +150,25 @@ pub fn relocateObject(rt: *JSRuntime, previous: *const Object, current: *Object)
     const old_address = @intFromPtr(previous.gcHeaderConst());
     const new_address = @intFromPtr(current.gcHeader());
     std.debug.assert(old_address != new_address);
-    const entry = rt.weak_object_ids.fetchRemove(old_address) orelse
+    const entry = rt.weak.object_ids.fetchRemove(old_address) orelse
         @panic("gc: relocating object missing weak identity");
-    const registered = rt.weak_id_objects.getPtr(entry.value) orelse
+    const registered = rt.weak.id_objects.getPtr(entry.value) orelse
         @panic("gc: relocating weak identity missing reverse entry");
     std.debug.assert(registered.* == previous);
-    rt.weak_object_ids.putAssumeCapacityNoClobber(new_address, entry.value);
+    rt.weak.object_ids.putAssumeCapacityNoClobber(new_address, entry.value);
     registered.* = current;
+    rt.weak.noteRemoval();
 }
 
 /// Removes `object` from both maps and returns its encoded identity.
-/// Does not clear weak slots, run callbacks, or reuse `next_weak_id`.
+/// Does not clear weak slots, run callbacks, or reuse `next_id`.
 pub fn takeObject(rt: *JSRuntime, object: *Object) ?usize {
     if (!object.flags.has_weak_id) return null;
     object.flags.has_weak_id = false;
     const address = @intFromPtr(object.gcHeader()) & ~@as(usize, 1);
-    const weak_id = rt.weak_object_ids.get(address) orelse return null;
-    _ = rt.weak_object_ids.remove(address);
-    _ = rt.weak_id_objects.remove(weak_id);
+    const weak_id = rt.weak.object_ids.get(address) orelse return null;
+    _ = rt.weak.object_ids.remove(address);
+    _ = rt.weak.id_objects.remove(weak_id);
+    rt.weak.noteRemoval();
     return weak_id << 1;
 }

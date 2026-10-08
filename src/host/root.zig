@@ -5,6 +5,7 @@ pub const clock = @import("clock.zig");
 pub const output = @import("output.zig");
 pub const EventLoop = @import("event_loop.zig").EventLoop;
 pub const file_modules = @import("file_module_loader.zig");
+pub const web = @import("web.zig");
 
 test {
     _ = @import("event_loop.zig");

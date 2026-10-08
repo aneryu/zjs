@@ -72,10 +72,6 @@ pub const CompileContext = struct {
     realm: *context.RealmContext,
     policy: CompilePolicy = .{},
     timing: ?*CompileTiming = null,
-
-    pub inline fn artifactAllocator(self: CompileContext) std.mem.Allocator {
-        return self.realm.runtime.nativeAllocator();
-    }
 };
 
 pub const function_bytecode = @import("bytecode/function_bytecode.zig");

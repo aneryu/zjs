@@ -57,15 +57,10 @@ pub const lexer = @import("lexer.zig");
 const parse_state = @import("parser/parse_state.zig");
 const declarations = @import("parser/declarations.zig");
 const closure = @import("parser/closure.zig");
-const identifiers = @import("parser/identifiers.zig");
-const lookahead = @import("parser/lookahead.zig");
 const emitter = @import("parser/emitter.zig");
 const expressions = @import("parser/expressions.zig");
 const statements = @import("parser/statements.zig");
-const functions = @import("parser/functions.zig");
-const classes = @import("parser/classes.zig");
 const modules = @import("parser/modules.zig");
-const typescript = @import("parser/typescript.zig");
 
 pub const parser_core = struct {
     //! The parser modules under `src/parser/`, re-exported for the compile
@@ -316,7 +311,6 @@ pub const compile_entry = struct {
         eval_allows_super_call: bool = false,
         eval_allows_super_property: bool = false,
         eval_arguments_allowed: bool = false,
-        eval_annex_b_blocked_function_names: []const atom.Atom = &.{},
         eval_closure_seed: []const EvalClosureSeedImpl = &.{},
     };
 
@@ -353,19 +347,9 @@ pub const compile_entry = struct {
             const seed = seeds[index];
             if (!isPrivateEvalClosureKind(seed.var_kind) or isPrivateSetterCompanion(rt.atoms, seed)) continue;
 
-            var already_restored = false;
-            for (state.class_private_bound_names.items) |existing| {
-                if (existing == seed.var_name) {
-                    already_restored = true;
-                    break;
-                }
-            }
-            if (already_restored) continue;
-
-            const retained = seed.var_name;
-            state.class_private_bound_names.append(state.scratch, retained) catch |err| {
-                return err;
-            };
+            const bound = &state.class_private_bound_names;
+            if (std.mem.indexOfScalar(atom.Atom, bound.entries.items, seed.var_name) != null) continue;
+            try bound.push(state.scratch, state.atoms, seed.var_name);
             restored_any = true;
         }
         if (restored_any) state.class.in_body = true;
@@ -418,7 +402,7 @@ pub const compile_entry = struct {
         var module_record: ?bytecode.module.Record = null;
         errdefer if (module_record) |*record| record.deinit();
         const canonical_root = compileQjsProgram(rt, arena.allocator(), source, options, compile_context, filename_atom, &module_record, &features, &pending_diagnostic) catch |err| switch (err) {
-            error.OutOfMemory => return err,
+            error.OutOfMemory, error.Interrupted => return err,
             // qjs:libregexp.c and quickjs.c js_parse_error "stack overflow"
             error.StackOverflow => {
                 var result = ResultImpl{
@@ -428,7 +412,7 @@ pub const compile_entry = struct {
                 if (pending_diagnostic) |pending| {
                     try setPendingSyntaxError(&result, rt, filename_atom, &pending);
                 } else {
-                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, "stack overflow");
+                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, error.StackOverflow, "stack overflow");
                 }
                 arena.deinit();
                 arena_owned = false;
@@ -439,12 +423,13 @@ pub const compile_entry = struct {
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
                 };
-                if (isInternalCompilerError(err)) {
+                const pending_for_err = if (pending_diagnostic) |pending| pending.err == err else false;
+                if (isInternalCompilerError(err) and !(err == error.BytecodeOverflow and pending_for_err)) {
                     try setInternalCompilerError(&result, rt, filename_atom, err);
                 } else if (pending_diagnostic) |pending| {
                     try setPendingSyntaxError(&result, rt, filename_atom, &pending);
                 } else {
-                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, @errorName(err));
+                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, err, parser_impl.State.failureMessage(err));
                 }
                 arena.deinit();
                 arena_owned = false;
@@ -463,6 +448,9 @@ pub const compile_entry = struct {
                 .function_bytecode = canonical_root,
                 .record = record,
             } };
+            // The record's names outlive this compile's scope: the caller's
+            // enclosing scope roots them until the module is installed.
+            if (atom_scope.prev) |outer| result.artifact.module.record.noteAtoms(outer);
         } else {
             result.artifact = .{ .function_bytecode = canonical_root };
         }
@@ -490,6 +478,8 @@ pub const compile_entry = struct {
         lex.is_strict_mode = options.mode == .module or effective_strict;
         lex.is_module = options.mode == .module;
         var state = try parser_core.ParseState.initWithRuntime(rt, &lex, filename_atom);
+        state.realm = compile_context.realm;
+        state.typescript = isTypeScriptFilename(options.filename);
         state.scratch = scratch;
         defer state.deinit(rt);
         if (options.script_or_module) |script_or_module| state.function_def.script_or_module = script_or_module;
@@ -526,8 +516,13 @@ pub const compile_entry = struct {
         state.function_def.super_call_allowed = options.eval_allows_super_call;
         state.ctx.allow_super = options.eval_allows_super_property;
         state.function_def.super_allowed = options.eval_allows_super_property;
-        state.eval_annex_b_blocked_function_names = options.eval_annex_b_blocked_function_names;
         for (options.eval_closure_seed) |seed| {
+            if (seed.var_name == atom.ids.with_object) state.function_def.eval_inside_with = true;
+            // A class's `<class_fields_init>` binding is a fresh symbol; a
+            // `super()` in this eval initializes the nearest one's fields.
+            if (state.ctx.super_fields_init == atom.ids.class_fields_init and isClassFieldsInitBinding(rt.atoms, seed.var_name)) {
+                state.ctx.super_fields_init = seed.var_name;
+            }
             _ = try state.function_def.addClosureVar(.{
                 .closure_type = seed.closure_type,
                 .is_lexical = seed.is_lexical,
@@ -617,6 +612,18 @@ pub const compile_entry = struct {
         return &root_slice[0];
     }
 
+    fn isTypeScriptFilename(filename: []const u8) bool {
+        return std.mem.endsWith(u8, filename, ".ts") or
+            std.mem.endsWith(u8, filename, ".mts") or
+            std.mem.endsWith(u8, filename, ".cts");
+    }
+
+    fn isClassFieldsInitBinding(atoms: *atom.AtomTable, name: atom.Atom) bool {
+        if (atoms.kind(name) != .symbol) return false;
+        const bytes = atoms.name(name) orelse return false;
+        return std.mem.eql(u8, bytes, atoms.name(atom.ids.class_fields_init).?);
+    }
+
     fn setPendingSyntaxError(
         result: *ResultImpl,
         rt: *JSRuntime,
@@ -662,11 +669,17 @@ pub const compile_entry = struct {
         err: anyerror,
     ) !void {
         var message_buffer: [96]u8 = undefined;
-        const message = std.fmt.bufPrint(
-            &message_buffer,
-            "internal compiler error: {s}",
-            .{@errorName(err)},
-        ) catch "internal compiler error";
+        // A u16 operand space (variables, arguments, constants, scopes,
+        // closure captures) or code size ran out: a limit the program hit,
+        // not a compiler fault.
+        const message = if (err == error.BytecodeOverflow)
+            "implementation limit exceeded: function too large"
+        else
+            std.fmt.bufPrint(
+                &message_buffer,
+                "internal compiler error: {s}",
+                .{@errorName(err)},
+            ) catch "internal compiler error";
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
             rt.nativeAllocator(),
             rt.atoms,
@@ -677,12 +690,18 @@ pub const compile_entry = struct {
         result.parse_path = .syntax_error_guard;
     }
 
+    /// Locate a compile failure that left no pending diagnostic by re-lexing
+    /// the source: a lexer failure with the same error pins its position,
+    /// otherwise the error is reported at the last token lexed. The re-lex
+    /// is context-free (no template substitutions), so a different lexer
+    /// error is an artifact of the scan, never the cause.
     fn setFallbackSyntaxError(
         result: *ResultImpl,
         rt: *JSRuntime,
         scratch: std.mem.Allocator,
         filename_atom: atom.Atom,
         source: []const u8,
+        cause: anyerror,
         message: []const u8,
     ) !void {
         var lex = lexer_mod.Lexer.init(scratch, rt.atoms, source);
@@ -693,12 +712,13 @@ pub const compile_entry = struct {
             nextFallbackSyntaxTokenInto(&lex, &tok, previous_token_kind) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {
+                    if (err != cause) break;
                     result.syntax_error = try diagnostics_mod.SyntaxError.create(
                         rt.nativeAllocator(),
                         rt.atoms,
                         filename_atom,
                         .{ .line = lex.mark_line, .column = lex.mark_col, .offset = lex.mark_pos },
-                        parser_impl.State.decoratorDiagnosticMessage(source, err, lex.mark_pos) orelse @errorName(err),
+                        parser_impl.State.decoratorDiagnosticMessage(source, err, lex.mark_pos) orelse parser_impl.State.failureMessage(err),
                     );
                     result.parse_path = .syntax_error_guard;
                     return;
@@ -831,7 +851,6 @@ test "pending diagnostic preserves exact fields truncation replacement and OOM b
     var state: parser_core.State = undefined;
     state.pending_diagnostic = null;
     state.recordFailureHere(error.OutOfMemory);
-    state.recordFailureHere(error.BytecodeOverflow);
     try std.testing.expect(state.pending_diagnostic == null);
 
     const position = diagnostics.Position{ .offset = 137, .line = 11, .column = 23 };

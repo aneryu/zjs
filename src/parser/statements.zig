@@ -6,6 +6,7 @@ const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
 const core = @import("../core/root.zig");
 const unicode = @import("../libs/unicode.zig");
+const lexer_mod = @import("../lexer.zig");
 const array_list_erased = @import("../core/array_list_erased.zig");
 const compiler = @import("../compiler/root.zig");
 const opcode = bytecode.opcode;
@@ -84,12 +85,7 @@ fn caseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
         => {},
         else => return true,
     }
-    var label_index: u32 = 0;
-    while (label_index < v2b.label_len) : (label_index += 1) {
-        const slot = v2b.label_slots[label_index];
-        if (slot.flags.bound and slot.bound_offset == v2b.code_len and slot.ref_count > 0) return true;
-    }
-    return false;
+    return v2b.hasReferencedBindAt(v2b.code_len);
 }
 
 fn usingDeclarationStart(s: *State) bool {
@@ -184,16 +180,40 @@ fn emitUsingAddResource(s: *State, kind: DisposalHint, stack_loc: u16, resource_
     try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.add(@intFromEnum(kind)));
 }
 
-fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
+/// `await using` scope exit: the dispose op left the first value to await
+/// (or the stack object when nothing is owed). Await each value in this
+/// function -- one Await per resource, as DisposeResources orders -- and
+/// feed a rejection back through `dispose_throw`, which records it and
+/// steps on. The final step throws the aggregated error or yields the stack
+/// object, which is left on the stack for the caller to drop.
+fn emitUsingAwaitIfNeeded(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
     if (!may_be_async) return;
-    // zjs-only explicit-resource-management lowering: the optional
-    // await continuation is born and bound as a label.
-    try Emitter.op(s, opcode.op.dup);
-    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.is_undefined);
-    const skip_await = try Emitter.newLabel(s);
-    try Emitter.jump(s, opcode.op.if_true, skip_await);
+    const value_loc = try functions.appendAnonymousTempLocal(s);
+    const got = try Emitter.newLabel(s);
+    const rejected = try Emitter.newLabel(s);
+    const done = try Emitter.newLabel(s);
+    try Emitter.bind(s, got);
+    try Emitter.opNoSource(s, opcode.op.dup);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, stack_loc);
+    try Emitter.opNoSource(s, opcode.op.strict_eq);
+    try Emitter.jumpNoSource(s, opcode.op.if_true, done);
+    // Arm the catch with nothing above the caller's stack, so the handler is
+    // entered with exactly the rejection on top.
+    try Emitter.opU16NoSource(s, opcode.op.put_loc, value_loc);
+    try Emitter.jumpNoSource(s, opcode.op.@"catch", rejected);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, value_loc);
     try emitUsingAwait(s);
-    try Emitter.bind(s, skip_await);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.drop); // leave the catch region
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, stack_loc);
+    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose);
+    try Emitter.jumpNoSource(s, opcode.op.goto, got);
+    try Emitter.bindParser(s, rejected);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, stack_loc);
+    try Emitter.opNoSource(s, opcode.op.swap);
+    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose_throw);
+    try Emitter.jumpNoSource(s, opcode.op.goto, got);
+    try Emitter.bind(s, done);
 }
 
 pub fn emitUsingDisposeStack(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
@@ -201,7 +221,7 @@ pub fn emitUsingDisposeStack(s: *State, stack_loc: u16, may_be_async: bool) Erro
     // normal-completion disposal prefix exactly.
     try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
     try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose);
-    try emitUsingAwaitIfNeeded(s, may_be_async);
+    try emitUsingAwaitIfNeeded(s, stack_loc, may_be_async);
     try Emitter.op(s, opcode.op.drop);
 }
 
@@ -211,7 +231,7 @@ fn emitUsingDisposeStackForThrow(s: *State, stack_loc: u16, may_be_async: bool) 
     try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
     try Emitter.op(s, opcode.op.swap);
     try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose_throw);
-    try emitUsingAwaitIfNeeded(s, may_be_async);
+    try emitUsingAwaitIfNeeded(s, stack_loc, may_be_async);
     try Emitter.op(s, opcode.op.drop);
 }
 
@@ -312,7 +332,9 @@ pub fn parseProgramStatements(s: *State, decl_mask: DeclMask) Error!void {
     try using_block.finalize(s);
 }
 
-fn parseBlockContentsAfterOpen(s: *State) Error!void {
+/// `closing_lex_strict`: lexer strictness to restore before consuming the
+/// closing `}` (a function body hands back to its enclosing code).
+fn parseBlockContentsAfterOpen(s: *State, closing_lex_strict: ?bool) Error!void {
     if (s.ctx.is_outer_constructor_block and !s.class.has_extends) {
         s.ctx.is_outer_constructor_block = false;
         if (s.current_parameter_properties) |props| {
@@ -332,6 +354,9 @@ fn parseBlockContentsAfterOpen(s: *State) Error!void {
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
+    if (closing_lex_strict) |strict| {
+        if (s.peekKind() == .rbrace) s.lex.is_strict_mode = strict;
+    }
     try s.expectToken(.rbrace);
     try using_block.finalize(s);
 }
@@ -348,7 +373,7 @@ pub fn parseBlock(s: *State) Error!void {
 
     try s.pushScope();
     errdefer s.popScopeIdentity();
-    try parseBlockContentsAfterOpen(s);
+    try parseBlockContentsAfterOpen(s, null);
     try s.popScope();
 }
 
@@ -360,7 +385,7 @@ pub fn parseFunctionBodyBlock(s: *State) Error!void {
     try s.beginFunctionBody();
     errdefer s.popScopeIdentity();
     try parseDirectives(s);
-    try parseBlockContentsAfterOpen(s);
+    try parseBlockContentsAfterOpen(s, s.enclosing_lex_strict);
 }
 
 /// Mirror the directive-prologue portion of `js_parse_directives`
@@ -378,6 +403,7 @@ pub fn parseDirectives(s: *State) Error!void {
             std.mem.eql(u8, str_payload.bytes, "use strict"))
         {
             if (directive_contains_legacy_escape or str_payload.contains_legacy_escape) return s.failUnexpectedToken();
+            s.use_strict_position = s.currentDiagnosticPosition();
             s.curFunc().has_use_strict = true;
             s.is_strict = true;
             s.curFunc().is_strict_mode = true;
@@ -403,57 +429,73 @@ pub fn parseDirectives(s: *State) Error!void {
     }
 }
 
+/// Whether the string literal just read is a whole ExpressionStatement (a
+/// directive): the next significant source is `;`, `}`, end of input, or,
+/// past a line terminator, a token that cannot continue the expression
+/// (ASI, §12.10). Scanned on raw source because a "use strict" directive
+/// changes how the next token lexes.
 fn stringLiteralStatementHasDirectiveTerminator(s: *const State) bool {
-    var index = s.currentTokenEndOffset();
     const source = s.lex.source;
+    var index = s.currentTokenEndOffset();
+    var crossed_line = false;
     while (index < source.len) {
         switch (source[index]) {
-            ';', '}' => return true,
-            '\n', '\r' => return !lineTerminatorContinuesStringLiteralExpression(source, index),
-            ' ', '\t', 0x0B, 0x0C => {
+            ' ', '\t', 0x0B, 0x0C => index += 1,
+            '\n', '\r' => {
+                crossed_line = true;
                 index += 1;
-                continue;
             },
             '/' => {
-                if (index + 1 >= source.len) return false;
-                if (source[index + 1] == '/') return true;
-                if (source[index + 1] == '*') {
+                if (index + 1 < source.len and source[index + 1] == '/') {
+                    // The comment ends at any line terminator, U+2028/U+2029 included.
+                    while (index < source.len and source[index] != '\n' and source[index] != '\r') : (index += 1) {
+                        if (lexer_mod.nonAsciiWhiteSpace(source[index..])) |space| if (space.line_terminator) break;
+                    }
+                } else if (index + 1 < source.len and source[index + 1] == '*') {
                     index += 2;
-                    var saw_lf = false;
                     while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) : (index += 1) {
-                        if (source[index] == '\n' or source[index] == '\r') saw_lf = true;
+                        if (source[index] == '\n' or source[index] == '\r') crossed_line = true;
                     }
                     if (index + 1 >= source.len) return false;
                     index += 2;
-                    if (saw_lf) return true;
-                    continue;
+                } else {
+                    return false; // division continues the expression
                 }
-                return false;
             },
-            else => return false,
+            ';', '}' => return true,
+            '<', '-' => {
+                // Script code's HTML-like comments (B.1.1): `<!--` anywhere,
+                // `-->` first on a line, each to the end of the line.
+                const html_comment = s.lex.allow_html_comments and !s.lex.is_module and
+                    (std.mem.startsWith(u8, source[index..], "<!--") or
+                        (crossed_line and std.mem.startsWith(u8, source[index..], "-->")));
+                if (!html_comment) return crossed_line and !tokenContinuesExpression(source, index);
+                while (index < source.len and source[index] != '\n' and source[index] != '\r') : (index += 1) {}
+            },
+            else => {
+                const space = lexer_mod.nonAsciiWhiteSpace(source[index..]) orelse
+                    return crossed_line and !tokenContinuesExpression(source, index);
+                if (space.line_terminator) crossed_line = true;
+                index += space.len;
+            },
         }
     }
     return true;
 }
 
-fn lineTerminatorContinuesStringLiteralExpression(source: []const u8, start: usize) bool {
-    var index = start;
-    while (index < source.len) {
-        switch (source[index]) {
-            ' ', '\t', 0x0B, 0x0C, '\n', '\r' => index += 1,
-            '/' => {
-                if (index + 1 >= source.len) return false;
-                if (source[index + 1] == '/') return false;
-                if (source[index + 1] != '*') return false;
-                index += 2;
-                while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) : (index += 1) {}
-                if (index + 1 >= source.len) return false;
-                index += 2;
-            },
-            else => break,
-        }
-    }
-    return startsKeywordAt(source, index, "in") or startsKeywordAt(source, index, "instanceof");
+/// Whether the token starting at `index` can follow an expression on a new
+/// line and continue it (no ASI): member/call/template continuations and
+/// binary, conditional, comma and assignment operators. `++`/`--` cannot
+/// (restricted production), and `!` only as `!=`.
+fn tokenContinuesExpression(source: []const u8, index: usize) bool {
+    const next: u8 = if (index + 1 < source.len) source[index + 1] else 0;
+    return switch (source[index]) {
+        '.', '[', '(', '`', '?', ',', '=', '*', '%', '<', '>', '&', '|', '^' => true,
+        '+' => next != '+',
+        '-' => next != '-',
+        '!' => next == '=',
+        else => startsKeywordAt(source, index, "in") or startsKeywordAt(source, index, "instanceof"),
+    };
 }
 
 fn startsKeywordAt(source: []const u8, index: usize, keyword: []const u8) bool {
@@ -502,10 +544,30 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         // LabelFrame deliberately does not own atoms, so this local owner
         // spans `advance()` and the complete labelled statement.
         if (s.isReservedLabelIdentifier(label_atom)) return s.failUnexpectedToken();
-        if (s.hasActiveLabel(label_atom)) return s.failUnexpectedToken();
+        if (s.hasActiveLabel(label_atom)) return s.failNamed("duplicate label '{s}'", "duplicate label", label_atom);
 
         try s.advance();
         try s.expectToken(.colon);
+
+        if (s.labelStartAtom() != null) {
+            // An outer label of a chain: the innermost label registers the
+            // statement and aliases this one to it.
+            try s.pending_label_chain.append(s.scratch, label_atom);
+            defer _ = s.pending_label_chain.pop();
+            try parseStatementOrDecl(s, decl_mask);
+            return;
+        }
+        const alias_base = s.label_aliases.items.len;
+        for (s.pending_label_chain.items) |outer| {
+            try s.label_aliases.append(s.scratch, .{ .alias = outer, .target = label_atom });
+        }
+        const chain = s.pending_label_chain;
+        s.pending_label_chain = .empty;
+        defer {
+            s.label_aliases.shrinkRetainingCapacity(alias_base);
+            s.pending_label_chain.deinit(s.scratch);
+            s.pending_label_chain = chain;
+        }
 
         const labelled_kind = s.peekKind();
         if (labelled_kind == .kw_while or labelled_kind == .kw_do or labelled_kind == .kw_for or labelled_kind == .kw_switch) {
@@ -517,7 +579,7 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         }
 
         const label_frame = try s.pushLabelFrame(label_atom, false);
-        errdefer s.popLabelFrame(label_frame);
+        errdefer s.unwindLabelFrames(label_frame);
         var label_block: BlockEnv = undefined;
         emitter.pushControlBlock(s, &label_block, .{ .label = label_atom, .has_break_target = true, .is_regular_stmt = true, .scope_level = s.scope_level });
         defer emitter.popControlBlock(s, &label_block);
@@ -637,8 +699,7 @@ fn parseClassDeclarationStatement(s: *State, decl_mask: DeclMask) Error!void {
     if (!decl_mask.func) {
         return s.failUnexpectedToken();
     }
-    const name_atom = (try classes.parseClass(s, true)) orelse return s.failUnexpectedToken();
-    _ = name_atom;
+    _ = (try classes.parseClass(s, true)) orelse return s.failUnexpectedToken();
 }
 
 fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
@@ -715,10 +776,6 @@ fn parseExportStatement(s: *State, decl_mask: DeclMask) Error!void {
 
 fn parseIfStatement(s: *State) Error!void {
     try s.advance();
-    // QuickJS creates one wrapper scope for the whole IfStatement,
-    // before the condition. Both Annex-B clauses share it.
-    try s.pushScope();
-    errdefer s.popScopeIdentity();
     try s.setEvalReturnUndefined();
     try s.expectToken(.lparen);
     try expressions.parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = true });
@@ -735,7 +792,7 @@ fn parseIfStatement(s: *State) Error!void {
     const saved_annex_b_if_function_decl_clause = s.annex_b_if_function_decl_clause;
     s.annex_b_if_function_decl_clause = then_is_annex_b_function;
     defer s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
-    try parseStatementOrDecl(s, then_decl_mask);
+    try parseIfClause(s, then_decl_mask);
     s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
     if (s.peekKind() == .kw_else) {
         try s.advance();
@@ -749,7 +806,7 @@ fn parseIfStatement(s: *State) Error!void {
             s.peekNextKind() != .star;
         const else_decl_mask = if (else_is_annex_b_function) DeclMask{ .func = true } else DeclMask{};
         s.annex_b_if_function_decl_clause = else_is_annex_b_function;
-        try parseStatementOrDecl(s, else_decl_mask);
+        try parseIfClause(s, else_decl_mask);
         s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
         // Patch the goto-over-else to land after the else block.
         try Emitter.bind(s, else_goto_label);
@@ -757,17 +814,22 @@ fn parseIfStatement(s: *State) Error!void {
         // No else: patch if_false to land just past the then block.
         try Emitter.bind(s, if_false_label);
     }
+}
+
+/// Annex B.3.3 treats `if (x) function f() {}` as if the declaration were
+/// wrapped in a block, so only that clause form gets its own scope; other
+/// clauses cannot declare anything, and a per-IfStatement scope would put
+/// large functions over the u16 scope-index limit.
+fn parseIfClause(s: *State, decl_mask: DeclMask) Error!void {
+    if (!decl_mask.func) return parseStatementOrDecl(s, decl_mask);
+    try s.pushScope();
+    errdefer s.popScopeIdentity();
+    try parseStatementOrDecl(s, decl_mask);
     try s.popScope();
 }
 
-/// Leftover do/while parse. candidate103 still compiles
-/// `parseWhileStatement` (1817) / `parseDoStatement` (1515, extra
-/// 1515, 10.6% match). The leftover is pending-label + eval-undef +
-/// bind loop top + break/label frames + control block + body +
-/// continue patch + pop/patch. Comptime identity is test-first vs
-/// body-first (expect '(', if_false/goto vs while/if_true). Take
-/// that at runtime. Private names stay `inline` and pass only the
-/// flag — no leftover setup at the wrapper (knives 94/98).
+/// Shared `while` / `do ... while` parser; `is_do` selects test-first vs
+/// body-first layout. The public entry points are `inline` wrappers.
 noinline fn parseDoOrWhileStatement(s: *State, is_do: bool) Error!void {
     try s.advance();
     const loop_label = s.pending_label_atom;
@@ -831,6 +893,9 @@ fn parseForStatement(s: *State) Error!void {
     try s.setEvalReturnUndefined();
     if (s.peekKind() == .kw_await) {
         if (!s.ctx.in_async) return Error.AwaitOutsideAsyncFunction;
+        // A module whose `for await` is its only top-level await still has
+        // top-level await (§16.2.1.5 [[HasTLA]]).
+        if (s.lex.is_module and s.cur_func_stack.len == 0) s.ensureModule().has_top_level_await = true;
         try s.advance();
         try s.expectToken(.lparen);
         s.pending_label_atom = loop_label;
@@ -938,8 +1003,8 @@ fn parseForStatement(s: *State) Error!void {
         // update detaches nothing.
         if (s.activeBuilder().code_len != update_mark.code_len) {
             update_seg = try Emitter.detachTail(s, update_mark);
-            // Legacy truncateCode + appendMovedCodeWithAtoms
-            // drops the detached update's out-of-band markers.
+            // The update's source markers are re-emitted where it is
+            // spliced back, so the detached copies are dropped.
             Emitter.discardDetachedSources(s, &update_seg);
         }
         try s.expectToken(.rparen);
@@ -951,10 +1016,12 @@ fn parseForStatement(s: *State) Error!void {
         defer emitter.popControlBlock(s, &loop_block);
         try parseStatementOrDecl(s, DeclMask{});
 
-        // Update: run after normal body completion and continue paths.
-        try s.closeScopes(s.scope_level, block_scope_level);
+        // Update: run after normal body completion and continue paths. The
+        // continue targets land before the scope close so `continue` also
+        // makes the per-iteration copy of the `let` bindings.
         try emitter.patchContinueFrame(s);
         if (label_frame) |idx| try s.patchLabelContinues(idx);
+        try s.closeScopes(s.scope_level, block_scope_level);
         // qjs TOK_FOR: append the detached update after the
         // body and patched continue exits.
         if (update_seg.code.len != 0) try Emitter.spliceSegment(s, &update_seg);
@@ -993,12 +1060,22 @@ fn parseBreakOrContinueStatement(s: *State) Error!void {
         return;
     }
     if (is_break) {
-        if (s.break_frame_lens.items.len == 0) return s.failUnexpectedToken();
+        if (s.break_frame_lens.items.len == 0) return s.failWithMessage(null, "'break' outside of a loop or switch");
         try emitter.emitUnlabelledBreak(s);
     } else {
-        if (s.continue_frame_lens.items.len == 0) return s.failUnexpectedToken();
+        if (s.continue_frame_lens.items.len == 0) return s.failWithMessage(null, "'continue' outside of a loop");
         try emitter.emitUnlabelledContinue(s);
     }
+}
+
+/// One statement of a CaseClause / DefaultClause StatementList.
+fn parseSwitchClauseStatement(s: *State) Error!void {
+    // Early error: a UsingDeclaration must not be contained directly in the
+    // StatementList of a CaseClause or DefaultClause (it may sit in a block).
+    if (directUsingDeclarationKind(s) != null) {
+        return s.failWithMessage(null, "using declaration is not allowed directly in a switch clause");
+    }
+    try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
 }
 
 fn parseSwitchStatement(s: *State) Error!void {
@@ -1056,7 +1133,11 @@ fn parseSwitchStatement(s: *State) Error!void {
             try s.advance();
             // dup ; case_expr ; strict_eq ; if_false → next_case
             try Emitter.op(s, opcode.op.dup);
-            try expressions.parseExpr(s);
+            // `case (a): b => {}`: the `:` ends the case test, so a
+            // parenthesized test is never a typed-arrow head.
+            var case_flags = ParseFlags.default;
+            case_flags.arrow_return_type_forbidden = true;
+            try expressions.parseExpr2(s, case_flags);
             try s.expectToken(.colon);
             try Emitter.op(s, opcode.op.strict_eq);
             const next_case_label = try Emitter.newLabel(s);
@@ -1088,7 +1169,7 @@ fn parseSwitchStatement(s: *State) Error!void {
                 s.peekKind() != .rbrace and
                 s.peekKind() != .eof)
             {
-                try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
+                try parseSwitchClauseStatement(s);
             }
             // qjs TOK_SWITCH always emits
             // the fallthrough goto; js_is_live_code strips dead
@@ -1133,7 +1214,7 @@ fn parseSwitchStatement(s: *State) Error!void {
                 s.peekKind() != .rbrace and
                 s.peekKind() != .eof)
             {
-                try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
+                try parseSwitchClauseStatement(s);
             }
             if (s.activeBuilder().code_len == body_start and s.peekKind() == .kw_case) {
                 default_waiting_for_body = true;
@@ -1154,22 +1235,11 @@ fn parseSwitchStatement(s: *State) Error!void {
     }
     try s.expectToken(.rbrace);
 
-    // qjs binds the default label backwards with an in-stream patch
-    // (the "ugly patch", quickjs.c ~29365) and legacy mirrors it with
-    // `patchJumpTarget`. V2 forbids rewriting a jump's PC, but the
-    // unmatched-dispatch boundary and the default body are ONE program
-    // point, so the references move onto the default identity instead
-    // (`retargetLabelRefs`) — the same arm-for-arm shape as legacy.
-    //
-    // The earlier epilogue trampoline (`goto SKIP; NO_MATCH: goto
-    // DEFAULT; SKIP:`) is gone. It was an instruction pair legacy
-    // never materializes, and every syntactic probe that legacy runs
-    // over this stream had to be taught to see through it: its skip
-    // goto sat exactly where the last clause body's converging labels
-    // bind, so `findJumpTarget` threaded one hop further than legacy
-    // and `codeHasLabel` then compared two different boundaries.
-    // `switch (0) { default: if (false) ; else ; }` kept a `goto` to
-    // its own fallthrough that legacy folds away.
+    // qjs binds the default label backwards by patching the emitted jump
+    // (the "ugly patch", quickjs.c ~29365). The builder never rewrites a
+    // jump, but the unmatched-dispatch boundary and the default body are
+    // one program point, so the references move onto the default label
+    // (`retargetLabelRefs`) instead of going through a trampoline.
     if (no_match_jumps_count != 0) {
         if (default_label) |bound_default_label| {
             for (no_match_labels[0..no_match_jumps_count]) |label| {
@@ -1177,7 +1247,7 @@ fn parseSwitchStatement(s: *State) Error!void {
             }
         } else {
             // No default clause: unmatched dispatch falls through to
-            // the common discriminant drop (`patchForwardJump`).
+            // the common discriminant drop.
             for (no_match_labels[0..no_match_jumps_count]) |label| {
                 try Emitter.bind(s, label);
             }
@@ -1233,6 +1303,9 @@ fn parseTryStatement(s: *State) Error!void {
         try s.advance();
         // qjs TOK_TRY catch entry: bind label_catch at the handler entry.
         try Emitter.bindParser(s, label_catch);
+        // UpdateEmpty(C, undefined): a throw completion carries no value, so
+        // values the try block produced before throwing are not the result.
+        try s.setEvalReturnUndefined();
 
         var catch_binding_scope = try s.openScope();
         errdefer catch_binding_scope.pop(s);
@@ -1246,9 +1319,17 @@ fn parseTryStatement(s: *State) Error!void {
                     .define_type = .let_,
                     .is_parameter = false,
                     .export_flag = false,
+                    .is_catch_parameter = true,
                 } }, .{ .has_value = true, .allow_outer_initializer = true }, ParseFlags.default);
+                const fd = s.curFunc();
+                var var_index = fd.scopes[@intCast(s.scope_level)].first;
+                while (var_index >= 0) : (var_index = fd.vars[@intCast(var_index)].scope_next) {
+                    const vd = &fd.vars[@intCast(var_index)];
+                    if (vd.scope_level != s.scope_level) break;
+                    vd.is_catch_pattern = true;
+                }
             } else {
-                if (!identifiers.isIdentifierLikeToken(s)) return s.failUnexpectedToken();
+                if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                 const catch_atom = identifiers.identifierLikeAtom(s);
                 if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (identifiers.atomNameEquals(s, catch_atom, "eval") or identifiers.atomNameEquals(s, catch_atom, "arguments")))
@@ -1376,6 +1457,7 @@ fn parseUsingDeclaration(s: *State, kind: DisposalHint) Error!void {
         if (module_top_level and identifiers.hasKnownBinding(s, atom_id)) return s.failUnexpectedToken();
         _ = try declarations.defineVar(s, atom_id, .const_);
         try s.advance();
+        try typescript.tsParseTypeAnnotationOpt(s); // TypeScript `using x: T = v`
 
         if (s.peekKind() != .assign) return s.failExpectedToken(.assign);
         try s.advance();
@@ -1443,8 +1525,7 @@ pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
         identifiers.isSloppyFutureReservedToken(val);
     if (declaration_start) {
         // Check for possible ASI if not scanning for a Declaration
-        if (peek_token.line_num == current_line or decl_mask.other) return false;
-        return true;
+        return !(peek_token.line_num == current_line or decl_mask.other);
     }
     return true;
 }
@@ -1534,7 +1615,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             // QJS module-name collision at the token wrapper boundary;
             // all ordinary declaration collisions are owned by defineVar.
             if (is_lexical and s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, atom_id)) {
-                return s.failUnexpectedToken();
+                return s.failNamed("redeclaration of '{s}'", "redeclaration", atom_id);
             }
 
             var hoisted_arguments_var_idx: ?u16 = null;
@@ -1543,6 +1624,9 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 s.curFunc().func_type != .class_static_init and
                 s.curFunc().has_parameter_expressions and
                 s.curFunc().arguments_var_idx != null and
+                // A second `var arguments`: the first already replaced the
+                // pseudo binding with this declared var.
+                !s.curFunc().hasExplicitArgumentsVar() and
                 s.curFunc().arguments_arg_idx == null)
             {
                 hoisted_arguments_var_idx = s.curFunc().arguments_var_idx.?;
@@ -1564,7 +1648,9 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                     .global => {},
                     .argument => unreachable,
                 }
-            } else if (identifiers.atomNameEquals(s, atom_id, "arguments")) {
+            } else if (identifiers.atomNameEquals(s, atom_id, "arguments") and s.curFunc().has_arguments_binding) {
+                // An arrow's `var arguments` is an ordinary local: arrows have
+                // no arguments object to alias it to.
                 switch (defined) {
                     .local => |idx| s.curFunc().arguments_var_idx = hoisted_arguments_var_idx orelse idx,
                     .argument => {},
@@ -1584,7 +1670,6 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 try s.advance();
                 const capture_reference = needVarReference(s, var_tok);
                 var declaration_lvalue: ?LValue = null;
-                defer if (declaration_lvalue) |*lvalue| lvalue.deinit(s);
                 if (capture_reference) {
                     // qjs js_parse_var emits the ordinary getter and lets
                     // get_lvalue decide whether a with-scope reference is
@@ -1596,7 +1681,9 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                     declaration_lvalue = try expressions.getLValue(s, false);
                 }
                 try expressions.parseAssignExpr2(s, parse_flags);
-                try functions.setObjectName(s, atom_id);
+                // An exported namespace member is the property assignment
+                // `N.x = init` (tsc), which infers no function name.
+                if (!typescript.isNamespaceExport(s)) try functions.setObjectName(s, atom_id);
                 // QJS pins this source event to the `=` token and then emits
                 // put_lvalue/the direct put without another source marker.
                 const emission_snapshot = s.activeBuilder().snapshot();
@@ -1625,9 +1712,10 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                     try s.emitScopePutVarInit(atom_id);
                 }
             }
-            try typescript.emitNamespaceExportIfExported(s, atom_id);
+            try typescript.emitNamespaceVarExportIfExported(s, atom_id);
         } else if (s.peekKind() == .lbracket or s.peekKind() == .lbrace) {
             try Emitter.op(s, opcode.op.undefined);
+            const vars_before = s.curFunc().vars.len;
             const has_initializer = try functions.parseDestructuringElement(s, .{ .binding = .{
                 .define_type = if (is_lexical)
                     (if (is_const) .const_ else .let_)
@@ -1637,6 +1725,13 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 .export_flag = export_decl,
             } }, .{ .has_value = true, .allow_outer_initializer = true }, parse_flags);
             if (!has_initializer) return s.failExpectedToken(.assign);
+            // `export const { a, b } = ...` in a TS namespace attaches every
+            // name the pattern bound, as the identifier form above does.
+            if (s.ctx.namespace_export) {
+                for (s.curFunc().vars[vars_before..]) |var_def| {
+                    try typescript.emitNamespaceVarExportIfExported(s, var_def.var_name);
+                }
+            }
         } else {
             return s.failExpectedDescription("binding name");
         }
@@ -1648,7 +1743,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
 }
 
 fn parseWith(s: *State) Error!void {
-    if (s.is_strict or s.curFunc().is_strict_mode) return s.failUnexpectedToken();
+    if (s.is_strict or s.curFunc().is_strict_mode) return s.failWithMessage(null, "'with' is not allowed in strict mode");
     try s.advance();
     try s.expectToken(.lparen);
     try expressions.parseExpr(s);
@@ -1656,6 +1751,7 @@ fn parseWith(s: *State) Error!void {
 
     try s.pushScope();
     errdefer s.popScopeIdentity();
+    s.curFunc().scopes[@intCast(s.scope_level)].inside_with = true;
     const with_atom = atom_module.ids.with_object;
     const with_idx: u16 = switch (try declarations.defineVar(s, with_atom, .with_)) {
         .local => |idx| idx,
@@ -1699,8 +1795,6 @@ const ForInOfTarget = struct {
     var_initializer_atom: ?Atom = null,
     /// `for (using x of ...)`: temp local holding the iteration value.
     using_value_loc: ?u16 = null,
-    /// `for (f() of ...)`: the call is evaluated and then rejected.
-    invalid_assignment_target: bool = false,
 };
 
 /// `for (using x of ...)` / `for (await using x of ...)`.
@@ -1791,7 +1885,7 @@ fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.Kind, target: *ForInOfT
 }
 
 /// `for (lhs in/of ...)` with an assignment target or a pattern.
-fn parseForInOfExpressionTarget(s: *State, var_tok: tok.Kind, is_for_await: bool, expr_label: compiler.LabelId, assign_label: compiler.LabelId, target: *ForInOfTarget) Error!void {
+fn parseForInOfExpressionTarget(s: *State, var_tok: tok.Kind, is_for_await: bool, target: *ForInOfTarget) Error!void {
     if (!is_for_await and var_tok == .ident and
         !s.token.payload.ident.has_escape and
         identifiers.atomNameEquals(s, s.token.payload.ident.atom, "async") and
@@ -1811,27 +1905,76 @@ fn parseForInOfExpressionTarget(s: *State, var_tok: tok.Kind, is_for_await: bool
 
     if (is_pattern) {
         target.is_pattern = true;
-        _ = try functions.parseDestructuringElement(s, .assignment, .{ .has_value = true, .allow_outer_initializer = true }, ParseFlags.default);
+        // The target is a LeftHandSideExpression: `[a] = b` is not one.
+        _ = try functions.parseDestructuringElement(s, .assignment, .{ .has_value = true, .allow_outer_initializer = false }, ParseFlags.default);
+        if (s.peekKind() == .assign) return s.failWithMessage(null, "invalid left-hand side in for-in/of");
     } else {
         try expressions.parseLhsExpr(s, .{ .in_accepted = false });
         var lvalue = try expressions.getLValue(s, false);
-        defer lvalue.deinit(s);
         if (lvalue.invalid_call) {
-            // The initial jump normally skips the target until the
-            // iterator has produced a value. A runtime-invalid call
-            // target is different: evaluate the call immediately,
-            // then throw before touching the RHS iterable.
-            target.invalid_assignment_target = true;
-            // V2 never rewrites a jump's PC. The entry goto and the
-            // target block are now ONE program point, so the pending
-            // reference moves onto the identity that already denotes
-            // it (`retargetLabelRefs`).
-            try Emitter.retargetLabel(s, expr_label, assign_label);
+            // Annex B runtime error: like any target, the call is
+            // evaluated per iteration (ForIn/OfBodyEvaluation), then the
+            // assignment throws; with no iteration it never runs.
             try expressions.emitInvalidAssignmentTarget(s);
         } else {
             try expressions.putLValue(s, &lvalue, .no_keep_bottom);
         }
     }
+}
+
+const ForAwaitThrowClose = struct {
+    handler: compiler.LabelId,
+    value_loc: u16,
+    iterator_loc: u16,
+};
+
+/// The `for await` throw handler, entered with [iter, next, marker, exc]:
+/// AsyncIteratorClose(iterator, throw completion) — call `return()` if any
+/// and await its result, discarding every failure of that close — then
+/// rethrow `exc`. Normal flow jumps over it.
+fn emitForAwaitThrowClose(s: *State, close: ForAwaitThrowClose) Error!void {
+    const return_atom = comptime atom_module.predefinedId("return", .string).?;
+    const after = try Emitter.newLabel(s);
+    const suppressed = try Emitter.newLabel(s);
+    const no_return = try Emitter.newLabel(s);
+    const rethrow = try Emitter.newLabel(s);
+    try Emitter.jumpNoSource(s, opcode.op.goto, after);
+
+    try Emitter.bindParser(s, close.handler);
+    try Emitter.opU16NoSource(s, opcode.op.put_loc, close.value_loc);
+    try Emitter.opNoSource(s, opcode.op.drop); // iterator record marker
+    try Emitter.opNoSource(s, opcode.op.drop); // cached next
+    try Emitter.opU16NoSource(s, opcode.op.put_loc, close.iterator_loc);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, close.iterator_loc);
+    try Emitter.opNoSource(s, opcode.op.is_undefined_or_null);
+    try Emitter.jumpNoSource(s, opcode.op.if_true, rethrow);
+
+    try Emitter.jumpNoSource(s, opcode.op.@"catch", suppressed);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, close.iterator_loc);
+    try Emitter.opAtom(s, opcode.op.get_field2, return_atom);
+    try Emitter.opNoSource(s, opcode.op.dup);
+    try Emitter.opNoSource(s, opcode.op.is_undefined_or_null);
+    try Emitter.jumpNoSource(s, opcode.op.if_true, no_return);
+    try Emitter.callOp(s, opcode.op.call_method, 0);
+    try Emitter.opNoSource(s, opcode.op.await);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.drop); // leave the suppressing region
+    try Emitter.jumpNoSource(s, opcode.op.goto, rethrow);
+
+    try Emitter.bind(s, no_return);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.drop); // leave the suppressing region
+    try Emitter.jumpNoSource(s, opcode.op.goto, rethrow);
+
+    try Emitter.bindParser(s, suppressed);
+    try Emitter.opNoSource(s, opcode.op.drop); // the close's own exception
+
+    try Emitter.bind(s, rethrow);
+    try Emitter.opU16NoSource(s, opcode.op.get_loc, close.value_loc);
+    try Emitter.opNoSource(s, opcode.op.throw);
+
+    try Emitter.bind(s, after);
 }
 
 fn parseForInOf(s: *State, is_for_await: bool) Error!void {
@@ -1851,9 +1994,30 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     assign_label = try Emitter.newLabel(s);
     try Emitter.bind(s, assign_label);
 
+    // A `for await` whose assignment or body completes abruptly with a throw
+    // must AsyncIteratorClose the iterator and await `return()` (§14.7.5.7
+    // steps 6.k / 6.m.i, §7.4.13). The VM's unwinder closes iterator records
+    // synchronously, so the assignment and body run inside a catch region
+    // whose handler (`emitForAwaitThrowClose`) does the awaited close. The
+    // catch is armed with only [iter, next, marker] on the stack, so the
+    // iteration value waits in a temp local around it.
+    const throw_close: ?ForAwaitThrowClose = if (is_for_await) close: {
+        const close: ForAwaitThrowClose = .{
+            .handler = try Emitter.newLabel(s),
+            .value_loc = try functions.appendAnonymousTempLocal(s),
+            .iterator_loc = try functions.appendAnonymousTempLocal(s),
+        };
+        try Emitter.opU16NoSource(s, opcode.op.put_loc, close.value_loc);
+        try Emitter.jumpNoSource(s, opcode.op.@"catch", close.handler);
+        try Emitter.opU16NoSource(s, opcode.op.get_loc, close.value_loc);
+        break :close close;
+    } else null;
+
+    // Sloppy `let` is a declaration only when a ForBinding can follow; `let.x`
+    // and `let(...)` are LeftHandSideExpressions (for-of still rejects them).
     const let_as_identifier = var_tok == .kw_let and
         !s.is_strict and !s.curFunc().is_strict_mode and
-        s.peekNextKind() == .kw_in;
+        !canStartForBinding(s.peekNextKind());
     const direct_using_kind = directUsingDeclarationKind(s);
     const parse_using_decl = if (direct_using_kind) |using_kind|
         using_kind == .async or !(try usingDeclarationBindingIsOf(s, using_kind))
@@ -1867,16 +2031,13 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     {
         try parseForInOfDeclarationTarget(s, var_tok, &target);
     } else {
-        try parseForInOfExpressionTarget(s, var_tok, is_for_await, expr_label, assign_label, &target);
+        try parseForInOfExpressionTarget(s, var_tok, is_for_await, &target);
     }
 
     var body_label: compiler.LabelId = undefined;
     body_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.goto, body_label);
-    // An invalid call target already consumed `expr_label` by
-    // retargeting it onto the assignment boundary (which also bound
-    // it); binding it again would be a double bind.
-    if (!target.invalid_assignment_target) try Emitter.bind(s, expr_label);
+    try Emitter.bind(s, expr_label);
 
     // Annex-B legacy initializer: only sloppy non-lexical simple
     // for-in declarations accept it.
@@ -1898,6 +2059,8 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     if (in_of_tok != .kw_in and !is_for_of) return s.failExpectedDescription("'in' or 'of'");
     if (target.is_using_decl and !is_for_of) return s.failUnexpectedToken();
     if (has_var_initializer and is_for_of) return s.failUnexpectedToken();
+    // for-of: [lookahead ∉ { let, async of }] LeftHandSideExpression.
+    if (let_as_identifier and is_for_of) return s.failUnexpectedToken();
     if (is_for_await and !is_for_of) return s.failUnexpectedToken();
     try s.advance();
 
@@ -1931,8 +2094,14 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
 
     var loop_block: BlockEnv = undefined;
-    emitter.pushControlBlock(s, &loop_block, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = block_scope_level, .drop_count = if (is_for_of) 3 else 1, .has_iterator = is_for_of });
+    emitter.pushControlBlock(s, &loop_block, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = block_scope_level, .drop_count = if (is_for_of) 3 else 1, .has_iterator = is_for_of, .is_async_iterator = is_for_await });
     defer emitter.popControlBlock(s, &loop_block);
+
+    // The throw-close catch marker sits above the loop record: break,
+    // continue and return out of the body drop it like a `try` marker.
+    const loop_catch_depth = s.active_catch_marker_depth;
+    if (throw_close != null) s.active_catch_marker_depth += 1;
+    errdefer s.active_catch_marker_depth = loop_catch_depth;
 
     var iteration_using_block: ?OpenUsingBlock = null;
     errdefer if (iteration_using_block) |*block| block.unwind(s);
@@ -1961,6 +2130,12 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
 
     if (iteration_using_block) |*block| try block.finalize(s);
 
+    if (throw_close != null) {
+        // Leave the catch region (restores the outer catch target).
+        try Emitter.opNoSource(s, opcode.op.drop);
+        s.active_catch_marker_depth = loop_catch_depth;
+    }
+
     try s.closeScopes(s.scope_level, block_scope_level);
     try emitter.patchContinueFrame(s);
     if (label_frame) |idx| try s.patchLabelContinues(idx);
@@ -1984,9 +2159,14 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     }
 
     if (is_for_await) {
+        // Breaks out of `for await` (labelled or not) carry
+        // `shared_iterator_close_marker`: they land here, before the one
+        // shared AsyncIteratorClose.
         try Emitter.opNoSource(s, opcode.op.drop);
         try emitter.popBreakFrameAndPatch(s);
-        try Emitter.opNoSource(s, opcode.op.iterator_close);
+        if (label_frame) |idx| try s.patchLabelBreaks(idx);
+        try emitter.emitAsyncIteratorClose(s);
+        try emitForAwaitThrowClose(s, throw_close.?);
     } else if (is_for_of) {
         try Emitter.op(s, opcode.op.drop);
         try Emitter.op(s, opcode.op.iterator_close);
@@ -1997,8 +2177,17 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         try emitter.popBreakFrameAndPatch(s);
     }
     if (label_frame) |idx| {
-        try s.patchLabelBreaks(idx);
+        if (!is_for_await) try s.patchLabelBreaks(idx);
         s.popLabelFrame(idx);
     }
     try for_scope.close(s);
+}
+
+/// Tokens that can begin a ForBinding after `let`: an identifier (including
+/// contextual keywords) or a destructuring pattern.
+fn canStartForBinding(kind: tok.Kind) bool {
+    return switch (kind) {
+        .ident, .lbracket, .lbrace, .kw_yield, .kw_await, .kw_let, .kw_static, .kw_of, .kw_implements, .kw_interface, .kw_package, .kw_private, .kw_protected, .kw_public => true,
+        else => false,
+    };
 }

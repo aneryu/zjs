@@ -27,10 +27,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var fail_count: usize = 0;
     var skip_count: usize = 0;
 
+    // `ZJS_LEAK_CENSUS_FILTER=a|b` runs only tests whose names contain one
+    // of the `|`-separated substrings (for bisecting cross-test state).
+    const filter: ?[]const u8 = if (std.c.getenv("ZJS_LEAK_CENSUS_FILTER")) |raw| std.mem.span(raw) else null;
     const invocation_count = std.math.mul(usize, repeat_count, test_fns.len) catch return error.Overflow;
     for (0..invocation_count) |invocation_index| {
         const pass = invocation_index / test_fns.len;
         const test_fn = test_fns[invocation_index % test_fns.len];
+        if (filter) |wanted| {
+            var matched = false;
+            var parts = std.mem.splitScalar(u8, wanted, '|');
+            while (parts.next()) |part| {
+                if (part.len != 0 and std.mem.indexOf(u8, test_fn.name, part) != null) matched = true;
+            }
+            if (!matched and !std.mem.endsWith(u8, test_fn.name, "zjs.pull_test_modules")) continue;
+        }
 
         zjs_test_runner_current_name_ptr = test_fn.name.ptr;
         zjs_test_runner_current_name_len = test_fn.name.len;

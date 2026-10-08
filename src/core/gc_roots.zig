@@ -12,8 +12,6 @@ const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSValue = @import("value.zig").JSValue;
 const value_heap_layout = @import("value_heap_layout.zig");
-pub const value_root_frames_enabled = true;
-
 pub const RootTraceError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
 pub const RootVisitor = struct {
@@ -28,16 +26,10 @@ pub const RootVisitor = struct {
     visit_object: *const fn (context: *anyopaque, slot: *?*Object) RootTraceError!void,
     /// Optional header observation for diagnostic visitors. Collectors use
     /// the required `readonly.pinned` callback for every stable reference.
-    visit_header: if (value_root_frames_enabled)
-        ?*const fn (context: *anyopaque, header: *const gc.Header) RootTraceError!void
-    else
-        void = if (value_root_frames_enabled) null else {},
+    visit_header: ?*const fn (context: *anyopaque, header: *const gc.Header) RootTraceError!void = null,
     /// Atom ids are bare `u32`s, so roots holding them have no value or header
     /// to report; this callback is optional for visitors without atom tracing.
-    visit_atom: if (value_root_frames_enabled)
-        ?*const fn (context: *anyopaque, id: atom.Atom) RootTraceError!void
-    else
-        void = if (value_root_frames_enabled) null else {},
+    visit_atom: ?*const fn (context: *anyopaque, id: atom.Atom) RootTraceError!void = null,
 
     pub fn value(self: *RootVisitor, slot: *JSValue) RootTraceError!void {
         try self.visit_value(self.context, slot);
@@ -100,18 +92,14 @@ pub const RootVisitor = struct {
             .pinned => |visit| return visit(self.context, header),
             .observe => {},
         }
-        if (comptime value_root_frames_enabled) {
-            const callback = self.visit_header orelse return;
-            try callback(self.context, header);
-        }
+        const callback = self.visit_header orelse return;
+        try callback(self.context, header);
     }
 
     /// No-op unless the visitor is a tracer that owns atom liveness.
     pub fn atomRoot(self: *RootVisitor, id: atom.Atom) RootTraceError!void {
-        if (comptime value_root_frames_enabled) {
-            const callback = self.visit_atom orelse return;
-            try callback(self.context, id);
-        }
+        const callback = self.visit_atom orelse return;
+        try callback(self.context, id);
     }
 
     pub fn shapeRoot(self: *RootVisitor, stored: *shape.Shape) RootTraceError!void {

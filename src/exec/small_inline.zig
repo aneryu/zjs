@@ -15,7 +15,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const object_ops = @import("object_ops.zig");
 const function_ops = @import("function_ops.zig");
-const Shape = @import("../core/shape.zig").Shape;
+const exception_ops = @import("exception_ops.zig");
 
 const op = bytecode.opcode.op;
 const FunctionBytecode = bytecode.FunctionBytecode;
@@ -23,12 +23,12 @@ const JSRuntime = core.JSRuntime;
 const JSValue = core.JSValue;
 const Object = core.Object;
 
-pub const max_code: usize = 40;
+const max_code: usize = 40;
 pub const max_depth: u8 = 2;
-pub const monomorph_hits: u8 = 8;
-pub const max_sites: u8 = 16;
-pub const max_copies: u8 = 4;
-pub const max_pc_map: usize = 64;
+const monomorph_hits: u8 = 8;
+const max_sites: u8 = 16;
+const max_copies: u8 = 4;
+const max_pc_map: usize = 64;
 
 pub var probe_prep: u64 = 0;
 pub var probe_take: u64 = 0;
@@ -36,8 +36,7 @@ pub var probe_take: u64 = 0;
 /// Print the inline-prep/take counters to stderr when `ZJS_INLINE_PROBE` is
 /// set. Writes no file.
 pub fn printProbe() void {
-    // std.posix.getenv does not exist under zig 0.16 with libc linked;
-    // std.c.getenv is the supported spelling (same fix as grok f32749f6).
+    // std.posix.getenv does not exist under zig 0.16 with libc linked.
     const raw = std.c.getenv("ZJS_INLINE_PROBE") orelse return;
     if (raw[0] == 0) return;
 
@@ -75,48 +74,30 @@ pub const InlinedSite = struct {
     pc_map_len: u16 = 0,
     /// R-v15-b: take guard is this object pointer, not FB identity.
     callee_obj: ?*Object = null,
-    /// R-v15-a: ctor object shape. Any own-property add changes this pointer.
-    ctor_shape: ?*Shape = null,
+    /// R-v15-a: the ctor object's `Shape.identity`, which changes on every
+    /// layout mutation and is never reused (unlike the shape's address).
+    /// 0 = no cached prototype.
+    ctor_shape_id: u64 = 0,
     proto: ?*Object = null,
     proto_slot: u32 = 0,
 };
 
 /// L1 apply-forward facts. Lives beside `CallerState.inlined`, not inside
 /// `InlinedSite`, so `findInlinedSite` keeps the v1.5 hot stride.
-pub const ApplyForwardCold = struct {
+const ApplyForwardCold = struct {
     method_atom: core.Atom = core.atom.null_atom,
     call_pc: u32 = no_forward_pc,
 };
 
 const no_forward_pc: u32 = std.math.maxInt(u32);
 
-/// v1.5 hot record (no L1 tail). `InlinedSite` must stay this width.
-const V15InlinedSite = struct {
-    pc_lo: u32,
-    pc_hi: u32,
-    call_pc: u32,
-    callee_fb: *FunctionBytecode,
-    callee_name: core.Atom,
-    callee_file: core.Atom,
-    parent: u8 = 0xFF,
-    kind: Kind,
-    this_slot: u16,
-    arg_base: u16,
-    argc: u16,
-    pc_map: [max_pc_map]u16 = @splat(0xFFFF),
-    pc_map_len: u16 = 0,
-    callee_obj: ?*Object = null,
-    ctor_shape: ?*Shape = null,
-    proto: ?*Object = null,
-    proto_slot: u32 = 0,
-};
-
+// `findInlinedSite` scans `CallerState.inlined`; keep the hot stride fixed.
 comptime {
-    std.debug.assert(@sizeOf(InlinedSite) == @sizeOf(V15InlinedSite));
-    std.debug.assert(@alignOf(InlinedSite) == @alignOf(V15InlinedSite));
+    std.debug.assert(@sizeOf(InlinedSite) == 200);
+    std.debug.assert(@alignOf(InlinedSite) == 8);
 }
 
-pub const SiteCount = struct {
+const SiteCount = struct {
     call_pc: u32 = 0,
     callee_obj: ?*Object = null,
     count: u8 = 0,
@@ -144,10 +125,6 @@ pub fn callerState(fb: *const FunctionBytecode) ?*CallerState {
     const hot = fb.hotExtension() orelse return null;
     const raw = std.mem.readInt(usize, hot._ctor_alloc_pad[0..@sizeOf(usize)], .little);
     return decodeCallerState(raw);
-}
-
-fn callerStateMut(fb: *FunctionBytecode) ?*CallerState {
-    return callerState(fb);
 }
 
 fn setCallerState(fb: *FunctionBytecode, state: ?*CallerState) void {
@@ -215,8 +192,8 @@ fn setBorrowedRealm(fb: *FunctionBytecode, realm: ?*core.JSContext) void {
     std.mem.writeInt(usize, hot._ctor_alloc_pad[borrowed_realm_off..][0..@sizeOf(usize)], raw, .little);
 }
 
-pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
-    const state = callerStateMut(fb) orelse return;
+fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
+    const state = callerState(fb) orelse return;
     setCallerState(fb, null);
     setBorrowedRealm(fb, null);
     rt.nativeAllocator().destroy(state);
@@ -230,7 +207,7 @@ fn destroyCallerStateOpaque(rt: *JSRuntime, fb_ptr: *anyopaque) void {
 /// TGC S3 §2.2 edge H: report the atom ids an `InlinedSite` holds to the
 /// tracer while the FunctionBytecode is being traced. (`destroyCallerState`
 /// has no mirror release — the tracer owns these edges outright.) Registered
-/// next to `small_inline_destroy` so a runtime that never built a CallerState
+/// next to `small_inline.destroy` so a runtime that never built a CallerState
 /// pays nothing.
 fn traceCallerStateAtoms(
     rt: *JSRuntime,
@@ -262,7 +239,7 @@ fn fillDefaultCallerState(state: *CallerState) void {
 
 fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
     core.execution.installSmallInlineHooks(rt, destroyCallerStateOpaque, traceCallerStateAtoms);
-    if (callerStateMut(fb)) |existing| return existing;
+    if (callerState(fb)) |existing| return existing;
     const state = rt.nativeAllocator().create(CallerState) catch return null;
     fillDefaultCallerState(state);
     setCallerState(fb, state);
@@ -283,11 +260,10 @@ fn hasTrailingAfterReturn(code: []const u8) bool {
 }
 
 fn budgetRemaining(rt: *const JSRuntime) usize {
-    const published = rt.small_inline_published_bytes;
+    const published = rt.small_inline.published_bytes;
     const frac = published / budget_fraction_den * budget_fraction_num;
     const cap = @min(@max(frac, budget_floor_bytes), budget_cap_bytes);
-    if (rt.small_inline_specialized_bytes >= cap) return 0;
-    return cap - rt.small_inline_specialized_bytes;
+    return cap -| rt.small_inline.specialized_bytes;
 }
 
 pub fn findInlinedSite(fb: *const FunctionBytecode, call_pc: u32) ?*const InlinedSite {
@@ -299,7 +275,7 @@ pub fn findInlinedSite(fb: *const FunctionBytecode, call_pc: u32) ?*const Inline
     return null;
 }
 
-pub fn siteForPc(fb: *const FunctionBytecode, pc: usize) ?*const InlinedSite {
+fn siteForPc(fb: *const FunctionBytecode, pc: usize) ?*const InlinedSite {
     const state = callerState(fb) orelse return null;
     var i: u8 = 0;
     while (i < state.inlined_len) : (i += 1) {
@@ -309,7 +285,7 @@ pub fn siteForPc(fb: *const FunctionBytecode, pc: usize) ?*const InlinedSite {
     return null;
 }
 
-pub fn mapCalleePc(site: *const InlinedSite, expanded_pc: usize) usize {
+fn mapCalleePc(site: *const InlinedSite, expanded_pc: usize) usize {
     if (expanded_pc < site.pc_lo) return 0;
     const rel = expanded_pc - site.pc_lo;
     if (rel >= site.pc_map_len) return 0;
@@ -385,13 +361,8 @@ pub fn specializeCallSite(
     const base_fb = caller_obj.bytecodeArm().*.function_bytecode orelse caller;
     // One clone expands every same-argc constructor site. A second clone of an
     // already-expanded spec is unsafe (while/goto images).
-    if (callerState(base_fb)) |st| {
-        if (st.inlined_len > 0) return;
-    }
-    if (findInlinedSite(base_fb, call_pc) != null) return;
     if (callerState(base_fb)) |state| {
-        if (state.copies >= max_copies) return;
-        if (state.inlined_len >= max_sites) return;
+        if (state.inlined_len > 0 or state.copies >= max_copies) return;
     }
     if (budgetRemaining(rt) == 0) return;
     // I4 install-time: no own apply on the proto-chain method, and
@@ -399,7 +370,7 @@ pub fn specializeCallSite(
     if (analyzeApplyForward(callee)) |plan| {
         const realm = callee.realmContext() orelse return;
         const global = realm.global orelse return;
-        if (!applyForwardGuardHolds(rt, global, callee_fn_obj, plan.method_atom)) return;
+        if (!applyForwardGuardHolds(global, callee_fn_obj, plan.method_atom)) return;
     }
     const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
@@ -637,10 +608,6 @@ const Rewrite = struct {
     len: usize = 0,
     pc_map: [max_pc_map]u16 = @splat(0xFFFF),
     map_len: usize = 0,
-    this_slot: u16,
-    arg_base: u16,
-    var_base: u16,
-    kind: Kind,
     forward_call_rel: u32 = 0xFFFFFFFF,
     method_atom: core.Atom = core.atom.null_atom,
 };
@@ -704,9 +671,8 @@ fn emitGetField2(out: *Rewrite, atom_id: core.Atom) bool {
     if (!emitByte(out, op.get_field2)) return false;
     var buf: [5]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], atom_id.raw(), .little);
-    // W1 `atom_cache_u8`: same reasoning as `emitCallMethodApplyFwd` -- a
-    // callee-body site index would alias one of the caller's own property
-    // sites, so the rewritten read carries no cache slot.
+    // W1 `atom_cache_u8`: a callee-body site index would alias one of the
+    // caller's own property sites, so the rewritten read carries no cache slot.
     buf[4] = bytecode.PropSiteCache.no_cache_idx;
     return emitSlice(out, &buf);
 }
@@ -734,12 +700,7 @@ fn rewriteBody(
     kind: Kind,
     site_argc: u16,
 ) ?Rewrite {
-    var out = Rewrite{
-        .this_slot = this_slot,
-        .arg_base = arg_base,
-        .var_base = var_base,
-        .kind = kind,
-    };
+    var out = Rewrite{};
     const plan = analyzeApplyForward(callee);
     const src = callee.byteCode();
     // Mapping is indexed by source pc. Regular inlines stay within K;
@@ -1142,10 +1103,22 @@ fn cloneAndExpand(
     if (budgetRemaining(rt) < new_len) return null;
 
     const src_layout = caller.layout();
+    // The sites below hold raw `callee_obj`/`proto`/`callee_fb` pointers.
+    // Three trailing cpool slots per site (no bytecode names them) keep those
+    // cells alive for the specialization's lifetime, so a collected callee's
+    // address can never be reused by another function that then passes the
+    // pointer-identity guard. Nursery cells move, so their raw pointers are not
+    // stable: such a callee is not specialized, and a nursery prototype is not
+    // cached for the fused create-this.
+    if (core.gc.Registry.isNurseryHeader(callee_fn_obj.gcHeader())) return null;
+    const cache: ?CtorCache = if (sampleCtorCache(callee_fn_obj)) |c|
+        (if (core.gc.Registry.isNurseryHeader(c.proto.gcHeader())) null else c)
+    else
+        null;
     const new_layout = bytecode.FunctionLayout.init(
         src_layout.has_debug,
         true,
-        src_layout.cpool_count,
+        src_layout.cpool_count + 3 * @as(usize, site_n),
         src_layout.arg_count,
         new_var_count,
         src_layout.closure_var_count,
@@ -1157,8 +1130,15 @@ fn cloneAndExpand(
     ) catch return null;
 
     const spec = FunctionBytecode.createProductionShell(rt, new_layout) catch return null;
+    // cloneAndExpand reports failure as null, not an error, so the shell is
+    // released by a plain defer until it is published.
     var owned = true;
-    errdefer if (owned) FunctionBytecode.destroyProductionShell(rt, spec, new_layout.famBytes());
+    defer if (owned) {
+        if (spec.debugInfoMut()) |dbg| {
+            if (dbg.pc2line_buf) |buf| rt.nativeAllocator().free(buf[0..@intCast(dbg.pc2line_len)]);
+        }
+        FunctionBytecode.destroyProductionShell(rt, spec, new_layout.famBytes());
+    };
 
     spec.applyFlags(.{
         .is_strict_mode = caller.isStrictMode(),
@@ -1192,8 +1172,14 @@ fn cloneAndExpand(
 
     const src_cpool = caller.cpoolSlice();
     const dst_cpool = new_layout.cpoolSliceMut(spec);
-    for (src_cpool, dst_cpool) |src_v, *dst_v| {
+    for (src_cpool, dst_cpool[0..src_cpool.len]) |src_v, *dst_v| {
         dst_v.* = src_v;
+    }
+    for (0..site_n) |keep_i| {
+        const keep = dst_cpool[src_cpool.len + 3 * keep_i ..][0..3];
+        keep[0] = callee_fn_obj.value();
+        keep[1] = if (cache) |c| c.proto.value() else JSValue.undefinedValue();
+        keep[2] = JSValue.functionBytecode(&callee.header);
     }
 
     const src_vars = caller.allVarDefs();
@@ -1256,25 +1242,14 @@ fn cloneAndExpand(
     }
 
     var state = ensureCallerState(rt, spec) orelse return null;
+    // specializeCallSite only clones a base function with no inlined sites.
     if (callerState(caller)) |src_state| {
-        var oi: u8 = 0;
-        while (oi < src_state.inlined_len and oi < max_sites) : (oi += 1) {
-            var copy = src_state.inlined[oi];
-            copy.callee_name = rt.atoms.noteHolderStore(copy.callee_name);
-            copy.callee_file = rt.atoms.noteHolderStore(copy.callee_file);
-            state.inlined[oi] = copy;
-            var fwd = src_state.apply_forward[oi];
-            if (fwd.method_atom != core.atom.null_atom)
-                fwd.method_atom = rt.atoms.noteHolderStore(fwd.method_atom);
-            state.apply_forward[oi] = fwd;
-        }
-        state.inlined_len = src_state.inlined_len;
+        std.debug.assert(src_state.inlined_len == 0);
         state.copies = src_state.copies + 1;
         src_state.copies = state.copies;
     } else {
         state.copies = 1;
     }
-    const cache = sampleCtorCache(callee_fn_obj);
     var pi: u8 = 0;
     while (pi < site_n and state.inlined_len < max_sites) : (pi += 1) {
         const item = pending[pi];
@@ -1293,7 +1268,7 @@ fn cloneAndExpand(
             .pc_map = item.pc_map,
             .pc_map_len = item.pc_map_len,
             .callee_obj = callee_fn_obj,
-            .ctor_shape = if (cache) |c| c.shape else null,
+            .ctor_shape_id = if (cache) |c| c.shape_id else 0,
             .proto = if (cache) |c| c.proto else null,
             .proto_slot = if (cache) |c| c.slot else 0,
         };
@@ -1315,14 +1290,14 @@ fn cloneAndExpand(
 
     owned = false;
     rt.gc.addInitializedWithSizeNoFail(&spec.header, spec.heapByteSize());
-    core.execution.addSmallInlineSpecialized(rt, new_len);
+    rt.small_inline.specialized_bytes +|= new_len;
     return spec;
 }
 
 /// R-v11-a consumes `callee.arg_count` (extras stay in the region and are
 /// DROPped). L1 apply-forward rewrites to a live-argv `call_method_apply_fwd`
 /// whose argc is the *site* argc (I6); those slots must be MOVEd into the window.
-pub fn consumedArgSlots(fb: *const FunctionBytecode, site: *const InlinedSite) u16 {
+fn consumedArgSlots(fb: *const FunctionBytecode, site: *const InlinedSite) u16 {
     const state = callerState(fb);
     const forwarded = if (state) |st| siteApplyForwarded(st, site) else false;
     return if (forwarded) site.argc else site.callee_fb.arg_count;
@@ -1399,17 +1374,13 @@ pub fn inlinedSnapshot(site: *const InlinedSite, expanded_pc: usize) core.Active
     };
 }
 
+/// `pc` is already mapped into the callee's own bytecode (`mapCalleePc`).
 fn resolveCalleeLocation(data: ?*const anyopaque, pc: usize) core.BacktraceLocation {
-    const fb: *const FunctionBytecode = @ptrCast(@alignCast(data.?));
-    _ = pc;
-    return .{
-        .line_num = fb.lineNum(),
-        .col_num = fb.colNum(),
-    };
+    return exception_ops.resolveBacktraceLocation(data, pc);
 }
 
 const CtorCache = struct {
-    shape: *Shape,
+    shape_id: u64,
     proto: *Object,
     slot: u32,
 };
@@ -1420,7 +1391,7 @@ fn sampleCtorCache(func_obj: *Object) ?CtorCache {
     const stored = func_obj.asDataAt(index) orelse return null;
     const proto = object_ops.objectFromValue(stored) orelse return null;
     return .{
-        .shape = func_obj.shape_ref,
+        .shape_id = func_obj.shape_ref.identity,
         .proto = proto,
         .slot = @intCast(index),
     };
@@ -1432,8 +1403,8 @@ pub fn calleeMatches(site: *const InlinedSite, func: JSValue) bool {
     return if (site.callee_obj) |expected| obj == expected else false;
 }
 
-fn realmFunctionApply(rt: *JSRuntime, global: *Object) ?*Object {
-    const fproto = object_ops.functionPrototypeFromGlobal(rt, global) orelse return null;
+fn realmFunctionApply(global: *Object) ?*Object {
+    const fproto = object_ops.functionPrototypeFromGlobal(global) orelse return null;
     return fproto.getOwnDataObjectBorrowed(core.atom.ids.apply);
 }
 
@@ -1457,14 +1428,13 @@ fn lookupProtoChainDataFunction(start: *Object, atom_id: core.Atom) ?*Object {
 
 /// I4 / D5: proto-chain data function for `method_atom` has no own `apply`,
 /// and `Function.prototype.apply` is still the realm builtin record.
-pub fn applyForwardGuardHolds(
-    rt: *JSRuntime,
+fn applyForwardGuardHolds(
     global: *Object,
     ctor_obj: *Object,
     method_atom: core.Atom,
 ) bool {
     if (method_atom == core.atom.null_atom) return false;
-    const apply_obj = realmFunctionApply(rt, global) orelse return false;
+    const apply_obj = realmFunctionApply(global) orelse return false;
     if (!isFunctionApplyBuiltin(apply_obj)) return false;
     const proto = ctor_obj.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return false;
     const method_fn = lookupProtoChainDataFunction(proto, method_atom) orelse return false;
@@ -1473,7 +1443,6 @@ pub fn applyForwardGuardHolds(
 }
 
 pub inline fn applyForwardTakeOk(
-    rt: *JSRuntime,
     global: *Object,
     fb: *const FunctionBytecode,
     site: *const InlinedSite,
@@ -1483,7 +1452,7 @@ pub inline fn applyForwardTakeOk(
     const fwd = applyForwardColdOf(state, site);
     if (fwd.call_pc == no_forward_pc) return true;
     const ctor = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
-    return applyForwardGuardHolds(rt, global, ctor, fwd.method_atom);
+    return applyForwardGuardHolds(global, ctor, fwd.method_atom);
 }
 
 /// After the apply-fwd instruction (`argc:u16`), recover the
@@ -1500,8 +1469,8 @@ pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*c
     return null;
 }
 
-pub fn realmApplyBuiltin(rt: *JSRuntime, global: *Object) ?*Object {
-    const apply_obj = realmFunctionApply(rt, global) orelse return null;
+pub fn realmApplyBuiltin(global: *Object) ?*Object {
+    const apply_obj = realmFunctionApply(global) orelse return null;
     if (!isFunctionApplyBuiltin(apply_obj)) return null;
     return apply_obj;
 }
@@ -1511,12 +1480,12 @@ pub fn realmApplyBuiltin(rt: *JSRuntime, global: *Object) ?*Object {
 pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSValue) ?JSValue {
     if (site.kind != .constructor) return null;
     const expected_obj = site.callee_obj orelse return null;
-    const expected_shape = site.ctor_shape orelse return null;
+    if (site.ctor_shape_id == 0) return null;
     const expected_proto = site.proto orelse return null;
     const obj = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (obj != expected_obj) return null;
-    // R-v15-a: shape pointer, not a cached slot index alone.
-    if (obj.shape_ref != expected_shape) return null;
+    // R-v15-a: shape identity, not a cached slot index alone.
+    if (obj.shape_ref.identity != site.ctor_shape_id) return null;
     const stored = obj.asDataAt(site.proto_slot) orelse return null;
     const proto = object_ops.objectFromValue(stored) orelse return null;
     if (proto != expected_proto) return null;
@@ -1533,16 +1502,6 @@ pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSVal
     defer roots.deactivate(rt);
     const instance = core.Object.createPlainObject(rt, proto_object) catch return null;
     return instance.value();
-}
-
-test "InlinedSite hot stride matches v1.5" {
-    try std.testing.expectEqual(@sizeOf(V15InlinedSite), @sizeOf(InlinedSite));
-}
-
-test "rewrite sc_Pair-shaped body keeps put_field" {
-    // Structural: loc rewrite of get_arg0/1 + push_this must stay in budget.
-    try std.testing.expect(max_code == 40);
-    try std.testing.expect(monomorph_hits == 8);
 }
 
 test "fillDefaultCallerState matches CallerState defaults" {

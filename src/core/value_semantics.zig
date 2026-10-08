@@ -51,8 +51,8 @@ pub inline fn objectFromValueTrustedExpression(value: JSValue) ?*object.Object {
 }
 
 /// Checked conversion with the canonical error contract.
-pub fn expectObject(value: JSValue) error{TypeError}!*object.Object {
-    return objectFromValue(value) orelse error.TypeError;
+pub fn expectObject(value: JSValue) error{NotAnObject}!*object.Object {
+    return objectFromValue(value) orelse error.NotAnObject;
 }
 
 pub fn toBoolean(value: JSValue) bool {

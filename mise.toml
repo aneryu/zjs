@@ -67,20 +67,33 @@ ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 1000
 # zig-out keeps whatever optimize mode it had.
 [tasks.test262-gc-audit]
 description = "Full test262 under GC stress + fatal minor audit, default and nursery mode"
+# The default collector runs only the dense cadence locally: its safepoints
+# cover the 64-tick ones. Nightly CI still runs all three sweeps.
 run = """
 zig build run-test262 -Doptimize=ReleaseSafe --prefix zig-out/gc-audit
-ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test -R reports/test262-gc-audit/default "$@"
 ZJS_GC_STRESS=16 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test -R reports/test262-gc-audit/default-16 "$@"
 ZJS_GC_NURSERY=1 ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test -R reports/test262-gc-audit/nursery "$@"
 """
 
-# Local one-shot of the same steps CI linux-arm64 already runs:
-# Debug checkpoint, then shipped-mode test262.
+# Local one-shot of the same steps CI linux-arm64 already runs: Debug
+# checkpoint and shipped-mode test262. The two builds share no artifact, so
+# they run concurrently (the ReleaseFast runner compile overlaps the Debug
+# suite); the test262 log prints after the checkpoint output, and the task
+# fails if either build fails.
 [tasks.batch-gate]
-description = "Local CI-equivalent batch: Debug checkpoint-gate, then ReleaseFast test262-check"
+description = "Local CI-equivalent batch: Debug checkpoint-gate and ReleaseFast test262-check, concurrently"
 run = """
+mkdir -p .zig-cache/tmp
+log=.zig-cache/tmp/batch-gate-test262-check.log
+zig build test262-check -Doptimize=ReleaseFast "$ZJS_BUILD_JOBS" --summary all > "$log" 2>&1 &
+release_pid=$!
 zig build checkpoint-gate "$ZJS_BUILD_JOBS" --summary all
-zig build test262-check -Doptimize=ReleaseFast "$ZJS_BUILD_JOBS" --summary all
+debug_status=$?
+wait "$release_pid"
+release_status=$?
+cat "$log"
+echo "[batch-gate] checkpoint-gate exit $debug_status, test262-check exit $release_status"
+[ "$debug_status" -eq 0 ] && [ "$release_status" -eq 0 ]
 """
 
 [tasks.batch-gate-profile]

@@ -12,7 +12,6 @@
 //! byte counts (`externalMemoryRequestReason`, `shouldTryMinor`) stay on the
 //! Registry, where the statistics block is.
 
-const std = @import("std");
 const gc = @import("gc.zig");
 
 const Policy = gc.Policy;
@@ -31,10 +30,10 @@ pub const Scheduler = struct {
     /// Set only around `JSRuntime.deinit`'s teardown collections. The host has
     /// by contract released every handle and no mutator frame is live, so those
     /// collections are entitled to the precise root scan that
-    /// `runObjectCycleRemovalWithValueRoots` already asks for -- production
+    /// `collectForTeardown` already asks for -- production
     /// otherwise forces the conservative pass, and a stale native-stack slot
     /// pointing at a host-released Realm keeps it marked, which breaks the
-    /// `context_head == null` teardown invariant once the tracer rather than
+    /// `contexts.live_head == null` teardown invariant once the tracer rather than
     /// refcounting owns object lifetime.
     host_quiescent: bool = false,
 
@@ -98,7 +97,10 @@ pub const Scheduler = struct {
         const pending = self.pendingMajorRequest() orelse return false;
         return switch (point) {
             .allocation_slow_path, .idle => true,
-            .callback_boundary, .safepoint => pending.urgency == .urgent,
+            // Atom growth allocates nothing on the heap, so no allocation
+            // boundary may follow it; the interpreter's safepoint serves it.
+            .callback_boundary => pending.urgency == .urgent,
+            .safepoint => pending.urgency == .urgent or pending.reason == .atom_growth,
             .urgent => true,
         };
     }

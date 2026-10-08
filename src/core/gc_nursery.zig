@@ -110,7 +110,6 @@ pub const Nursery = struct {
         pages_retained: usize = 0,
         collections: usize = 0,
         copied_objects: usize = 0,
-        copied_bytes: usize = 0,
         pinned_objects: usize = 0,
     };
 

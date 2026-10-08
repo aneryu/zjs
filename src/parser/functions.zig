@@ -4,7 +4,6 @@ const std = @import("std");
 const root = @import("../parser.zig");
 const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("../compiler/root.zig");
 const function_def_mod = bytecode.function_def;
@@ -20,7 +19,6 @@ const lookahead = @import("lookahead.zig");
 const emitter = @import("emitter.zig");
 const expressions = @import("expressions.zig");
 const statements = @import("statements.zig");
-const classes = @import("classes.zig");
 const modules = @import("modules.zig");
 const typescript = @import("typescript.zig");
 const atom_this = parse_state.atom_this;
@@ -51,6 +49,7 @@ const FunctionFrame = struct {
     return_depth: u32,
     is_strict: bool,
     lex_is_strict: bool,
+    enclosing_lex_strict: bool,
 
     pub fn save(s: *const State) FunctionFrame {
         return .{
@@ -61,6 +60,7 @@ const FunctionFrame = struct {
             .return_depth = s.return_depth,
             .is_strict = s.is_strict,
             .lex_is_strict = s.lex.is_strict_mode,
+            .enclosing_lex_strict = s.enclosing_lex_strict,
         };
     }
 
@@ -72,6 +72,7 @@ const FunctionFrame = struct {
         s.return_depth = self.return_depth;
         s.is_strict = self.is_strict;
         s.lex.is_strict_mode = self.lex_is_strict;
+        s.enclosing_lex_strict = self.enclosing_lex_strict;
     }
 
     /// Make `child_fd` the emission target with a fresh function-level
@@ -123,6 +124,7 @@ const ChildFunction = struct {
     /// Make the child the emission target; see `FunctionFrame.enterChild`.
     fn makeCurrent(self: *ChildFunction, s: *State, return_depth: u32) Error!void {
         try FunctionFrame.enterChild(s, self.fd, return_depth);
+        s.enclosing_lex_strict = self.frame.lex_is_strict;
         self.stage = .current;
     }
 
@@ -192,10 +194,9 @@ pub fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: 
     }
 
     // Parse function name (required for declarations)
-    const has_decl_name = s.peekKind() == .ident or
-        (s.peekKind() == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) or
-        (s.peekKind() == .kw_yield and !(s.is_strict or s.curFunc().is_strict_mode));
-    if (!has_decl_name) {
+    // BindingIdentifier[?Yield, ?Await] in the enclosing context; sloppy code
+    // also accepts `let`, `static`, and the other strict-reserved words.
+    if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) {
         return s.failUnexpectedToken();
     }
     // qjs js_parse_function_decl2 retains the identifier before
@@ -236,16 +237,32 @@ pub fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: 
 
     // Parse function name (optional for expressions)
     var owned_name: ?Atom = null;
+    // The name is BindingIdentifier[?Yield, ?Await] of the function being
+    // named, not of the enclosing context: a plain function expression may be
+    // called `await` inside an async function, an async one never.
+    const strict = s.is_strict or s.curFunc().is_strict_mode;
     const has_name = s.peekKind() == .ident or
-        (s.peekKind() == .kw_await and !s.ctx.in_async and !s.lex.is_module) or
-        (s.peekKind() == .kw_yield and !(s.is_strict or s.curFunc().is_strict_mode));
+        (s.peekKind() == .kw_await and !s.lex.is_module) or
+        (s.peekKind() == .kw_yield and !strict) or
+        (!strict and (s.peekKind() == .kw_static or s.peekKind() == .kw_let or identifiers.isSloppyFutureReservedToken(s.peekKind())));
     if (has_name) {
+        // An escaped name is checked like the unescaped one below: the
+        // enclosing function's yield/await context does not apply to it.
+        const enclosing = s.ctx;
+        s.ctx.in_async = false;
+        s.ctx.in_generator = false;
+        s.ctx.in_class_static_block = false;
+        const invalid_escape = identifiers.identifierLikeHasInvalidEscapeForBinding(s);
+        s.ctx.in_async = enclosing.in_async;
+        s.ctx.in_generator = enclosing.in_generator;
+        s.ctx.in_class_static_block = enclosing.in_class_static_block;
+        if (invalid_escape) return s.failUnexpectedToken();
         // qjs js_parse_function_decl2 retains a named-expression atom
         // across next_token.
         const name_atom = identifiers.identifierLikeAtom(s);
         owned_name = name_atom;
         if (is_generator and identifiers.atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
-        if (func_kind == .async and is_generator and identifiers.atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
+        if (func_kind == .async and identifiers.atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
         if ((s.is_strict or s.curFunc().is_strict_mode) and
             (identifiers.atomNameEquals(s, name_atom, "eval") or identifiers.atomNameEquals(s, name_atom, "arguments")))
         {
@@ -272,6 +289,14 @@ pub fn parseAnonymousDefaultFunctionDecl(
     const is_generator = s.peekKind() == .star;
     if (is_generator) try s.advance();
 
+    // TypeScript overload signature, as for a named declaration.
+    s.ts_last_decl_was_signature = false;
+    if (!(try typescript.tsFunctionHasBodyAhead(s))) {
+        try typescript.tsSkipFunctionSignature(s);
+        s.ts_last_decl_was_signature = true;
+        return;
+    }
+
     try parseFunctionParamsAndBody(s, func_kind.withGenerator(is_generator), source_start, .{
         .name = atom_default,
         .is_decl = true,
@@ -289,13 +314,17 @@ pub fn deinitOwnedParserAtoms(s: *State, list: *std.ArrayList(Atom)) void {
 }
 
 const FunctionParameters = struct {
-    simple_names: std.ArrayList(Atom) = .empty,
+    /// Every simple (identifier) parameter name so far, for the duplicate
+    /// checks.
+    simple_names: std.AutoHashMapUnmanaged(Atom, void) = .empty,
     invalid_strict_name_position: ?diagnostics.Position = null,
     has_duplicate_simple: bool = false,
+    /// The first repeated simple parameter name.
+    duplicate_position: ?diagnostics.Position = null,
     has_simple_list: bool = true,
 
     pub fn deinit(self: *FunctionParameters, s: *State) void {
-        deinitOwnedParserAtoms(s, &self.simple_names);
+        self.simple_names.deinit(s.scratch);
     }
 };
 
@@ -321,6 +350,27 @@ const FunctionDeclPlan = struct {
     emit_global_inline: bool = false,
     emit_eval_var_inline: bool = false,
 };
+
+/// Annex B (B.3.2.1, B.3.2.2): the var copy of a sloppy block or `if`-clause
+/// function declaration is a global var at the top level of script code
+/// (and of eval code with global var bindings), an eval var-object binding
+/// at the top level of other eval code, and a function local otherwise.
+fn defineAnnexBFunctionVar(s: *State, plan: *FunctionDeclPlan, name: Atom) Error!i32 {
+    plan.emit_inline = true;
+    if (s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings)) {
+        plan.outer_carrier = .global;
+        plan.emit_global_inline = true;
+    } else if (s.cur_func_stack.len == 0) {
+        plan.outer_carrier = .eval_var_object;
+        plan.emit_eval_var_inline = true;
+    } else {
+        plan.outer_carrier = .local;
+    }
+    return switch (try declarations.defineVar(s, name, .function_decl)) {
+        .local => |idx| idx,
+        else => unreachable,
+    };
+}
 
 /// Shared state of one parameter list while its entries are parsed.
 const ParameterListState = struct {
@@ -411,6 +461,7 @@ fn parseFunctionParameters(
     if (func_kind == .set and (list.param_count != 1 or list.has_rest_parameter))
         return s.failWithMessage(null, "setter parameter list must contain exactly one non-rest parameter");
     s.curFunc().has_simple_parameter_list = list.parameters.has_simple_list;
+    s.curFunc().parameter_var_count = @intCast(s.curFunc().vars.len);
     if (list.first_default_param) |defined_count| {
         s.curFunc().defined_arg_count = @intCast(defined_count);
     }
@@ -421,7 +472,7 @@ fn parseFunctionParameters(
 /// parameter property.
 fn parseNamedParameter(s: *State, list: *ParameterListState, has_modifier: bool) Error!void {
     const func_kind = list.func_kind;
-    if (func_kind == .arrow and identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
+    if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
     const param_atom = identifiers.identifierLikeAtom(s);
     identifiers.recordInvalidStrictParameterName(s, &list.parameters.invalid_strict_name_position, param_atom);
     if (has_modifier) {
@@ -436,22 +487,16 @@ fn parseNamedParameter(s: *State, list: *ParameterListState, has_modifier: bool)
     {
         return s.failUnexpectedToken();
     }
-    if (func_kind == .arrow) {
+    if (list.parameters.simple_names.contains(param_atom)) {
         // Arrow parameters never tolerate a duplicate name.
-        try appendArrowParamBindingName(s, &list.parameters.simple_names, param_atom);
-    } else {
-        for (list.parameters.simple_names.items) |existing| {
-            if (existing == param_atom) {
-                list.parameters.has_duplicate_simple = true;
-                if (strict_params) return s.failUnexpectedToken();
-                break;
-            }
-        }
+        if (func_kind == .arrow or strict_params) return s.failNamed("duplicate parameter '{s}'", "duplicate parameter", param_atom);
+        list.parameters.has_duplicate_simple = true;
+        if (list.parameters.duplicate_position == null) list.parameters.duplicate_position = s.currentDiagnosticPosition();
     }
     for (s.curFunc().vars) |existing| {
-        if (existing.var_name == param_atom) return s.failUnexpectedToken();
+        if (existing.var_name == param_atom) return s.failNamed("duplicate parameter '{s}'", "duplicate parameter", param_atom);
     }
-    if (func_kind != .arrow) try appendOwnedParserAtom(s, &list.parameters.simple_names, param_atom);
+    try list.parameters.simple_names.put(s.scratch, param_atom, {});
     if (list.parameter_scope != null) {
         try appendParameterExpressionBinding(s, param_atom);
     }
@@ -511,13 +556,11 @@ fn parseRestParameter(s: *State, list: *ParameterListState) Error!void {
         if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
         const rest_atom = identifiers.identifierLikeAtom(s);
         identifiers.recordInvalidStrictParameterName(s, &list.parameters.invalid_strict_name_position, rest_atom);
-        for (list.parameters.simple_names.items) |existing| {
-            if (existing == rest_atom) return s.failUnexpectedToken();
-        }
+        if (list.parameters.simple_names.contains(rest_atom)) return s.failUnexpectedToken();
         for (s.curFunc().vars) |existing| {
             if (existing.var_name == rest_atom) return s.failUnexpectedToken();
         }
-        try appendOwnedParserAtom(s, &list.parameters.simple_names, rest_atom);
+        try list.parameters.simple_names.put(s.scratch, rest_atom, {});
         if (list.parameter_scope != null) {
             try appendParameterExpressionBinding(s, rest_atom);
         }
@@ -554,6 +597,7 @@ pub fn parseFunctionParamsAndBody(s: *State, func_kind: ParseFunctionKind, sourc
     const outer = s.ctx;
     defer s.ctx = outer;
     s.ctx = childFunctionContext(outer, func_kind, entry);
+    if (func_kind.isConstructor()) s.ctx.super_fields_init = s.class.fields_init;
     var child: ?ChildFunction = null;
     errdefer if (child) |*c| c.discard(s);
     const saved_return_finally = emitter.enterReturnFinallyFunctionBoundary(s);
@@ -628,13 +672,12 @@ fn childFunctionContext(outer: FunctionContext, func_kind: ParseFunctionKind, en
         // the child is the current function.
         .in_parameter_initializer = outer.in_parameter_initializer,
         .reject_await_in_parameter_initializer = outer.reject_await_in_parameter_initializer,
-        // A named function expression binds its own name inside the body.
-        .function_expr_name_binding = if (func_kind.isFunctionKeywordForm() and !entry.is_decl) entry.name else null,
         // A TypeScript namespace body ends at any nested function: its `var`
         // rewriting and `export` attachment must not apply inside.
         .in_namespace = false,
         .namespace_export = false,
         .current_namespace_atom = null,
+        .super_fields_init = if (func_kind == .arrow) outer.super_fields_init else parse_state.atom_class_fields_init,
     };
 }
 
@@ -653,7 +696,6 @@ fn createChildFunction(s: *State, parent_fd: *function_def_mod.FunctionDef, func
     // The caller's `errdefer child.discard(s)` only exists once this returns.
     errdefer child.discard(s);
     const child_fd = child.fd;
-    child_fd.parent_parameter_environment_only = s.ctx.in_parameter_initializer;
     child_fd.is_strict_mode = parent_fd.is_strict_mode or s.is_strict or s.lex.is_strict_mode;
     child_fd.func_type = switch (func_kind) {
         .normal, .async, .generator, .async_generator => if (entry.is_method)
@@ -722,6 +764,9 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
         // its cpool index.  All script/module/eval top-level cases
         // append their GlobalVar in the post-child half below.
         plan.global_declaration = true;
+        // A top-level function is var-scoped: an earlier let/const/class
+        // of the same name is a redeclaration, as for `var`.
+        if (try declarations.findLexicalDeclaration(s, name, false) != null) return declarations.failRedeclaration(s, name);
     } else {
         // Early-error: check for duplicate lexical declaration in the
         // same scope.  Mirrors QuickJS `define_var` JS_VAR_DEF_FUNCTION_DECL
@@ -737,7 +782,7 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
                 func_kind == .normal and
                 existing.var_kind == .function_decl;
             if (same_scope and !annex_b_func_redef) {
-                return Error.SyntaxError;
+                return s.failWithMessage(null, "duplicate declaration in the same scope");
             }
         }
 
@@ -756,12 +801,18 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
         // function declaration from an enclosing scope, and all
         // ordinary lexical declarations, still block the Annex-B
         // var copy.
-        const visible_lexical_blocking_annex_b = blk: {
+        // Strict code never copies a block function to a var, and every use
+        // below is decided without this flag there; skip the scope walk,
+        // linear in the visible declarations.
+        const visible_lexical_blocking_annex_b = !parent_fd.is_strict_mode and blk: {
             const visible_idx = declarations.visibleLexicalScopeVar(s, name) orelse break :blk false;
             const visible = parent_fd.vars[visible_idx];
-            break :blk visible.scope_level != parent_fd.scope_level or
-                visible.var_kind != .function_decl;
-        } or declarations.findLexicalGlobalVar(s, name);
+            if (visible.scope_level != parent_fd.scope_level or visible.var_kind != .function_decl) break :blk true;
+            // A same-scope function redefinition: a lexical binding further
+            // out still blocks the var copy (B.3.2.1).
+            const parent_scope = parent_fd.scopes[@intCast(parent_fd.scope_level)].parent;
+            break :blk declarations.visibleLexicalScopeVarFrom(s, name, parent_scope) != null;
+        } or (!parent_fd.is_strict_mode and declarations.findLexicalGlobalVar(s, name));
         const function_body_scope = parent_fd.body_scope;
         const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
         // QuickJS records a block function's cpool index on its
@@ -771,25 +822,28 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
         // not scope-entry declarations.
         plan.scope_entry_init =
             is_block_level_function_decl and !s.annex_b_if_function_decl_clause;
+        // Function code with an arguments object never copies a block
+        // `function arguments` to a var (B.3.2.1 step ii: "arguments" is in
+        // parameterNames). An arrow has none, so its copy is made like any
+        // other name; script code has no such exception (B.3.2.2).
         const arguments_blocks_annex_b = identifiers.atomNameEquals(s, name, "arguments") and
-            (!s.is_eval or
-                (!s.eval_in_parameter_initializer and closure.findClosureVarIndex(parent_fd, name) != null));
+            !(parent_fd.is_global_var and !s.is_eval) and
+            (if (s.is_eval)
+                !s.eval_in_parameter_initializer and closure.findClosureVarIndex(parent_fd, name) != null
+            else
+                parent_fd.has_arguments_binding);
         const name_blocks_annex_b_parameter_rule =
             parent_fd.findArg(name) >= 0 or
+            parent_fd.isPatternParameterName(name) or
             arguments_blocks_annex_b or
-            identifiers.evalAnnexBBlockedFunctionName(s, name);
-        const annex_b_if_function_var = s.annex_b_if_function_decl_clause and
-            !parent_fd.is_strict_mode and
+            identifiers.evalAnnexBBlockedFunctionName(parent_fd, name);
+        const annex_b_var_allowed = !parent_fd.is_strict_mode and
             func_kind == .normal and
             !visible_lexical_blocking_annex_b and
             !name_blocks_annex_b_parameter_rule and
             !s.ctx.in_namespace;
-        const annex_b_block_function_var = is_block_level_function_decl and
-            !parent_fd.is_strict_mode and
-            func_kind == .normal and
-            !visible_lexical_blocking_annex_b and
-            !name_blocks_annex_b_parameter_rule and
-            !s.ctx.in_namespace;
+        const annex_b_if_function_var = s.annex_b_if_function_decl_clause and annex_b_var_allowed;
+        const annex_b_block_function_var = is_block_level_function_decl and annex_b_var_allowed;
         // The implicit arguments-object local is a parameter-name
         // blocker for Annex B, not an earlier block-function
         // declaration. Treating it as the latter forces the lexical
@@ -804,70 +858,15 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
             is_block_level_function_decl and
             declarations.scopeHasVar(s, 0, name) and
             !implicit_arguments_binding;
-        const function_decl_idx: i32 = if (annex_b_if_function_var) blk: {
-            const is_top_level_annex_b_if_scope =
-                parent_fd.scope_level == parent_fd.body_scope or
-                (parent_fd.scope_level > parent_fd.body_scope and
-                    @as(usize, @intCast(parent_fd.scope_level)) < parent_fd.scopes.len and
-                    parent_fd.scopes[@intCast(parent_fd.scope_level)].parent == parent_fd.body_scope);
-            const emit_global_annex_b_if = s.cur_func_stack.len == 0 and
-                ((is_top_level_annex_b_if_scope and !s.is_eval) or s.eval_global_var_bindings);
-            if (emit_global_annex_b_if) {
-                plan.outer_carrier = .global;
-                plan.emit_inline = true;
-                plan.emit_global_inline = true;
-                break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                    .local => |idx| idx,
-                    else => unreachable,
-                };
-            }
-            if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
-                plan.outer_carrier = .eval_var_object;
-                plan.emit_inline = true;
-                plan.emit_eval_var_inline = true;
-                break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                    .local => |idx| idx,
-                    else => unreachable,
-                };
-            }
-            plan.outer_carrier = .local;
-            plan.emit_inline = true;
-            break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                .local => |idx| idx,
-                else => unreachable,
-            };
-        } else if (s.annex_b_if_function_decl_clause and func_kind == .normal) blk: {
+        const function_decl_idx: i32 = if (annex_b_if_function_var)
+            try defineAnnexBFunctionVar(s, &plan, name)
+        else if (s.annex_b_if_function_decl_clause and func_kind == .normal) blk: {
             plan.emit_inline = true;
             plan.skip_init = true;
             break :blk 0;
-        } else if (annex_b_block_function_var) blk: {
-            const emit_global_annex_b_block = s.cur_func_stack.len == 0 and
-                (s.eval_global_var_bindings or !s.is_eval);
-            if (emit_global_annex_b_block) {
-                plan.outer_carrier = .global;
-                plan.emit_inline = true;
-                plan.emit_global_inline = true;
-                break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                    .local => |idx| idx,
-                    else => unreachable,
-                };
-            } else if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
-                plan.outer_carrier = .eval_var_object;
-                plan.emit_inline = true;
-                plan.emit_eval_var_inline = true;
-                break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                    .local => |idx| idx,
-                    else => unreachable,
-                };
-            } else {
-                plan.outer_carrier = .local;
-                plan.emit_inline = true;
-                break :blk switch (try declarations.defineVar(s, name, .function_decl)) {
-                    .local => |idx| idx,
-                    else => unreachable,
-                };
-            }
-        } else if ((parent_fd.is_strict_mode and is_block_level_function_decl) or
+        } else if (annex_b_block_function_var)
+            try defineAnnexBFunctionVar(s, &plan, name)
+        else if ((parent_fd.is_strict_mode and is_block_level_function_decl) or
             (is_block_level_function_decl and s.is_eval) or
             (is_block_level_function_decl and visible_lexical_blocking_annex_b) or
             (is_block_level_function_decl and name_blocks_annex_b_parameter_rule) or
@@ -949,21 +948,32 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
     // Break/continue label resolution does not cross function boundaries.
     var control_boundary = s.enterControlBoundary();
     errdefer s.leaveControlBoundary(&control_boundary);
+    // The Annex B if-clause flag describes this function's own declaration,
+    // not the declarations in its body.
+    const saved_if_clause = s.annex_b_if_function_decl_clause;
+    s.annex_b_if_function_decl_clause = false;
+    defer s.annex_b_if_function_decl_clause = saved_if_clause;
+    // These checks run after the body, so they point at the directive or
+    // parameter they concern rather than at the token after the function.
+    const saved_use_strict_position = s.use_strict_position;
+    s.use_strict_position = null;
+    defer s.use_strict_position = saved_use_strict_position;
     try statements.parseFunctionBodyBlock(s);
+    const use_strict_position = s.use_strict_position;
     if (s.is_strict) s.curFunc().is_strict_mode = true;
     if (s.curFunc().is_strict_mode) {
         if (s.curFunc().has_use_strict and !parameters.has_simple_list)
-            return s.failWithMessage(null, "use strict directive is not allowed with non-simple parameters");
+            return s.failWithMessage(use_strict_position, "use strict directive is not allowed with non-simple parameters");
         if (func_kind.isFunctionKeywordForm()) {
             if (entry.name) |name| {
                 if (identifiers.isInvalidStrictFunctionBindingName(s, name))
-                    return s.failExpectedDescription("valid strict-mode function name");
+                    return s.failWithMessage(use_strict_position, "invalid function name in strict mode");
             }
         }
         try identifiers.rejectInvalidStrictParameterName(s, parameters.invalid_strict_name_position);
     }
-    // Mirrors the duplicate-argument gate in js_parse_function_check_names
-    //: strict mode, a non-simple parameter list,
+    // Mirrors the duplicate-argument gate in js_parse_function_check_names:
+    // strict mode, a non-simple parameter list,
     // methods (incl. getters/setters/class elements) and arrows reject
     // duplicates; plain sloppy function/generator/async declarations and
     // expressions with a simple list keep them legal.
@@ -973,7 +983,7 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
             func_kind == .arrow or
             func_kind.isConstructor() or
             !parameters.has_simple_list or s.is_strict or s.curFunc().is_strict_mode))
-        return s.failWithMessage(null, "duplicate parameters are not allowed in this function");
+        return s.failWithMessage(parameters.duplicate_position, "duplicate parameters are not allowed in this function");
     s.leaveControlBoundary(&control_boundary);
     try emitFallthroughReturn(s, func_kind);
 }
@@ -1006,7 +1016,7 @@ fn emitFallthroughReturn(s: *State, func_kind: ParseFunctionKind) Error!void {
 fn finishChildFunction(s: *State, c: *ChildFunction, parent_fd: *function_def_mod.FunctionDef, entry: FunctionEntry, plan: *FunctionDeclPlan, source_start: ?FunctionSourceStart) Error!void {
     if (source_start) |start| try s.captureFunctionSource(s.curFunc(), start.offset);
     c.pop(s);
-    const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
+    const child_cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
     c.fd.parent_cpool_idx = child_cpool_idx;
 
     // QuickJS creates declaration carriers only after the child has a
@@ -1058,12 +1068,13 @@ fn finishChildFunction(s: *State, c: *ChildFunction, parent_fd: *function_def_mo
     } else if (plan.emit_inline) {
         if (plan.skip_init) return;
         std.debug.assert(plan.lexical_var_idx >= 0);
-        try s.emitFClosure(child_cpool_idx);
         if (plan.scope_entry_init) {
             // OP_enter_scope already initialized the lexical function
-            // binding from VarDef.func_pool_idx.  The source-position
-            // closure is retained only for QuickJS's Annex B copy (or
-            // as the otherwise-discarded declaration value).
+            // binding from VarDef.func_pool_idx. The Annex B copy
+            // (B.3.2.1 step iii) takes the block binding's CURRENT value:
+            // the same function object, or whatever the block assigned.
+            const copies = plan.annex_b_var_idx >= 0 or plan.emit_global_inline or plan.emit_eval_var_inline;
+            if (copies) try s.emitScopeGetVar(plan.binding_name) else try s.emitFClosure(child_cpool_idx);
             if (plan.annex_b_var_idx >= 0) {
                 try Emitter.op(s, opcode.op.dup);
                 try Emitter.opU16(s, opcode.op.put_loc, @intCast(plan.annex_b_var_idx));
@@ -1078,6 +1089,7 @@ fn finishChildFunction(s: *State, c: *ChildFunction, parent_fd: *function_def_mo
             }
             try Emitter.op(s, opcode.op.drop);
         } else {
+            try s.emitFClosure(child_cpool_idx);
             if (plan.emit_global_inline) {
                 try Emitter.op(s, opcode.op.dup);
             }
@@ -1121,8 +1133,8 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     const outer = s.ctx;
     defer s.ctx = outer;
     // An arrow is lexically transparent: it keeps the enclosing super /
-    // new.target capability and yield grammar, and only drops what a
-    // constructor or namespace body attaches to its own statements.
+    // new.target capability, and only drops what a constructor or namespace
+    // body attaches to its own statements. Its body is `[~Yield]` (below).
     s.ctx.in_constructor = false;
     s.ctx.in_namespace = false;
     s.ctx.namespace_export = false;
@@ -1139,7 +1151,6 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     {
         child = try ChildFunction.create(s, parent_fd, atom_module.ids.empty_string, .{ .line_num = source_start.line_num, .col_num = source_start.col_num });
         const child_fd = child.?.fd;
-        child_fd.parent_parameter_environment_only = s.ctx.in_parameter_initializer;
         child_fd.is_strict_mode = parent_fd.is_strict_mode or s.is_strict or s.lex.is_strict_mode;
         child_fd.func_type = .arrow;
         child_fd.func_kind = if (func_kind == .async) .async else .normal;
@@ -1196,6 +1207,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     }
 
     s.curFunc().has_simple_parameter_list = !has_non_simple_params;
+    s.curFunc().parameter_var_count = @intCast(s.curFunc().vars.len);
 
     // TypeScript `(...): R =>`.
     try typescript.tsParseReturnTypeOpt(s);
@@ -1203,6 +1215,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     if (s.lex.got_lf) return s.failUnexpectedToken();
     try s.expectToken(.arrow);
     s.ctx.in_async = is_async;
+    s.ctx.in_generator = false;
     s.ctx.in_class_static_block = false;
 
     // Break/continue and active iterator cleanup do not cross function
@@ -1214,9 +1227,12 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     // Parse body (can be block or expression).
     // parseFunctionBodyBlock consumes its own opening '{'.
     if (s.peekKind() == .lbrace) {
+        const saved_use_strict_position = s.use_strict_position;
+        s.use_strict_position = null;
+        defer s.use_strict_position = saved_use_strict_position;
         try statements.parseFunctionBodyBlock(s);
         if (has_non_simple_params and s.curFunc().has_use_strict)
-            return s.failWithMessage(null, "use strict directive is not allowed with non-simple parameters");
+            return s.failWithMessage(s.use_strict_position, "use strict directive is not allowed with non-simple parameters");
         if (s.is_strict or s.curFunc().is_strict_mode) {
             try identifiers.rejectInvalidStrictParameterName(s, invalid_strict_name_position);
         }
@@ -1230,7 +1246,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
         // staging/sm/statements/arrow-function-in-for-statement-head.js);
         // qjs parses arrow bodies with `js_parse_assign_expr`
         // (PF_IN_ACCEPTED, quickjs.c) and accepts it.
-        try expressions.parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
+        try expressions.parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted, .arrow_return_type_forbidden = body_flags.arrow_return_type_forbidden });
         // qjs arrow expression body: terminate with return_async or return.
         try Emitter.op(s, if (is_async) opcode.op.return_async else opcode.op.@"return");
     }
@@ -1239,7 +1255,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     if (child) |*c| {
         try s.captureFunctionSource(s.curFunc(), source_start.offset);
         c.pop(s);
-        const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
+        const child_cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
         c.fd.parent_cpool_idx = child_cpool_idx;
         try c.adopt(parent_fd);
         s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
@@ -1255,6 +1271,9 @@ const PatternBindingMode = struct {
     define_type: State.DefineVarType,
     is_parameter: bool,
     export_flag: bool,
+    /// A `catch` pattern binds lexically but is no LexicalDeclaration, so
+    /// `let` stays a valid sloppy name there (as in parameters).
+    is_catch_parameter: bool = false,
 };
 
 const PatternMode = union(enum) {
@@ -1272,11 +1291,14 @@ const PatternTarget = union(enum) {
         is_init: bool,
     },
     lvalue: LValue,
+    /// A parenthesized target such as `[(x) = function () {}] = []`: not an
+    /// IdentifierRef, so it never names an anonymous function (§13.15.5.5).
+    parenthesized_lvalue: LValue,
 
     fn depth(self: *const PatternTarget) u8 {
         return switch (self.*) {
             .direct_binding => 0,
-            .lvalue => |lvalue| lvalue.depth,
+            .lvalue, .parenthesized_lvalue => |lvalue| lvalue.depth,
         };
     }
 
@@ -1287,14 +1309,8 @@ const PatternTarget = union(enum) {
                 .scope_var, .ref_value => lvalue.name,
                 else => null,
             },
+            .parenthesized_lvalue => null,
         };
-    }
-
-    pub fn deinit(self: *PatternTarget, s: *State) void {
-        switch (self.*) {
-            .direct_binding => {},
-            .lvalue => |*lvalue| lvalue.deinit(s),
-        }
     }
 };
 
@@ -1320,7 +1336,7 @@ pub fn scanPatternTopology(s: *State) Error!PatternTopology {
         const failure = balanced.failure orelse return s.failExpectedToken(expected_close);
         var expected_buffer: [8]u8 = undefined;
         return s.failExpectedDescriptionAt(
-            s.tokenKindLabel(expected_close, &expected_buffer),
+            s.tokenKindLabel(balanced.expected_close, &expected_buffer),
             failure.kind,
             failure.position,
         );
@@ -1359,6 +1375,7 @@ fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) 
         return s.failExpectedDescription("valid strict-mode binding name");
     }
     if ((binding.define_type == .let_ or binding.define_type == .const_) and
+        !binding.is_parameter and !binding.is_catch_parameter and
         identifiers.atomNameEquals(s, name, "let"))
     {
         return s.failExpectedDescription("valid lexical binding name");
@@ -1372,7 +1389,7 @@ fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) 
         s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and
         identifiers.hasKnownBinding(s, name))
     {
-        return s.failExpectedDescription("non-conflicting binding");
+        return s.failNamed("redeclaration of '{s}'", "redeclaration", name);
     }
 
     const defined = try declarations.defineVar(s, name, binding.define_type);
@@ -1405,8 +1422,7 @@ fn parsePatternBindingTarget(s: *State, binding: PatternBindingMode) Error!Patte
         return s.failExpectedDescription("binding name");
     }
     const name = identifiers.identifierLikeAtom(s);
-    var target = try definePatternBindingAtom(s, binding, name);
-    errdefer target.deinit(s);
+    const target = try definePatternBindingAtom(s, binding, name);
     try s.advance();
     return target;
 }
@@ -1415,8 +1431,12 @@ fn parsePatternTarget(s: *State, mode: PatternMode) Error!PatternTarget {
     return switch (mode) {
         .binding => |binding| try parsePatternBindingTarget(s, binding),
         .assignment => blk: {
+            try typescript.tsSkipTargetAssertionPrefix(s);
+            const parenthesized = s.peekKind() == .lparen;
             try expressions.parseLhsExpr(s, ParseFlags{ .in_accepted = false });
-            break :blk .{ .lvalue = try expressions.getLValue(s, false) };
+            try typescript.tsSkipTargetAssertionSuffix(s);
+            const lvalue = try expressions.getLValue(s, false);
+            break :blk if (parenthesized) .{ .parenthesized_lvalue = lvalue } else .{ .lvalue = lvalue };
         },
     };
 }
@@ -1434,7 +1454,7 @@ fn shorthandPatternTarget(
     return switch (mode) {
         .binding => |binding| try definePatternBindingAtom(s, binding, property.atom),
         .assignment => blk: {
-            try s.emitScopeGetVar(property.atom);
+            try typescript.emitIdentifierReference(s, property.atom);
             break :blk .{ .lvalue = try expressions.getLValue(s, false) };
         },
     };
@@ -1455,7 +1475,7 @@ fn emitDirectPatternPut(s: *State, binding: anytype) Error!void {
 fn putPatternTarget(s: *State, target: *PatternTarget) Error!void {
     switch (target.*) {
         .direct_binding => |binding| try emitDirectPatternPut(s, binding),
-        .lvalue => |*lvalue| try expressions.putLValue(s, lvalue, .no_keep_depth),
+        .lvalue, .parenthesized_lvalue => |*lvalue| try expressions.putLValue(s, lvalue, .no_keep_depth),
     }
 }
 
@@ -1470,7 +1490,10 @@ fn parsePatternDefault(s: *State, target: *const PatternTarget) Error!void {
     try s.advance();
 
     try expressions.parseAssignExpr(s);
-    if (target.defaultName()) |name| try emitAnonymousDefaultName(s, name);
+    // An exported namespace binding is the property `N.x` (tsc), which
+    // infers no function name.
+    const property_target = target.* == .direct_binding and typescript.isNamespaceExport(s);
+    if (target.defaultName()) |name| if (!property_target) try emitAnonymousDefaultName(s, name);
     try Emitter.bind(s, has_value);
 }
 
@@ -1581,11 +1604,7 @@ pub fn emitBlockEnvReturnCleanupUntil(
     boundary: ?*BlockEnv,
     catch_marker_depth: *u32,
 ) Error!void {
-    const async_generator = s.ctx.in_async and s.ctx.in_generator;
-    const return_atom = if (async_generator)
-        atom_module.predefinedId("return", .string) orelse return Error.ParserInvariant
-    else
-        atom_module.null_atom;
+    const return_atom = atom_module.predefinedId("return", .string) orelse return Error.ParserInvariant;
     while (block_cursor.*) |current| {
         if (current == boundary) return;
         block_cursor.* = current.prev;
@@ -1609,11 +1628,12 @@ pub fn emitBlockEnvReturnCleanupUntil(
             try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
             // qjs emit_return iterator cleanup: remove the iterator catch record under TOS.
             try Emitter.op(s, opcode.op.nip_catch);
-            if (async_generator) {
-                // QuickJS emit_return: discard the
-                // cached next method, call iterator.return(), require an
-                // Object result, await it, then restore the injected return
-                // value for the next enclosing cleanup / OP_return_async.
+            if (current.is_async_iterator) {
+                // AsyncIteratorClose: discard the cached next method, call
+                // iterator.return(), await the result and require an Object
+                // (§7.4.13 steps 5-7), then restore the injected return value for the next
+                // enclosing cleanup / OP_return_async. A sync `for-of`
+                // takes the plain IteratorClose below, which never awaits.
                 try Emitter.op(s, opcode.op.nip);
                 try Emitter.op(s, opcode.op.swap);
                 try Emitter.opAtom(s, opcode.op.get_field2, return_atom);
@@ -1622,8 +1642,8 @@ pub fn emitBlockEnvReturnCleanupUntil(
                 const no_return = try Emitter.newLabel(s);
                 try Emitter.jump(s, opcode.op.if_true, no_return);
                 try Emitter.callOp(s, opcode.op.call_method, 0);
-                try Emitter.op(s, opcode.op.iterator_check_object);
                 try Emitter.op(s, opcode.op.await);
+                try Emitter.op(s, opcode.op.iterator_check_object);
                 const closed = try Emitter.newLabel(s);
                 try Emitter.jump(s, opcode.op.goto, closed);
                 try Emitter.bind(s, no_return);
@@ -1665,9 +1685,7 @@ fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {
         }
 
         if (!is_rest and s.peekKind() == .comma) {
-            try Emitter.opU8(s, opcode.op.for_of_next, 0);
-            try Emitter.op(s, opcode.op.drop);
-            try Emitter.op(s, opcode.op.drop);
+            try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.iterator_step);
         } else if (try tokenStartsNestedPattern(s, .rbracket)) {
             if (is_rest) {
                 const topology = try scanPatternTopology(s);
@@ -1682,7 +1700,6 @@ fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {
             _ = try parseDestructuringElement(s, mode, .{ .has_value = true, .allow_outer_initializer = true }, ParseFlags.default);
         } else {
             var target = try parsePatternTarget(s, mode);
-            defer target.deinit(s);
             if (is_rest) {
                 if (s.peekKind() == .assign) return s.failUnexpectedToken();
                 try emitArrayPatternRest(s, target.depth());
@@ -1705,7 +1722,12 @@ fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {
 
 fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!void {
     try s.expectToken(.lbrace);
+    // RequireObjectCoercible without boxing: property reads use GetV, so a
+    // getter on String.prototype sees the primitive as `this`. The
+    // discarded ToObject only throws for null/undefined.
+    try Emitter.op(s, opcode.op.dup);
     try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.to_object);
+    try Emitter.op(s, opcode.op.drop);
     if (has_rest) {
         try Emitter.op(s, opcode.op.object);
         try Emitter.op(s, opcode.op.swap);
@@ -1718,7 +1740,6 @@ fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!vo
             s.features.insert(.spread_rest);
             try s.advance();
             var target = try parsePatternTarget(s, mode);
-            defer target.deinit(s);
             if (s.peekKind() != .rbrace) return s.failExpectedToken(.rbrace);
             const depth = target.depth();
             const mask = try objectRestCopyMask(depth);
@@ -1761,7 +1782,6 @@ fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!vo
             const property = property_info orelse return Error.ParserInvariant;
             if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
             var target = try shorthandPatternTarget(s, mode, property);
-            defer target.deinit(s);
             if (target.depth() != 0) return Error.ParserInvariant;
             // QuickJS's direct shorthand-binding arm keeps the source and
             // fetches the value in one opcode. Reference-producing `var`
@@ -1788,7 +1808,6 @@ fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!vo
                 try parsePatternTarget(s, mode)
             else
                 try shorthandPatternTarget(s, mode, property_info orelse return Error.ParserInvariant);
-            defer target.deinit(s);
 
             if (computed) {
                 try rotateComputedSourcePastTarget(s, target.depth());
@@ -1881,13 +1900,6 @@ pub fn parseDestructuringElement(
     return has_initializer;
 }
 
-fn appendArrowParamBindingName(s: *State, names: *std.ArrayList(Atom), atom_id: Atom) Error!void {
-    for (names.items) |existing| {
-        if (existing == atom_id) return s.failUnexpectedToken();
-    }
-    try appendOwnedParserAtom(s, names, atom_id);
-}
-
 const ParameterListScan = struct {
     has_parameter_expressions: bool = false,
 };
@@ -1955,7 +1967,19 @@ fn leaveParameterExpressionScope(s: *State, parameter_scope: i32) Error!void {
         const next = vd.scope_next;
         if (vd.scope_level != parameter_scope) return Error.ParserInvariant;
         var_index = next;
-        if (fd.findArg(vd.var_name) >= 0 or declarations.findFunctionScopeVar(s, vd.var_name) != null) continue;
+        const arg_index = fd.findArg(vd.var_name);
+        if (arg_index >= 0) {
+            // FunctionDeclarationInstantiation step 28: the body sees each
+            // parameter's value as of the end of the parameter list. A later
+            // default may have assigned an earlier parameter (`b = (a = 9)`)
+            // through this environment's binding, so write it back to the
+            // argument slot the body reads. (QuickJS skips this copy, so its
+            // body still sees the original argument.)
+            try Emitter.opU16(s, opcode.op.get_loc_check, @intCast(idx));
+            try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
+            continue;
+        }
+        if (declarations.findFunctionScopeVar(s, vd.var_name) != null) continue;
 
         // QuickJS copies parameter-environment-only names with add_var,
         // not add_scope_var: this scope-0 row must not enter a lexical
@@ -2138,6 +2162,7 @@ pub fn ensureParameterArgumentsLocals(fd: *function_def_mod.FunctionDef) Error!v
     _ = try fd.ensureArgumentsBinding();
     fd.ensureArgumentsArgumentBinding() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.BytecodeOverflow => return error.BytecodeOverflow,
         error.InvalidScope => return error.ParserInvariant,
     };
 }

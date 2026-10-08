@@ -191,7 +191,7 @@ pub fn balancedAfterOpen(
                     result.following = scanFollowing(source, p, no_line_terminator) orelse return null;
                     return result;
                 }
-                regexp_context = .disallowed;
+                regexp_context = if (closing == ']') .disallowed else .after_paren_or_brace;
             },
             '\'', '"' => {
                 if (!skipQuoted(source, &p, source[p])) return null;
@@ -215,7 +215,7 @@ pub fn balancedAfterOpen(
                             if (p < source.len and source[p] == '=') p += 1;
                             regexp_context = .allowed;
                         },
-                        .identifier, .mode_dependent => return null,
+                        .identifier, .mode_dependent, .after_paren_or_brace => return null,
                     },
                 }
             },
@@ -308,6 +308,13 @@ pub fn balancedAfterOpen(
 pub fn parenArrowAfterOpen(source: []const u8, start: usize) ?bool {
     const balanced = balancedAfterOpen(source, start, '(', true) orelse return null;
     if (balanced.closed and balanced.following == .colon) return null;
+    // A TypeScript return type (`): R =>`) may start on the next line; only
+    // `=>` must stay on the `)` line. The parser's lookahead decides it.
+    if (balanced.closed and balanced.following == .line_terminator) {
+        const across_lines = balancedAfterOpen(source, start, '(', false) orelse return null;
+        if (across_lines.closed and across_lines.following == .colon) return null;
+        return false;
+    }
     return balanced.closed and balanced.following == .arrow;
 }
 
@@ -400,6 +407,10 @@ fn scanFollowing(source: []const u8, start: usize, no_line_terminator: bool) ?Ba
 const RegexpContext = enum {
     allowed,
     disallowed,
+    /// After `)` or `}` a slash is division (`(a) / b`, `{}.x / 2` aside) or a
+    /// regexp (`if (t) /re/.test(t)`, a `/re/` after a block): only the
+    /// parser knows, so the scan gives up.
+    after_paren_or_brace,
     /// Defer keyword classification until a following slash makes it
     /// observable. Most identifiers in an arrow-head scan never need it.
     identifier,
@@ -721,6 +732,8 @@ test "paren arrow scanner defers context-sensitive source" {
     try std.testing.expectEqual(@as(?bool, null), parenArrowAfterOpen("(a = '\xE2\x80\xA8') => a", 1));
     try std.testing.expectEqual(@as(?bool, null), parenArrowAfterOpen("(a // \xCF\x80\xE2\x80\xA8) => a", 1));
     try std.testing.expectEqual(@as(?bool, null), parenArrowAfterOpen("(a <!-- )\n) => a", 1));
+    // A return type may follow a line break; the parser decides.
+    try std.testing.expectEqual(@as(?bool, null), parenArrowAfterOpen("(x: number)\n: number => x", 1));
 }
 
 test "borrowed balanced scanner preserves QuickJS topology bits" {

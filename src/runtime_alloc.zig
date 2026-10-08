@@ -12,7 +12,7 @@ pub const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .De
 /// false; the recording branches below are `comptime`-eliminated so the
 /// default build's allocation hot path is unchanged).
 ///
-/// When enabled, every `Runtime allocation helpers` allocation entry point records its
+/// When enabled, every runtime allocation entry point in this file records its
 /// caller via `@returnAddress()` into a process-global deduplicated set.
 /// `zig build test-oom -Dzjs_oom_coverage=true` reports the number of
 /// distinct allocation call sites the OOM corpus reached, giving a
@@ -215,11 +215,11 @@ fn diagnosticFree(
 fn recordResize(self: *JSRuntime, old_len: usize, new_len: usize) void {
     if (comptime !diagnostic_accounting_enabled) return;
     if (new_len > old_len) {
-        self.diagnostics.allocations.allocated_bytes += new_len - old_len;
+        self.allocation_diagnostics.allocated_bytes += new_len - old_len;
     } else {
-        self.diagnostics.allocations.allocated_bytes -= old_len - new_len;
+        self.allocation_diagnostics.allocated_bytes -= old_len - new_len;
     }
-    if (comptime diagnostic_accounting_enabled) updatePeak(self);
+    updatePeak(self);
 }
 
 /// Replace an exact-fit native array with a larger allocation and copy.
@@ -245,11 +245,11 @@ pub inline fn noteAllocDiagnostics(
     comptime is_create: bool,
 ) void {
     if (comptime diagnostic_accounting_enabled) {
-        self.diagnostics.allocations.allocation_count += 1;
+        self.allocation_diagnostics.allocation_count += 1;
         if (comptime is_create) {
-            self.diagnostics.allocations.create_calls += 1;
+            self.allocation_diagnostics.create_calls += 1;
         } else {
-            self.diagnostics.allocations.alloc_calls += 1;
+            self.allocation_diagnostics.alloc_calls += 1;
         }
         updatePeak(self);
         if (self.opcode_profile) |prof| prof.recordAlloc();
@@ -258,11 +258,11 @@ pub inline fn noteAllocDiagnostics(
 
 pub inline fn noteFreeDiagnostics(self: *JSRuntime, comptime is_destroy: bool) void {
     if (comptime diagnostic_accounting_enabled) {
-        self.diagnostics.allocations.allocation_count -= 1;
+        self.allocation_diagnostics.allocation_count -= 1;
         if (comptime is_destroy) {
-            self.diagnostics.allocations.destroy_calls += 1;
+            self.allocation_diagnostics.destroy_calls += 1;
         } else {
-            self.diagnostics.allocations.free_calls += 1;
+            self.allocation_diagnostics.free_calls += 1;
         }
     }
 }
@@ -285,14 +285,16 @@ pub fn remap(self: *JSRuntime, comptime T: type, slice: []T, new_count: usize) !
     const old_raw: []u8 = @as([*]u8, @ptrCast(slice.ptr))[0..old_bytes];
     const remapped_ptr = self.allocator.rawRemap(old_raw, alignment, new_bytes, @returnAddress()) orelse return null;
     recordResize(self, old_bytes, new_bytes);
-    if (comptime diagnostic_accounting_enabled) {
-        updatePeak(self);
-    }
     const new_ptr: [*]T = @ptrCast(@alignCast(remapped_ptr));
     return new_ptr[0..new_count];
 }
 
-/// Native byte allocation without a GC probe; the caller owns GC preparation.
+/// Native byte allocation that notifies the allocation probe;
+/// `allocAlignedBytesNoTrigger` is the probe-free form.
+pub fn allocAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+    return allocAlignedBytesInternal(self, byte_count, alignment, true);
+}
+
 pub fn allocAlignedBytesNoTrigger(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
     return allocAlignedBytesInternal(self, byte_count, alignment, false);
 }
@@ -319,8 +321,8 @@ noinline fn allocAlignedBytesSlow(self: *JSRuntime, byte_count: usize, alignment
 pub noinline fn freeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
     if (bytes.len == 0) return;
     if (comptime diagnostic_accounting_enabled) {
-        self.diagnostics.allocations.allocation_count -= 1;
-        self.diagnostics.allocations.free_calls += 1;
+        self.allocation_diagnostics.allocation_count -= 1;
+        self.allocation_diagnostics.free_calls += 1;
     }
     debitAlloc(self, bytes.len);
     self.allocator.rawFree(bytes, alignment, @returnAddress());
@@ -328,31 +330,26 @@ pub noinline fn freeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.m
 
 pub fn hasOutstandingAllocations(self: *const JSRuntime) bool {
     if (comptime diagnostic_accounting_enabled) {
-        return self.diagnostics.allocations.allocated_bytes != 0 or self.diagnostics.allocations.allocation_count != 0;
+        return self.allocation_diagnostics.allocated_bytes != 0 or self.allocation_diagnostics.allocation_count != 0;
     }
-    return self.diagnostics.allocations.allocated_bytes != 0;
+    return self.allocation_diagnostics.allocated_bytes != 0;
 }
 
 /// Debug/test failure-injection cap on diagnostic allocation bytes. This is
 /// not the JS heap limit; enforcement is absent when diagnostics are disabled.
 pub fn setLimit(self: *JSRuntime, limit: ?usize) void {
-    self.diagnostics.allocations.limit = limit;
-}
-
-/// Returns the diagnostic failure-injection cap, not Registry.heap_budget.limit.
-pub fn getLimit(self: *const JSRuntime) ?usize {
-    return self.diagnostics.allocations.limit;
+    self.allocation_diagnostics.limit = limit;
 }
 
 /// Diagnostic failure-injection check used by native and GC allocation routes.
 /// The JS heap limit is enforced separately by admitHeapCharge.
 pub fn checkAllocation(self: *JSRuntime, bytes: usize) !void {
     if (comptime !diagnostic_accounting_enabled) return;
-    const limit = self.diagnostics.allocations.limit orelse {
+    const limit = self.allocation_diagnostics.limit orelse {
         @branchHint(.likely);
         return;
     };
-    const next = std.math.add(usize, self.diagnostics.allocations.allocated_bytes, bytes) catch return error.OutOfMemory;
+    const next = std.math.add(usize, self.allocation_diagnostics.allocated_bytes, bytes) catch return error.OutOfMemory;
     if (next > limit) return error.OutOfMemory;
 }
 
@@ -371,16 +368,16 @@ pub fn samplePeakAtCollection(self: *JSRuntime) void {
 
 fn updatePeak(self: *JSRuntime) void {
     if (comptime !diagnostic_accounting_enabled) return;
-    self.diagnostics.allocations.peak_allocated_bytes = @max(self.diagnostics.allocations.peak_allocated_bytes, self.diagnostics.allocations.allocated_bytes);
-    self.diagnostics.allocations.peak_allocation_count = @max(self.diagnostics.allocations.peak_allocation_count, self.diagnostics.allocations.allocation_count);
+    self.allocation_diagnostics.peak_allocated_bytes = @max(self.allocation_diagnostics.peak_allocated_bytes, self.allocation_diagnostics.allocated_bytes);
+    self.allocation_diagnostics.peak_allocation_count = @max(self.allocation_diagnostics.peak_allocation_count, self.allocation_diagnostics.allocation_count);
 }
 
 pub inline fn creditAlloc(self: *JSRuntime, bytes: usize) void {
-    if (comptime diagnostic_accounting_enabled) self.diagnostics.allocations.allocated_bytes +%= bytes;
+    if (comptime diagnostic_accounting_enabled) self.allocation_diagnostics.allocated_bytes +%= bytes;
 }
 
 pub inline fn debitAlloc(self: *JSRuntime, bytes: usize) void {
-    if (comptime diagnostic_accounting_enabled) self.diagnostics.allocations.allocated_bytes -%= bytes;
+    if (comptime diagnostic_accounting_enabled) self.allocation_diagnostics.allocated_bytes -%= bytes;
 }
 
 fn requireNative(comptime T: type) void {
@@ -390,19 +387,15 @@ fn requireNative(comptime T: type) void {
 
 /// Returns native memory; release through free or the same Runtime allocator.
 pub inline fn alloc(self: *JSRuntime, comptime T: type, count: usize) ![]T {
-    return allocTyped(self, T, count, true);
+    return allocTyped(self, T, count);
 }
 
-pub inline fn allocNoTrigger(self: *JSRuntime, comptime T: type, count: usize) ![]T {
-    return allocTyped(self, T, count, false);
-}
-
-fn allocTyped(self: *JSRuntime, comptime T: type, count: usize, comptime probe: bool) ![]T {
+fn allocTyped(self: *JSRuntime, comptime T: type, count: usize) ![]T {
     comptime requireNative(T);
     if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
     if (count == 0) return &.{};
     const size = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
-    const bytes = try allocAlignedBytesSlow(self, size, std.mem.Alignment.of(T), probe);
+    const bytes = try allocAlignedBytesSlow(self, size, std.mem.Alignment.of(T), true);
     return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
 }
 

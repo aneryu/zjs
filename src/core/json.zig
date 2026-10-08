@@ -17,18 +17,11 @@ const unicode = @import("../libs/unicode.zig");
 /// Wrap finished serializer bytes in a JSValue string, choosing the ASCII
 /// fast path when the buffer holds no high bytes.
 pub fn createJsonStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = if (jsonBytesAreAscii(bytes))
+    const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
         try core.string.String.createUtf8(rt, bytes);
     return str.value();
-}
-
-fn jsonBytesAreAscii(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
 }
 
 /// Append the JSON quoted-string form of a string JSValue to `buffer`.

@@ -16,8 +16,8 @@ const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
 const AddressRegistry = @import("gc_address_registry.zig");
+const thread_stack = @import("thread_stack.zig");
 const runtime_mod = @import("../runtime.zig");
-const object_mod = @import("object.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 
 pub const target_supported = switch (builtin.cpu.arch) {
@@ -72,102 +72,11 @@ pub const SpillImage = switch (builtin.cpu.arch) {
     else => void,
 };
 
-const linux_pthread = builtin.os.tag == .linux;
-const darwin_pthread = builtin.os.tag.isDarwin();
-const windows_stack = builtin.os.tag == .windows;
-
-const linux_stack = if (linux_pthread) struct {
-    extern "c" fn pthread_getattr_np(thread: std.c.pthread_t, attr: *std.c.pthread_attr_t) c_int;
-    extern "c" fn pthread_attr_getstack(
-        attr: *const std.c.pthread_attr_t,
-        stackaddr: *?*anyopaque,
-        stacksize: *usize,
-    ) c_int;
-
-    fn stackHigh() ?usize {
-        var attr: std.c.pthread_attr_t = undefined;
-        if (pthread_getattr_np(std.c.pthread_self(), &attr) != 0) return null;
-        defer _ = std.c.pthread_attr_destroy(&attr);
-        var stackaddr: ?*anyopaque = null;
-        var stacksize: usize = 0;
-        if (pthread_attr_getstack(&attr, &stackaddr, &stacksize) != 0) return null;
-        const base = @intFromPtr(stackaddr orelse return null);
-        return base + stacksize;
-    }
-} else struct {
-    fn stackHigh() ?usize {
-        return null;
-    }
-};
-
-const darwin_stack = if (darwin_pthread) struct {
-    extern "c" fn pthread_get_stackaddr_np(thread: std.c.pthread_t) ?*anyopaque;
-
-    fn stackHigh() ?usize {
-        // Darwin returns the highest address of a downward-growing stack.
-        const addr = pthread_get_stackaddr_np(std.c.pthread_self()) orelse return null;
-        return @intFromPtr(addr);
-    }
-} else struct {
-    fn stackHigh() ?usize {
-        return null;
-    }
-};
-
-const windows_limits = if (windows_stack) struct {
-    extern "kernel32" fn GetCurrentThreadStackLimits(
-        low: *usize,
-        high: *usize,
-    ) callconv(.winapi) void;
-
-    fn stackHigh() ?usize {
-        var low: usize = 0;
-        var high: usize = 0;
-        GetCurrentThreadStackLimits(&low, &high);
-        return if (high == 0) null else high;
-    }
-} else struct {
-    fn stackHigh() ?usize {
-        return null;
-    }
-};
-
-/// Cached per thread, because the answer cannot change for a live thread and
-/// the question is expensive to ask.
-///
-/// glibc's `pthread_getattr_np` resolves the INITIAL thread's bounds by
-/// opening and parsing `/proc/self/maps`; for other threads it is cheap, but
-/// the collector runs on whichever thread owns the runtime and that is
-/// usually the initial one. Every conservative scan asked, and there are two
-/// per major plus one per minor: earley-boyer's 7,772 majors and 2,803
-/// minors make ~18,300 calls, each of them a file open, read and parse.
-/// A thread's stack is fixed once it is running, so one call per thread is
-/// enough. (Found in adversarial review, codex, 2026-08-27.)
-threadlocal var cached_stack_high: usize = 0;
-threadlocal var cached_stack_high_valid: bool = false;
-
-fn threadStackHigh() ?usize {
-    if (cached_stack_high_valid) {
-        return if (cached_stack_high == 0) null else cached_stack_high;
-    }
-    cached_stack_high_valid = true;
-    const high = if (comptime linux_pthread)
-        linux_stack.stackHigh()
-    else if (comptime darwin_pthread)
-        darwin_stack.stackHigh()
-    else if (comptime windows_stack)
-        windows_limits.stackHigh()
-    else
-        null;
-    cached_stack_high = high orelse 0;
-    return high;
-}
-
 fn scanHigh(rt: *const JSRuntime, sp: usize) usize {
-    if (threadStackHigh()) |high| {
-        if (high > sp) return high;
+    if (thread_stack.bounds()) |stack| {
+        if (stack.high > sp) return stack.high;
     }
-    const top = rt.native_stack_top;
+    const top = rt.stack.native_top;
     if (top > sp) return top;
     return sp;
 }
@@ -343,6 +252,12 @@ pub fn spillRegistersAndScan(
     // may alias runtime state, but a stop-the-world span cannot mutate these
     // snapshots, so the compiler may keep them in registers.
     const scan_filter = rt.gc.address_registry.rebuildScanFilter();
+    if (gc.invariantChecksEnabled()) {
+        rt.gc.address_registry.verifyScanFilter(scan_filter) catch |err| {
+            std.debug.print("gc: SCAN FILTER AUDIT: {s}\n", .{@errorName(err)});
+            @panic("conservative scan filter invariant violated");
+        };
+    }
     var image: SpillImage = undefined;
     const sp = dumpRegisters(&image);
     std.mem.doNotOptimizeAway(&image);

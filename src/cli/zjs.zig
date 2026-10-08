@@ -18,6 +18,10 @@ pub const CliError = error{
 pub const RuntimeOptions = struct {
     memory_limit: ?usize = null,
     stack_size: ?usize = null,
+    /// Native (C) stack budget for recursion that runs on the native stack:
+    /// async/generator resumption, native callbacks, the parser, JSON. The
+    /// VM's own stack is `stack_size`.
+    native_stack_size: ?usize = null,
     can_block: bool = false,
     dump_memory: bool = false,
     profile_opcodes: bool = false,
@@ -74,7 +78,7 @@ const Option = struct {
     set: []const std.meta.FieldEnum(RuntimeOptions) = &.{},
     take: Take = .none,
 
-    const Take = enum { none, memory_limit, stack_size, include };
+    const Take = enum { none, memory_limit, stack_size, native_stack_size, include };
 };
 
 const option_table = [_]Option{
@@ -98,10 +102,24 @@ const option_table = [_]Option{
     .{ .long = "leak-check", .set = &.{.leak_check} },
     .{ .long = "memory-limit", .take = .memory_limit },
     .{ .long = "stack-size", .take = .stack_size },
+    .{ .long = "native-stack-size", .take = .native_stack_size },
     .{ .long = "include", .short = 'I', .take = .include },
 };
 
+/// Why `parseArgs` rejected the command line: `what` names the problem and
+/// `arg` the argument it is about (may be empty).
+pub const UsageProblem = struct {
+    what: []const u8,
+    arg: []const u8 = "",
+};
+
 pub fn parseArgs(argv: []const []const u8) CliError!Command {
+    var problem: ?UsageProblem = null;
+    return parseArgsExplained(argv, &problem);
+}
+
+/// `parseArgs` that also reports why a command line is a usage error.
+pub fn parseArgsExplained(argv: []const []const u8, problem: *?UsageProblem) CliError!Command {
     var rest = argv;
     var opts = RuntimeOptions{};
     while (rest.len != 0) {
@@ -109,37 +127,43 @@ pub fn parseArgs(argv: []const []const u8) CliError!Command {
         switch (tok) {
             .end_of_options => {
                 rest = rest[1..];
-                if (rest.len == 0) return error.Usage;
+                if (rest.len == 0) return usage(problem, "missing script file after", "--");
                 return .{ .path = rest[0], .script_args = rest, .options = opts };
             },
             .positional => break,
             .long, .short => {
                 const spec = lookupOption(tok) orelse {
                     if (isCommandWord(rest[0])) break;
-                    return error.Usage;
+                    return usage(problem, "unknown option", rest[0]);
                 };
+                const option_arg = rest[0];
                 rest = rest[1..];
-                try applyOption(&opts, spec, tok, &rest);
+                try applyOption(&opts, spec, tok, &rest, option_arg, problem);
             },
         }
     }
-    if (rest.len == 0) return error.Usage;
+    if (rest.len == 0) return usage(problem, "missing script file", "");
     if (std.mem.eql(u8, rest[0], "-h") or std.mem.eql(u8, rest[0], "--help")) return error.Usage;
     if (std.mem.eql(u8, rest[0], "-e")) {
-        if (opts.can_block or rest.len != 2) return error.Usage;
+        if (rest.len != 2) return usage(problem, "-e takes exactly one script argument", "");
         return .{ .path = eval_filename, .source = rest[1], .mode = .script, .options = opts };
     }
     if (std.mem.eql(u8, rest[0], "-m")) {
-        if (rest.len < 2) return error.Usage;
+        if (rest.len < 2) return usage(problem, "missing script file after", "-m");
         return .{ .path = rest[1], .script_args = rest[1..], .mode = .module, .options = opts };
     }
     if (std.mem.eql(u8, rest[0], "-s")) {
-        if (rest.len < 2) return error.Usage;
+        if (rest.len < 2) return usage(problem, "missing script file after", "-s");
         return .{ .path = rest[1], .script_args = rest[1..], .mode = .script, .options = opts };
     }
     if (rest[0].len != 0 and rest[0][0] != '-') {
         return .{ .path = rest[0], .script_args = rest[0..], .options = opts };
     }
+    return usage(problem, "unknown option", rest[0]);
+}
+
+fn usage(problem: *?UsageProblem, what: []const u8, arg: []const u8) CliError {
+    problem.* = .{ .what = what, .arg = arg };
     return error.Usage;
 }
 
@@ -173,27 +197,35 @@ fn lookupOption(tok: Token) ?Option {
     return null;
 }
 
-fn applyOption(opts: *RuntimeOptions, spec: Option, tok: Token, rest: *[]const []const u8) CliError!void {
+fn applyOption(opts: *RuntimeOptions, spec: Option, tok: Token, rest: *[]const []const u8, arg: []const u8, problem: *?UsageProblem) CliError!void {
     const inline_value: ?[]const u8 = switch (tok) {
         .long => |long| long.value,
         else => null,
     };
     if (spec.take == .none) {
-        if (inline_value != null) return error.Usage;
+        if (inline_value != null) return usage(problem, "option takes no value", arg);
         applyBools(opts, spec.set);
         return;
     }
     const value = inline_value orelse blk: {
-        if (rest.len == 0) return error.Usage;
+        if (rest.len == 0) return usage(problem, "missing value", arg);
         const next = rest.*[0];
         rest.* = rest.*[1..];
         break :blk next;
     };
     switch (spec.take) {
         .none => unreachable,
-        .memory_limit => opts.memory_limit = parseLimitKBytes(value) catch return error.Usage,
-        .stack_size => opts.stack_size = parseLimitKBytes(value) catch return error.Usage,
-        .include => opts.addInclude(value) catch return error.Usage,
+        // 0 means no limit, as for `--native-stack-size` (and in QuickJS).
+        .memory_limit => {
+            const limit = parseLimitKBytes(value) catch return usage(problem, "invalid kbytes value", arg);
+            opts.memory_limit = if (limit == 0) null else limit;
+        },
+        .stack_size => {
+            const size = parseLimitKBytes(value) catch return usage(problem, "invalid kbytes value", arg);
+            opts.stack_size = if (size == 0) std.math.maxInt(usize) else size;
+        },
+        .native_stack_size => opts.native_stack_size = parseLimitKBytes(value) catch return usage(problem, "invalid kbytes value", arg),
+        .include => opts.addInclude(value) catch return usage(problem, "too many include files (at most 16)", ""),
     }
 }
 
@@ -217,23 +249,50 @@ fn isCommandWord(arg: []const u8) bool {
         std.mem.eql(u8, arg, "--help");
 }
 
+/// A size option in decimal kbytes: digits only (no sign, no `_`).
 fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
+    for (text) |c| if (!std.ascii.isDigit(c)) return error.InvalidCharacter;
     const kbytes = try zjs.core.value_format.parseAsciiInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
 }
 
+/// The option list of the usage text, derived from `option_table`.
+const usage_options = blk: {
+    var text: []const u8 = "";
+    for (option_table) |opt| {
+        const name = if (opt.short) |c| "-" ++ [_]u8{c} else "--" ++ opt.long;
+        const operand = switch (opt.take) {
+            .none => "",
+            .memory_limit, .stack_size, .native_stack_size => " kbytes",
+            .include => " file",
+        };
+        text = text ++ " [" ++ name ++ operand ++ "]";
+    }
+    break :blk text;
+};
+
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m|-s] <file.js>\n");
+    try cli_process.printError(io, "usage: zjs" ++ usage_options ++ " -e <script>\n       zjs" ++ usage_options ++ " [-m|-s] <file.js> [args...]\n");
 }
 
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
-    var command = parseArgs(argv[1..]) catch {
-        try printUsage(init.io);
+    var problem: ?UsageProblem = null;
+    var command = parseArgsExplained(argv[1..], &problem) catch {
+        if (problem) |p| {
+            const separator: []const u8 = if (p.arg.len == 0) "" else ": ";
+            cli_process.printErrorJoin(init.io, &.{ "zjs: ", p.what, separator, p.arg, "\n" }) catch {};
+        }
+        printUsage(init.io) catch {};
         std.process.exit(2);
     };
-    try execute(init, &command);
+    execute(init, &command) catch |err| {
+        // A closed or full stdout (`zjs ... | head -1`): exit like SIGPIPE,
+        // without a trace.
+        if (@as(anyerror, err) == error.WriteFailed) std.process.exit(141);
+        return err;
+    };
 }
 
 fn execute(init: std.process.Init, command: *Command) !void {
@@ -249,7 +308,12 @@ fn execute(init: std.process.Init, command: *Command) !void {
     const script_args = command.script_args;
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    // On a terminal, output appears as the program prints it (a long
+    // script's progress lines); a pipe or file keeps the buffer.
+    const stdout_is_tty = std.Io.File.stdout().isTty(io) catch false;
+    // Standard streams are shared with the parent shell and sibling
+    // processes: write at the current offset, not positionally from 0.
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, if (stdout_is_tty) &.{} else &stdout_buf);
     const stdout = &stdout_writer.interface;
     var opcode_profile: zjs.OpcodeProfile = undefined;
     initOpcodeProfile(&opcode_profile);
@@ -277,8 +341,10 @@ fn execute(init: std.process.Init, command: *Command) !void {
     errdefer event_loop.deinit();
 
     host.file_modules.install(ctx.core);
-    try host.globals.install(ctx.core, try zjs.globalObjectPtr(ctx));
-    try configureRuntime(rt, ctx, script_args, runtime_options, &opcode_profile, io);
+    installHost(ctx, script_args, runtime_options, &opcode_profile, io) catch |err| {
+        try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
+        std.process.exit(1);
+    };
     // Install the file-loader dynamic import for every mode, mirroring qjs
     // installing js_module_loader unconditionally (qjs.c JS_SetModuleLoaderFunc):
     // import() works from scripts and -e, not only under -m. The state lives
@@ -295,26 +361,22 @@ fn execute(init: std.process.Init, command: *Command) !void {
     defer dynamic_import_scope.deinit();
 
     // NB: we intentionally do NOT tear down the event loop / context / runtime
-    // on the happy path. `JSRuntime.destroy` asserts that the runtime has no
-    // outstanding allocations, which catches refcounting bugs in
-    // `zig build test` where the engine is used in-process. As a short-lived
-    // CLI process, zjs returns from `main` and the OS reclaims memory a few
-    // microseconds later; calling destroy here only exposes latent leaks to
-    // the test262 runner, where the 2s panic+backtrace path caused many
-    // otherwise-passing tests to be misreported as timeouts. The historical
-    // validation note is preserved in the convergence docs' git history.
-    runIncludeFiles(ctx, runtime_options, stdout, io, allocator) catch |err|
-        try failEvaluation(ctx, rt, &event_loop, stdout, io, err);
-
+    // on the happy path (`--leak-check` does). zjs returns from `main` and the
+    // OS reclaims the memory; in-process tests keep the full teardown and its
+    // no-outstanding-allocations assertion.
+    if (runtime_options.bytecode_fingerprint and owned_source == null) {
+        try cli_process.printError(io, "zjs: --bytecode-fingerprint requires a file argument\n");
+        std.process.exit(2);
+    }
+    // The fingerprint compiles only: include files would run code first.
     if (runtime_options.bytecode_fingerprint) {
-        if (owned_source == null) {
-            try cli_process.printError(io, "zjs: --bytecode-fingerprint requires a file argument\n");
-            std.process.exit(2);
-        }
         try printBytecodeFingerprint(stdout, ctx, source, path, mode, runtime_options.bytecode_fingerprint_verbose);
         try stdout.flush();
+        finishProcess(runtime_options.leak_check, &dynamic_import_scope, &dynamic_import_state, &event_loop, ctx, rt);
         return;
     }
+    runIncludeFiles(ctx, runtime_options, stdout, io, allocator) catch |err|
+        try failEvaluation(ctx, rt, stdout, io, err);
 
     const value = evalSource(
         ctx,
@@ -324,7 +386,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
         mode,
         io,
         allocator,
-    ) catch |err| try failEvaluation(ctx, rt, &event_loop, stdout, io, err);
+    ) catch |err| try failEvaluation(ctx, rt, stdout, io, err);
     try stdout.flush();
 
     if (value.is(.exception)) {
@@ -344,31 +406,37 @@ fn execute(init: std.process.Init, command: *Command) !void {
 
     try dumpRequested(stdout, rt, runtime_options, &opcode_profile);
 
-    // Explicit exit skips the remaining defers (source_text free, etc.) on the default path.
-    // However, if leak checking is explicitly requested, we tear down the
-    // event loop, context, and runtime and return normally so all defers
-    // (including those for source_text and options) execute, allowing the
-    // GeneralPurposeAllocator to perform full validation.
     zjs.printSmallInlineProbe();
-    if (runtime_options.leak_check) {
-        // Restore the loader hook while the runtime it points at is still
-        // alive. The trailing `defer dynamic_import_scope.deinit()` would
-        // otherwise run after `rt.destroy()` and touch a destroyed runtime;
-        // `restore` is idempotent, so calling it here is safe and the defer
-        // becomes a no-op.
-        dynamic_import_scope.deinit();
-        dynamic_import_state.deinit();
-        event_loop.deinit();
-        ctx.destroy();
-        rt.destroy();
-        return;
-    }
-    std.process.exit(0);
+    finishProcess(runtime_options.leak_check, &dynamic_import_scope, &dynamic_import_state, &event_loop, ctx, rt);
+}
+
+/// Successful-exit discipline. By default exit explicitly, skipping the
+/// remaining defers (source_text free, etc.): the OS reclaims memory. With
+/// `--leak-check`, tear down the event loop, context, and runtime and return
+/// so every defer runs and the allocator performs full validation.
+fn finishProcess(
+    leak_check: bool,
+    dynamic_import_scope: anytype,
+    dynamic_import_state: *zjs.exec.module_graph.DynamicImportState,
+    event_loop: *host.EventLoop,
+    ctx: *zjs.Context,
+    rt: *zjs.Runtime,
+) void {
+    if (!leak_check) std.process.exit(0);
+    // Restore the loader hook while the runtime it points at is still alive.
+    // The caller's `defer dynamic_import_scope.deinit()` would otherwise run
+    // after `rt.destroy()` and touch a destroyed runtime; `restore` is
+    // idempotent, so the defer becomes a no-op.
+    dynamic_import_scope.deinit();
+    dynamic_import_state.deinit();
+    event_loop.deinit();
+    ctx.destroy();
+    rt.destroy();
 }
 
 fn loadSource(command: *Command, allocator: std.mem.Allocator, io: std.Io) !?[]const u8 {
     if (command.source != null) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, command.path, allocator, .limited(max_source_size)) catch |err| {
+    const bytes = host.file_modules.readFile(io, command.path, allocator, max_source_size) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", command.path, ": ", @errorName(err), "\n" });
         std.process.exit(1);
     };
@@ -384,54 +452,73 @@ fn configureRuntime(
     opcode_profile: *zjs.OpcodeProfile,
     io: std.Io,
 ) !void {
-    applyRuntimeOptions(rt, ctx, runtime_options);
+    applyRuntimeOptions(rt, runtime_options);
     ctx.setTrackUnhandledRejections(true);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
             try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n");
             std.process.exit(2);
         }
-        rt.setOpcodeProfile(opcode_profile);
+        rt.opcode_profile = opcode_profile;
     }
-    ctx.defineScriptArgs(script_args) catch |err| {
+    // Arguments are bytes; a JS string needs well-formed UTF-8. Like node,
+    // decode them lossily rather than refusing to run.
+    var args_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer args_arena.deinit();
+    const js_args = try args_arena.allocator().alloc([]const u8, script_args.len);
+    for (script_args, js_args) |arg, *js_arg| js_arg.* = try utf8Lossy(args_arena.allocator(), arg);
+    ctx.defineScriptArgs(js_args) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     ctx.setPreserveUncaughtException(true);
 }
 
-fn applyRuntimeOptions(rt: *zjs.Runtime, ctx: *zjs.Context, runtime_options: RuntimeOptions) void {
+/// `bytes` with each ill-formed UTF-8 sequence replaced by U+FFFD (WHATWG
+/// maximal subparts, as node decodes argv); `bytes` itself when well-formed.
+fn utf8Lossy(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
+    return std.fmt.allocPrint(allocator, "{f}", .{std.unicode.fmtUtf8(bytes)});
+}
+
+fn applyRuntimeOptions(rt: *zjs.Runtime, runtime_options: RuntimeOptions) void {
     zjs.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
     // `detailed_reports` is one input of the barrier gate; a flip against a
     // live Registry must republish it (gc.refreshBarrierGate contract).
     rt.gc.refreshBarrierGate();
-    rt.setCanBlock(runtime_options.can_block);
+    rt.can_block = runtime_options.can_block;
     if (runtime_options.memory_limit) |limit| rt.setMemoryLimit(limit);
-    if (runtime_options.stack_size) |size| {
-        rt.setStackSize(size);
-        ctx.setStackLimit(size);
-    }
+    if (runtime_options.stack_size) |size| rt.setStackSize(size);
+    if (runtime_options.native_stack_size) |size| rt.setNativeStackSize(clampToThreadStack(size));
+}
+
+/// A native budget beyond the thread's real stack would turn the engine's
+/// catchable stack-overflow error into a crash: keep it inside RLIMIT_STACK,
+/// minus room for the frames below the engine's entry point.
+/// A request of 0 ("no limit") also gets the thread's limit: unchecked
+/// recursion would otherwise overflow the real stack.
+fn clampToThreadStack(requested: usize) usize {
+    const margin = 256 * 1024;
+    const limit = std.posix.getrlimit(.STACK) catch return requested;
+    if (limit.cur == std.posix.RLIM.INFINITY or limit.cur <= margin) return requested;
+    const thread_budget = @as(usize, @intCast(limit.cur)) - margin;
+    return if (requested == 0) thread_budget else @min(requested, thread_budget);
 }
 
 fn failEvaluation(
     ctx: *zjs.Context,
     rt: *zjs.Runtime,
-    event_loop: *host.EventLoop,
     output: *std.Io.Writer,
     io: std.Io,
     err: anyerror,
 ) !noreturn {
-    try exitIfRequested(event_loop, output, err);
-    if (ctx.hasException()) try output.flush();
-    try printEvaluationError(io, ctx, rt, err);
-    std.process.exit(1);
-}
-
-fn exitIfRequested(event_loop: *host.EventLoop, output: *std.Io.Writer, err: anyerror) !void {
-    if (err != error.ProcessExit) return;
-    const code = event_loop.exitCode() orelse return;
+    // Output the program produced before failing precedes the error report.
+    // A stdout that cannot be written exits like SIGPIPE (main); a stderr
+    // that cannot be written leaves nowhere to report to, so the exit status
+    // still says the evaluation failed.
     try output.flush();
-    std.process.exit(code);
+    printEvaluationError(io, ctx, rt, err) catch |report_err| if (report_err != error.WriteFailed) return report_err;
+    std.process.exit(1);
 }
 
 const max_source_size = 64 * 1024 * 1024;
@@ -476,7 +563,7 @@ fn runFileModule(
     allocator: std.mem.Allocator,
     max_size: usize,
 ) !zjs.Value {
-    return try zjs.exec.module_graph.evalFileModuleGraphWithOutput(
+    return try zjs.exec.module_graph.evalModuleGraph(
         ctx.runtimePtr(),
         ctx.core,
         source_text,
@@ -496,9 +583,15 @@ fn runIncludeFiles(
     allocator: std.mem.Allocator,
 ) !void {
     for (runtime_options.includes()) |path| {
-        const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
+        const source = host.file_modules.readFile(io, path, allocator, max_source_size) catch |err| {
+            try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", path, ": ", @errorName(err), "\n" });
+            std.process.exit(1);
+        };
         defer allocator.free(source);
-        _ = try evalSource(ctx, source, output, path, .module, io, allocator);
+        // An include defines globals for what follows, so it runs as a
+        // script; `.mjs` files are modules.
+        const mode: zjs.Context.EvalMode = if (std.mem.endsWith(u8, path, ".mjs")) .module else .script;
+        _ = try evalSource(ctx, source, output, path, mode, io, allocator);
     }
 }
 
@@ -538,27 +631,27 @@ fn printBytecodeFingerprint(
     };
     var hasher = std.hash.Wyhash.init(0x7a6a73);
     var function_count: u32 = 0;
-    fingerprintFunctionBytecode(&hasher, root, &function_count, if (verbose) output else null);
+    try fingerprintFunctionBytecode(&hasher, root, &function_count, if (verbose) output else null);
     try output.print("{x:0>16} functions={d} {s}\n", .{ hasher.final(), function_count, path });
 }
 
-fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode.FunctionBytecode, function_count: *u32, verbose: ?*std.Io.Writer) void {
+fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode.FunctionBytecode, function_count: *u32, verbose: ?*std.Io.Writer) std.Io.Writer.Error!void {
     function_count.* += 1;
     const code = fb.byteCode();
     if (verbose) |out| {
-        out.print("  fn#{d} code_len={d} args={d} vars={d} defined_args={d} stack={d} closure_vars={d} cpool={d} flags={x}/{x}/{x}\n", .{
+        try out.print("  fn#{d} code_len={d} args={d} vars={d} defined_args={d} stack={d} closure_vars={d} cpool={d} flags={x}/{x}/{x}\n", .{
             function_count.*,     code.len,       fb.arg_count, fb.var_count,   fb.defined_arg_count, fb.stack_size,
             fb.closure_var_count, fb.cpool_count, fb.js_mode,   fb.flag_byte17, fb.flag_byte18,
-        }) catch {};
+        });
         if (fb.debugInfo()) |debug| {
             if (debug.source_ptr) |source_ptr| {
                 const source_len: usize = @intCast(@max(debug.source_len, 0));
-                out.print("    src: {s}\n", .{source_ptr[0..@min(source_len, 200)]}) catch {};
+                try out.print("    src: {s}\n", .{source_ptr[0..@min(source_len, 200)]});
             }
         }
-        out.print("    ", .{}) catch {};
-        for (code) |byte| out.print("{x:0>2}", .{byte}) catch {};
-        out.print("\n", .{}) catch {};
+        try out.print("    ", .{});
+        for (code) |byte| try out.print("{x:0>2}", .{byte});
+        try out.print("\n", .{});
     }
     hasher.update(std.mem.asBytes(&@as(u32, @intCast(code.len))));
     hasher.update(code);
@@ -573,7 +666,7 @@ fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode
     for (fb.cpoolSlice()) |value| {
         if (zjs.exec.call_runtime.functionBytecodeFromValue(value)) |child| {
             hasher.update("fb");
-            fingerprintFunctionBytecode(hasher, child, function_count, verbose);
+            try fingerprintFunctionBytecode(hasher, child, function_count, verbose);
         } else if (value.isTracerOwned()) {
             // Heap values: hash the tag and, for strings, the contents. The
             // address itself differs between runs.
@@ -593,16 +686,38 @@ fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode
     }
 }
 
+/// Host globals and runtime options. A failure here (typically the memory
+/// limit) is reported like a context-init failure, not as a Zig error trace.
+fn installHost(ctx: *zjs.Context, script_args: anytype, runtime_options: anytype, opcode_profile: anytype, io: std.Io) !void {
+    try host.globals.install(ctx.core, try zjs.globalObjectPtr(ctx));
+    try configureRuntime(ctx.runtimePtr(), ctx, script_args, runtime_options, opcode_profile, io);
+}
+
 fn printEvaluationError(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime, err: anyerror) !void {
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    if (ctx.hasException() or ctx.hasUnhandledRejection()) {
-        const thrown = ctx.takePendingException();
-        if (try printExceptionValue(stderr, ctx, rt, thrown)) return;
+    // The evaluation's own error wins over an unrelated unhandled rejection,
+    // which is then not reported (as in qjs and node).
+    if (ctx.hasException()) {
+        try printThrownValue(stderr, ctx, rt, ctx.takeException());
+        return;
     }
-    try stderr.print("zjs: evaluation failed: ", .{});
-    try stderr.print("{s}\n", .{@errorName(err)});
+    // An engine sentinel that no handler materialized reads as the JS error
+    // it stands for (`10n / 0n` at top level is a RangeError).
+    if (zjs.exec.exception_ops.runtimeErrorInfo(err)) |info| {
+        if (info.message.len == 0) {
+            try stderr.print("{s}\n", .{info.name});
+        } else {
+            try stderr.print("{s}: {s}\n", .{ info.name, info.message });
+        }
+    } else if (ctx.hasUnhandledRejection()) {
+        // A module whose evaluation rejected surfaces as its rejection.
+        try printThrownValue(stderr, ctx, rt, ctx.takeUnhandledRejection());
+        return;
+    } else {
+        try stderr.print("zjs: evaluation failed: {s}\n", .{@errorName(err)});
+    }
     try stderr.flush();
 }
 
@@ -614,7 +729,8 @@ fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runti
     if (header.len == 0) {
         try stderr.print("Error\n", .{});
     } else {
-        try stderr.print("{s}\n", .{header});
+        try writeWtf8Lossy(stderr, header);
+        try stderr.writeAll("\n");
     }
 
     const stack = ctx.formatExceptionStack(value, rt.nativeAllocator()) catch |err| blk: {
@@ -627,7 +743,7 @@ fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runti
     defer if (stack) |bytes| rt.nativeAllocator().free(bytes);
     if (stack) |bytes| {
         if (bytes.len != 0) {
-            try stderr.writeAll(bytes);
+            try writeWtf8Lossy(stderr, bytes);
             if (bytes[bytes.len - 1] != '\n') try stderr.print("\n", .{});
         }
     }
@@ -635,28 +751,63 @@ fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runti
     return true;
 }
 
-/// Reports one rejection into a caller-owned stderr writer. Reporting loops
-/// must reuse ONE writer: each fresh File.stderr().writer() starts at its own
-/// position 0, so successive reports would overwrite each other when stderr
-/// is redirected to a regular file.
+/// Write engine text, which encodes a lone surrogate as its WTF-8 bytes, as
+/// UTF-8 with each lone surrogate replaced by U+FFFD -- what `print` and
+/// `console.log` write for it on stdout.
+fn writeWtf8Lossy(writer: *std.Io.Writer, bytes: []const u8) !void {
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index + 2 < bytes.len) {
+        // ED A0..BF xx encodes U+D800..U+DFFF.
+        if (bytes[index] == 0xED and bytes[index + 1] >= 0xA0) {
+            try writer.writeAll(bytes[start..index]);
+            try writer.writeAll("\u{FFFD}");
+            index += 3;
+            start = index;
+            continue;
+        }
+        index += 1;
+    }
+    try writer.writeAll(bytes[start..]);
+}
+
+/// Formatting a thrown value reads its properties and can fail itself (an
+/// exhausted heap, a throwing getter). Report that without allocating instead
+/// of letting the CLI exit with a bare Zig error name; a stderr write failure
+/// still propagates.
+fn printUnformattable(stderr: *std.Io.Writer, ctx: *zjs.Context, err: anyerror) !void {
+    if (err == error.WriteFailed) return err;
+    if (ctx.hasException()) ctx.clearException();
+    if (err == error.OutOfMemory) {
+        try stderr.print("Uncaught exception (out of memory while formatting it)\n", .{});
+    } else {
+        try stderr.print("Uncaught exception (formatting it failed: {s})\n", .{@errorName(err)});
+    }
+    try stderr.flush();
+}
+
+/// Reports one rejection into a caller-owned stderr writer, so a reporting
+/// loop shares one buffer and flush.
 fn printUnhandledRejectionTo(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime, value: zjs.Value) !void {
     try stderr.print("Possibly unhandled promise rejection: ", .{});
-    if (value.as(.int)) |int_value| {
-        try stderr.print("{d}", .{int_value});
-    } else if (value.as(.boolean)) |bool_value| {
-        try stderr.print("{s}", .{if (bool_value) "true" else "false"});
-    } else if (value.is(.undefined_value)) {
-        try stderr.print("undefined", .{});
-    } else if (value.is(.null_value)) {
-        try stderr.print("null", .{});
-    } else if (value.isString()) {
-        try stderr.print("[object String]", .{});
-    } else if (value.is(.object)) {
-        if (try printExceptionValue(stderr, ctx, rt, value)) return;
+    try printThrownValue(stderr, ctx, rt, value);
+}
+
+/// Print a thrown or rejected value on its own line: an object through the
+/// error formatter (message and stack), a primitive as its ToString, and a
+/// Symbol as its descriptive string (ToString would throw).
+fn printThrownValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime, value: zjs.Value) !void {
+    const printed = printExceptionValue(stderr, ctx, rt, value) catch |err| return printUnformattable(stderr, ctx, err);
+    if (printed) return;
+    if (value.asSymbolAtom()) |atom_id| {
+        try stderr.writeAll("Symbol(");
+        try writeWtf8Lossy(stderr, rt.atoms.name(atom_id) orelse "");
+        try stderr.writeAll(")\n");
     } else {
-        try stderr.print("[object Object]", .{});
+        const text = ctx.toOwnedUtf8(value, rt.nativeAllocator()) catch |err| return printUnformattable(stderr, ctx, err);
+        defer rt.nativeAllocator().free(text);
+        try stderr.print("{s}\n", .{text});
     }
-    try stderr.print("\n", .{});
     try stderr.flush();
 }
 
@@ -665,12 +816,15 @@ fn printUnhandledRejectionTo(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs
 /// the process exits with 1.
 fn reportUnhandledRejections(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime) !void {
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    while (true) {
-        const exception = ctx.takePendingException();
-        try printUnhandledRejectionTo(stderr, ctx, rt, exception);
-        if (!ctx.hasUnhandledRejection()) break;
+    while (ctx.hasUnhandledRejection()) {
+        // An unwritable stderr leaves nowhere to report; the exit status
+        // still says the program failed.
+        printUnhandledRejectionTo(stderr, ctx, rt, ctx.takeUnhandledRejection()) catch |err| switch (err) {
+            error.WriteFailed => {},
+            else => |other| return other,
+        };
     }
 }
 
@@ -727,7 +881,7 @@ fn dumpRequested(
 fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.Runtime, runtime_options: RuntimeOptions) !void {
     if (runtime_options.gc_gate_settle) {
         try dumpGcDoomedState(writer, "endpoint", runtime);
-        zjs.core.runtime.settlePendingDestructionForGateStats(runtime);
+        zjs.core.runtime.auditDoomedStateForGateStats(runtime);
     }
     try dumpGcStats(writer, runtime.gcDetailedStats(), runtime.gc);
     try dumpAtomAuditStats(writer, runtime);
@@ -939,29 +1093,6 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *zjs.core.gc.Registry
     } else {
         try writer.writeAll("gc: conservative-only young unavailable (set ZJS_GC_VERIFY=1)\n");
     }
-    const cs = registry.incremental.stats;
-    try writeCounterLine(writer, &.{
-        .{ "gc: marking barrier calls ", cs.barrier_calls },
-    }, "\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: destroyed counted objects ", cs.doomed_destroyed_objects },
-    }, "\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: major cycles completed ", cs.cycles_completed },
-        .{ ", cycle STW last ", cs.last_cycle_stw_ns },
-        .{ " ns max ", cs.max_cycle_stw_ns },
-    }, " ns\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: cycle envelope measured ", cs.envelope_measured_cycles },
-        .{ ", skipped ", cs.envelope_skipped_cycles },
-        .{ ", max-P/T S ", cs.envelope_max_start_bytes },
-        .{ ", T ", cs.envelope_max_threshold_bytes },
-        .{ ", B ", cs.envelope_max_begin_bytes },
-        .{ ", P ", cs.envelope_max_peak_bytes },
-        .{ ", B/T-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes) },
-        .{ ", P/T-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes) },
-        .{ ", P/S-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes) },
-    }, "\n");
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const zjs.core.gc.Registry) !void {
@@ -1084,21 +1215,11 @@ fn writeDoomedStateLine(
 ) !void {
     try writer.writeAll("gc: ");
     try writer.writeAll(layer);
-    try writer.writeAll(" doomed_pending ");
-    try writer.writeAll(if (state.pending) "true" else "false");
     try writeCounterLine(writer, &.{
-        .{ ", doomed_buckets ", state.nonempty_buckets },
+        .{ " doomed_buckets ", state.nonempty_buckets },
         .{ ", doomed_headers ", state.bucket_headers },
-    }, "");
-    try writer.writeAll(", doomed_cursor ");
-    try writer.writeAll(if (state.cursor_present) "true" else "false");
-    try writeCounterLine(writer, &.{
         .{ ", doomed_blocks ", state.doomed_blocks },
-        .{ ", deferred_finalizers ", state.deferred_finalizers },
-    }, "");
-    try writer.writeAll(", active_finalizer ");
-    try writer.writeAll(if (state.active_finalizer) "true" else "false");
-    try writer.writeAll("\n");
+    }, "\n");
 }
 
 /// Pause percentiles, or an explicit "no pauses" line. Never print zeros for
@@ -1248,6 +1369,18 @@ fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
     profile.pending_op = zjs.OpcodeProfile.no_pending_op;
 }
 
+test "zjs decodes ill-formed UTF-8 arguments lossily" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const ok = "plain \u{e9}";
+    try std.testing.expectEqual(ok.ptr, (try utf8Lossy(allocator, ok)).ptr);
+    try std.testing.expectEqualStrings("a\u{FFFD}b", try utf8Lossy(allocator, "a\xffb"));
+    // A truncated sequence is one maximal subpart; an overlong one is two.
+    try std.testing.expectEqualStrings("\u{FFFD}", try utf8Lossy(allocator, "\xe4\xb8"));
+    try std.testing.expectEqualStrings("\u{FFFD}\u{FFFD}", try utf8Lossy(allocator, "\xc0\xaf"));
+}
+
 test "zjs args accept eval, file, and module jobs" {
     const eval_command = try parseArgs(&.{ "--profile-opcodes", "-e", "1" });
     try std.testing.expectEqualStrings("1", eval_command.source.?);
@@ -1274,6 +1407,13 @@ test "zjs args accept eval, file, and module jobs" {
     try std.testing.expectEqual(zjs.Context.EvalMode.module, module.mode);
     try std.testing.expectEqual(@as(usize, 2), module.script_args.len);
     try std.testing.expectEqualStrings("arg", module.script_args[1]);
+}
+
+test "zjs args accept a native stack budget" {
+    const command = try parseArgs(&.{ "--native-stack-size", "4096", "--stack-size=64", "input.js" });
+    try std.testing.expectEqual(@as(?usize, 4096 * 1024), command.options.native_stack_size);
+    try std.testing.expectEqual(@as(?usize, 64 * 1024), command.options.stack_size);
+    try std.testing.expect(clampToThreadStack(std.math.maxInt(usize) / 2) < std.math.maxInt(usize) / 2);
 }
 
 test "zjs args accept options" {
@@ -1321,6 +1461,49 @@ test "zjs args reject usage" {
     // The shadow observer went with the rc collector (2026-08-29); the flag it
     // gated must now be an error rather than a silently ignored word.
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
+}
+
+test "zjs size options take plain decimal kbytes and 0 means no limit" {
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--memory-limit=1_000", "input.js" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--native-stack-size=+5", "input.js" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--stack-size=-1", "input.js" }));
+    const command = try parseArgs(&.{ "--memory-limit=0", "--stack-size=0", "input.js" });
+    try std.testing.expectEqual(@as(?usize, null), command.options.memory_limit);
+    try std.testing.expectEqual(@as(?usize, std.math.maxInt(usize)), command.options.stack_size);
+}
+
+test "zjs usage errors say what was wrong" {
+    const Case = struct { argv: []const []const u8, what: []const u8, arg: []const u8 };
+    const cases = [_]Case{
+        .{ .argv = &.{ "--trace", "x.js" }, .what = "unknown option", .arg = "--trace" },
+        .{ .argv = &.{"--memory-limit"}, .what = "missing value", .arg = "--memory-limit" },
+        .{ .argv = &.{ "--stack-size=abc", "x.js" }, .what = "invalid kbytes value", .arg = "--stack-size=abc" },
+        .{ .argv = &.{ "--dump=1", "x.js" }, .what = "option takes no value", .arg = "--dump=1" },
+        .{ .argv = &.{"-m"}, .what = "missing script file after", .arg = "-m" },
+        .{ .argv = &.{}, .what = "missing script file", .arg = "" },
+    };
+    for (cases) |case| {
+        var problem: ?UsageProblem = null;
+        try std.testing.expectError(error.Usage, parseArgsExplained(case.argv, &problem));
+        try std.testing.expectEqualStrings(case.what, problem.?.what);
+        try std.testing.expectEqualStrings(case.arg, problem.?.arg);
+    }
+    var argv: [40][]const u8 = undefined;
+    for (0..17) |index| {
+        argv[index * 2] = "-I";
+        argv[index * 2 + 1] = "p.js";
+    }
+    argv[34] = "x.js";
+    var problem: ?UsageProblem = null;
+    try std.testing.expectError(error.Usage, parseArgsExplained(argv[0..35], &problem));
+    try std.testing.expectEqualStrings("too many include files (at most 16)", problem.?.what);
+}
+
+test "zjs lone surrogates reach stderr as U+FFFD" {
+    var buffer: [32]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeWtf8Lossy(&writer, "a\xed\xa0\x80b\xed\x9f\xbf");
+    try std.testing.expectEqualStrings("a\u{FFFD}b\xed\x9f\xbf", writer.buffered());
 }
 
 test "zjs loadSource keeps inline eval source as script" {
@@ -1376,9 +1559,6 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
             position += 1;
         }
     }
-    inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
-        if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 101);
-    }
     var samples = [_]u64{ 7, 2, 5 };
     registry.generation.minor_pause_samples = .{ .items = &samples, .capacity = samples.len };
     const old_verify = zjs.core.gc.forensics.verify;
@@ -1398,54 +1578,28 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
         \\gc: minor phase totals clear 26, roots 27, conservative 28, remembered 29, trace 30, sweep+destroy 31, promote 32, other 0 ns
         \\gc: minor young-at-start mean 2, max 34
         \\gc: conservative-only young unavailable (set ZJS_GC_VERIFY=1)
-        \\gc: marking barrier calls 101
-        \\gc: destroyed counted objects 112
-        \\gc: major cycles completed 102, cycle STW last 103 ns max 105 ns
-        \\gc: cycle envelope measured 106, skipped 107, max-P/T S 108, T 109, B 110, P 111, B/T-x1000000 1009175, P/T-x1000000 1018349, P/S-x1000000 1027778
         \\
     ;
     try std.testing.expectEqualStrings(expected, writer.buffered());
 }
 
-test "zjs doomed state line preserves mixed bools and counters" {
+test "zjs doomed state line preserves its counters" {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeDoomedStateLine(&writer, "endpoint", .{
-        .pending = true,
         .nonempty_buckets = 2,
         .bucket_headers = 7,
-        .cursor_present = false,
         .doomed_blocks = 11,
-        .deferred_finalizers = 13,
-        .active_finalizer = true,
     });
     try std.testing.expectEqualStrings(
-        "gc: endpoint doomed_pending true, doomed_buckets 2, doomed_headers 7, doomed_cursor false, doomed_blocks 11, deferred_finalizers 13, active_finalizer true\n",
-        writer.buffered(),
-    );
-    writer = std.Io.Writer.fixed(&buffer);
-    try writeDoomedStateLine(&writer, "settled", .{
-        .pending = false,
-        .nonempty_buckets = 0,
-        .bucket_headers = 0,
-        .cursor_present = true,
-        .doomed_blocks = 0,
-        .deferred_finalizers = 0,
-        .active_finalizer = false,
-    });
-    try std.testing.expectEqualStrings(
-        "gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor true, doomed_blocks 0, deferred_finalizers 0, active_finalizer false\n",
+        "gc: endpoint doomed_buckets 2, doomed_headers 7, doomed_blocks 11\n",
         writer.buffered(),
     );
     writer = std.Io.Writer.fixed(buffer[0..8]);
     try std.testing.expectError(error.WriteFailed, writeDoomedStateLine(&writer, "endpoint", .{
-        .pending = true,
         .nonempty_buckets = 1,
         .bucket_headers = 1,
-        .cursor_present = true,
         .doomed_blocks = 1,
-        .deferred_finalizers = 1,
-        .active_finalizer = true,
     }));
 }
 
@@ -1458,9 +1612,6 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
     }
     inline for (@typeInfo(@TypeOf(registry.block_heap.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.block_heap.stats, field.name) = @intCast(i + 101);
-    }
-    inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
-        if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 201);
     }
     registry.space_histogram.record(32);
     registry.space_histogram.record(128);

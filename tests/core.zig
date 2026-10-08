@@ -60,7 +60,7 @@ test "value boundary array length preserves conversion and OOM state across leav
                 try boxed.setOptionalValueSlot(rt, boxed.objectDataSlot(), try input.get(rt));
                 rt.setMemoryLimit(0);
                 defer rt.setMemoryLimit(null);
-                const native_before = rt.diagnostics.allocations.allocated_bytes;
+                const native_before = rt.allocation_diagnostics.allocated_bytes;
                 const epoch = rt.gc.collection_epoch;
                 var borrow = core.runtime.NoGcScope{};
                 borrow.activate(rt);
@@ -80,13 +80,13 @@ test "value boundary array length preserves conversion and OOM state across leav
                         try result;
                         try std.testing.expectEqual(length, object.arrayLength());
                     } else {
-                        try std.testing.expectError(error.InvalidLength, result);
+                        try std.testing.expectError(error.InvalidArrayLength, result);
                         try std.testing.expectEqual(@as(u32, 7), object.arrayLength());
                     }
                 }
                 try std.testing.expectEqual(cached, (try input.get(rt)).ropeBody().?.isLinearized());
                 try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
-                try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+                try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
             }
         }
     }
@@ -103,7 +103,7 @@ test "value boundary URI probe does not materialize rope input" {
     try input.set(rt, (try core.string.String.createAscii(rt, "%F0%9F")).value());
     try right.set(rt, (try core.string.String.createAscii(rt, "%98%80")).value());
     try input.set(rt, (try core.string.String.createRope(rt, try input.get(rt), try right.get(rt))).value());
-    const pair = (try core.uri.decodeSingleFourByteEscapeUnits(try input.get(rt))).?;
+    const pair = core.uri.decodeSingleFourByteEscapeUnits(try input.get(rt)).?;
     try std.testing.expectEqual(@as(u16, 0xd83d), pair.high);
     try std.testing.expectEqual(@as(u16, 0xde00), pair.low);
     try std.testing.expect(!(try input.get(rt)).ropeBody().?.isLinearized());
@@ -132,7 +132,7 @@ test "value boundary URI probe preserves grammar across rope leaves without allo
                 if (cached) try core.string.ensureFlat(rt, input.readOnly(), right);
                 rt.setMemoryLimit(0);
                 defer rt.setMemoryLimit(null);
-                rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+                rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
                 defer rt.setNativeBytesLimitForTest(null);
                 const epoch = rt.gc.collection_epoch;
                 var borrow = core.runtime.NoGcScope{};
@@ -140,15 +140,13 @@ test "value boundary URI probe preserves grammar across rope leaves without allo
                 defer borrow.deactivate();
                 const expected = core.uri.decodeSingleFourByteEscapeUnitsFromAscii(bytes);
                 const actual = core.uri.decodeSingleFourByteEscapeUnits(try input.get(rt));
-                if (expected) |pair| {
-                    try std.testing.expectEqualDeep(pair, try actual);
-                } else |err| try std.testing.expectError(err, actual);
+                try std.testing.expectEqualDeep(expected, actual);
                 try std.testing.expectEqual(cached, (try input.get(rt)).ropeBody().?.isLinearized());
                 try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
             }
         }
     }
-    try std.testing.expectEqual(@as(?core.uri.FourByteEscapeUnits, null), try core.uri.decodeSingleFourByteEscapeUnits(core.JSValue.int32(12)));
+    try std.testing.expectEqual(@as(?core.uri.FourByteEscapeUnits, null), core.uri.decodeSingleFourByteEscapeUnits(core.JSValue.int32(12)));
 }
 
 test "value boundary truthiness reads rope length without materialization" {
@@ -169,7 +167,7 @@ test "value boundary truthiness reads rope length without materialization" {
                 if (mode == 2) try core.string.ensureFlat(rt, input.readOnly(), temporary);
             }
             rt.setMemoryLimit(0);
-            rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+            rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
             defer rt.setNativeBytesLimitForTest(null);
             const epoch = rt.gc.collection_epoch;
             var borrow = core.runtime.NoGcScope{};
@@ -228,7 +226,7 @@ test "value boundary number parsing preserves prefixes and whitespace across lea
             rt.setMemoryLimit(0);
             defer rt.setMemoryLimit(null);
             const epoch = rt.gc.collection_epoch;
-            const native_before = rt.diagnostics.allocations.allocated_bytes;
+            const native_before = rt.allocation_diagnostics.allocated_bytes;
             const numbers = [_]f64{
                 try core.number.parseIntValue(rt, try input.get(rt), core.JSValue.int32(case.radix)),
                 try core.number.parseFloatValue(rt, try input.get(rt)),
@@ -240,10 +238,10 @@ test "value boundary number parsing preserves prefixes and whitespace across lea
             }
             try std.testing.expect(!(try input.get(rt)).ropeBody().?.isLinearized());
             try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
-            try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+            try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
         }
     }
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     const before = rt.active_value_roots;
     try std.testing.expectError(error.OutOfMemory, core.number.parseIntValue(rt, try input.get(rt), null));
@@ -277,7 +275,7 @@ test "value boundary collection prefix lookup does not materialize rope keys" {
                 try core.collection.appendStrongEntryOwned(rt, object, .{ .key = try key.get(rt), .value = core.JSValue.int32(42) });
                 try std.testing.expectEqual(indexed, object.collectionBucketHeads().len != 0);
                 rt.setMemoryLimit(0);
-                rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+                rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
                 defer rt.setNativeBytesLimitForTest(null);
                 var borrow = core.runtime.NoGcScope{};
                 borrow.activate(rt);
@@ -339,7 +337,7 @@ test "json boundary quoting unwinds native output allocation failures" {
         const rope = try core.string.String.createRope(rt, try left.get(rt), try right.get(rt));
         try input.set(rt, rope.value());
         const epoch = rt.gc.collection_epoch;
-        const native_before = rt.diagnostics.allocations.allocated_bytes;
+        const native_before = rt.allocation_diagnostics.allocated_bytes;
         rt.setMemoryLimit(0);
         defer rt.setMemoryLimit(null);
         var bytes = std.ArrayList(u8).empty;
@@ -359,7 +357,7 @@ test "json boundary quoting unwinds native output allocation failures" {
             failures += 1;
         }
         bytes.clearAndFree(rt.nativeAllocator());
-        try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
         try std.testing.expect(!rope.isLinearized());
         try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
         try std.testing.expect(rt.active_no_gc_scope == null);
@@ -390,14 +388,14 @@ test "no-GC scope nesting native allocation and error unwind" {
     try std.testing.expect(rt.active_no_gc_scope == &outer);
     // The prohibition belongs to one Runtime, not to the owner thread.
     const other_epoch = other.gc.collection_epoch;
-    _ = try other.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try other.collectFull(null, .declared_only);
     try std.testing.expect(other.gc.collection_epoch > other_epoch);
     outer.deactivate();
     try std.testing.expect(rt.active_no_gc_scope == null);
     outer.activate(rt);
     outer.deactivate();
     const epoch = rt.gc.collection_epoch;
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.gc.collection_epoch > epoch);
 }
 
@@ -412,13 +410,11 @@ test "no-GC scope lifecycle and collection entry guards" {
     defer inner.deactivate();
     const mode = if (std.c.getenv("ZJS_NO_GC_INJECT")) |raw| std.fmt.parseInt(u8, std.mem.span(raw), 10) catch 0 else 0;
     switch (mode) {
-        1 => _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only),
+        1 => _ = try rt.collectFull(null, .declared_only),
         2 => _ = try rt.pollGC(null, .safepoint),
         3 => _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only),
         4 => _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only),
         5 => _ = try @import("../src/core/gc_driver.zig").continuePoll(rt, null, .safepoint),
-        6 => _ = core.gc_trace_stw.destroyDoomedSlice(rt, 0),
-        7 => core.gc_trace_stw.finishPendingDestruction(rt),
         8 => rt.destroy(),
         9 => outer.deactivate(),
         10 => {
@@ -531,11 +527,11 @@ test "exact value roots protect handle transfer and failed transfer keeps owners
     try handle.takeInto(output);
     try std.testing.expect(handle.slot == null);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(header));
     try std.testing.expect((try output.get(rt)).asStringBodyRaw().?.eqlBytes("exact-root-transfer"));
     try output.set(rt, core.JSValue.undefinedValue());
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(!rt.gc.containsHeader(header));
 }
 
@@ -551,7 +547,7 @@ test "exact value roots register without allocation and unwind early errors" {
             return error.ExpectedEarlyExit;
         }
     };
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.ExpectedEarlyExit, Fixture.fail(rt));
     try std.testing.expect(rt.active_value_roots == null);
@@ -581,7 +577,7 @@ test "exact value roots expose actual slots for collector repair" {
     };
     var repair = Repair{};
     var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &repair, .visit_value = Repair.value, .visit_object = Repair.object };
-    try rt.traceValueRootFrameChain(rt.active_value_roots, &visitor);
+    try rt.traceValueRootFrames(rt.active_value_roots, &visitor);
     try std.testing.expectEqual(@as(usize, 1), repair.visits);
     try std.testing.expectEqual(@as(?i32, 20), (try reference.get(rt)).as(.int));
 }
@@ -622,11 +618,11 @@ test "exact value roots reject mutator writes and activation during trace and co
     try rt.registerRootProvider(provider);
     defer rt.unregisterRootProvider(provider);
     var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &probe, .visit_value = Probe.value, .visit_object = Probe.object };
-    try std.testing.expect(!rt.gc_running);
+    try std.testing.expect(!rt.gc.hot.collecting);
     try rt.roots.traceProviders(&visitor);
     try std.testing.expectEqual(@as(usize, 1), probe.writes_denied);
     try std.testing.expectEqual(@as(usize, 1), probe.activations_denied);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(probe.writes_denied > 0);
     try std.testing.expectEqual(probe.writes_denied, probe.activations_denied);
     try std.testing.expectEqual(@as(?i32, 7), (try reference.get(rt)).as(.int));
@@ -695,7 +691,7 @@ test "root tracing also freezes direct payload mark callbacks" {
     var payload: core.class.Payload = &probe;
     var visitor = core.class.PayloadVisitor{ .context = &probe };
     const object = try core.Object.createPlainObject(rt, null);
-    try std.testing.expect(!rt.gc_running);
+    try std.testing.expect(!rt.gc.hot.collecting);
     try std.testing.expect(rt.classes.markPayload(binding.id, rt, object, &payload, &visitor));
     try std.testing.expect(probe.denied);
     try std.testing.expect(!rt.roots.isTracing());
@@ -737,7 +733,7 @@ test "root tracing lifecycle guards" {
                 },
                 6 => self.frame.deactivate(self.rt),
                 7 => self.rt.destroy(),
-                8 => _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch return error.OutOfMemory,
+                8 => _ = self.rt.collectFull(null, .declared_only) catch return error.OutOfMemory,
                 9 => _ = self.rt.pollGC(null, .safepoint) catch return error.OutOfMemory,
                 10 => _ = core.gc_trace_stw.collectMinor(self.rt, null, .declared_only) catch return error.OutOfMemory,
                 else => {},
@@ -797,7 +793,7 @@ test "readonly roots retain nursery aliases before writable roots move" {
         if (minor) {
             _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
         } else {
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
         }
         try std.testing.expectEqual(borrowed[0].bits, (try writable.get(rt)).bits);
         try std.testing.expect(rt.gc.containsHeader(object.gcHeader()));
@@ -932,7 +928,7 @@ test "root protocol classifies cell carriers as stable references" {
         .visit_value = Probe.value,
         .visit_object = Probe.object,
     };
-    try rt.traceValueRootFrameChain(&frame, &visitor);
+    try rt.traceValueRootFrames(&frame, &visitor);
     try std.testing.expectEqual(@as(usize, 2), probe.stable);
 }
 
@@ -970,14 +966,14 @@ test "nursery evacuation rollback restores roots after provider failure" {
     const provider = core.runtime.RootProvider{ .context = &probe, .trace = Probe.trace };
     try rt.registerRootProvider(provider);
     defer rt.unregisterRootProvider(provider);
-    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only));
+    try std.testing.expectError(error.OutOfMemory, rt.collectFull(null, .declared_only));
     try std.testing.expect(probe.saw_move);
     try std.testing.expectEqual(before, (try root.get(rt)).bits);
     try std.testing.expect(!core.gc.headerForwarded(object.gcHeader()));
     try std.testing.expectEqual(@as(?i32, 17), (try object.getProperty(core.atom.ids.name)).as(.int));
     try std.testing.expectEqual(before, (try object.getProperty(core.atom.ids.value)).bits);
     try rt.gc.verifyHeapAccounting(rt);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     const moved = try root.get(rt);
     try std.testing.expect(moved.bits != before);
     try std.testing.expectEqual(moved.bits, probe.alias.bits);
@@ -1003,21 +999,65 @@ test "nursery weak identity follows live target and clears after death" {
         if (minor) {
             _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
         } else {
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
         }
         const moved = try root.get(rt);
         try std.testing.expect(@intFromPtr(moved.cycleMarkHeader().?) != before);
         try std.testing.expectEqual(moved.bits, weak.get().bits);
         try std.testing.expectEqual(identity, weak.slot.?.identity.?);
         try std.testing.expectEqual(identity, try rt.registerWeakObjectIdentity(core.Object.fromHeader(moved.cycleMarkHeader().?)));
-        try std.testing.expect(!rt.weak_object_ids.contains(before));
+        try std.testing.expect(!rt.weak.object_ids.contains(before));
         try root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         try std.testing.expect(!weak.isAlive());
         try std.testing.expect(weak.get().is(.undefined_value));
-        try std.testing.expectEqual(@as(usize, 0), rt.weak_object_ids.count());
-        try std.testing.expectEqual(@as(usize, 0), rt.weak_id_objects.count());
+        try std.testing.expectEqual(@as(usize, 0), rt.weak.object_ids.count());
+        try std.testing.expectEqual(@as(usize, 0), rt.weak.id_objects.count());
     }
+}
+
+test "weak handle callbacks run after the collection and may release handles" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const Probe = struct {
+        handles: [4]core.runtime.WeakPersistentValue = .{ .{}, .{}, .{}, .{} },
+        fired: [4]usize = .{ 0, 0, 0, 0 },
+        collecting_seen: bool = false,
+        allocated: bool = false,
+    };
+    const Callback = struct {
+        var probe: Probe = .{};
+
+        fn cleared(runtime: *core.JSRuntime, context: ?*anyopaque) void {
+            const index = @intFromPtr(context.?) - 1;
+            probe.fired[index] += 1;
+            if (runtime.collectorBusy() or runtime.roots.isTracing()) probe.collecting_seen = true;
+            // Release its own handle and, from the first callback, the handle
+            // whose callback is still queued: that callback must not run.
+            probe.handles[index].deinit();
+            const other = index ^ 1;
+            probe.handles[other].deinit();
+            // Allocation may start another collection; it must not nest.
+            if (core.Object.createPlainObject(runtime, null)) |_| {
+                probe.allocated = true;
+            } else |_| {}
+            _ = runtime.collectFull(null, .declared_only) catch {};
+        }
+    };
+    Callback.probe = .{};
+    for (&Callback.probe.handles, 0..) |*handle, index| {
+        const object = try core.Object.createPlainObject(rt, null);
+        handle.* = try core.runtime.WeakPersistentValue.init(rt, object.value(), Callback.cleared, @ptrFromInt(index + 1));
+    }
+    _ = try rt.collectFull(null, .declared_only);
+    const probe = &Callback.probe;
+    try std.testing.expect(!probe.collecting_seen);
+    try std.testing.expect(probe.allocated);
+    // Each pair fires exactly one callback; its partner is cancelled.
+    try std.testing.expectEqual(@as(usize, 1), probe.fired[0] + probe.fired[1]);
+    try std.testing.expectEqual(@as(usize, 1), probe.fired[2] + probe.fired[3]);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.weak_root_slots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.weak_notify_queue.items.len);
 }
 
 test "nursery ephemeron values repair their actual table slots" {
@@ -1038,14 +1078,14 @@ test "nursery ephemeron values repair their actual table slots" {
         const before = (try value_root.get(rt)).bits;
         try engine.exec.collection_ops.setWeakMapEntry(rt, table, try key_root.get(rt), try value_root.get(rt));
         if (!strong_value) try value_root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         const stored = table.weakCollectionEntries()[0].value;
         try std.testing.expect(stored.bits != before);
         try std.testing.expect(rt.gc.containsHeader(stored.cycleMarkHeader().?));
         if (strong_value) try std.testing.expectEqual((try value_root.get(rt)).bits, stored.bits);
         try key_root.set(rt, core.JSValue.undefinedValue());
         try value_root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        _ = try rt.collectFull(null, .declared_only);
         try std.testing.expectEqual(@as(usize, 0), table.weakCollectionEntries().len);
         try std.testing.expect(!rt.gc.containsHeader(stored.cycleMarkHeader().?));
     }
@@ -1077,7 +1117,7 @@ test "nursery evacuation keeps Map object keys findable through the hash index" 
         if (minor) {
             _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
         } else {
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            _ = try rt.collectFull(null, .declared_only);
         }
         for (0..key_count) |i| {
             try std.testing.expect(values[i].bits != before[i]);
@@ -1089,42 +1129,6 @@ test "nursery evacuation keeps Map object keys findable through the hash index" 
         try std.testing.expect(core.collection.findStrongEntry(map, values[0]) == null);
         try core.collection.appendStrongEntryOwned(rt, map, .{ .key = values[0], .value = core.JSValue.int32(99) });
         try std.testing.expectEqual(@as(usize, key_count), core.collection.strongSize(map));
-    }
-}
-
-test "nursery evacuation rebinds the iterator next side table" {
-    for ([_]bool{ false, true }) |minor| {
-        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-        defer rt.destroy();
-        rt.gc.nursery.enabled = true;
-        var values = [_]core.JSValue{core.JSValue.undefinedValue()};
-        const live: []core.JSValue = &values;
-        const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
-        var frame = core.runtime.ValueRootFrame{ .slices = &slices };
-        frame.activate(rt);
-        defer frame.deactivate(rt);
-        const iterator = try core.Object.createPlainObject(rt, null);
-        values[0] = iterator.value();
-        const before = values[0].bits;
-        // The cached method is reachable only through the side table.
-        const next = try core.Object.createPlainObject(rt, null);
-        (try iterator.cachedIteratorNextSlot(rt)).* = next.value();
-        const next_header = next.gcHeader();
-        if (minor) {
-            _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-        } else {
-            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
-        }
-        try std.testing.expect(values[0].bits != before);
-        const moved = core.Object.fromHeader(values[0].cycleMarkHeader().?);
-        const cached = moved.cachedIteratorNext(rt) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(cached.cycleMarkHeader().? != next_header);
-        try std.testing.expect(rt.gc.containsHeader(cached.cycleMarkHeader().?));
-        try std.testing.expectEqual(@as(usize, 1), rt.cached_iterator_next_entries.items.len);
-        // Death through the moved object removes the entry.
-        values[0] = core.JSValue.undefinedValue();
-        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
-        try std.testing.expectEqual(@as(usize, 0), rt.cached_iterator_next_entries.items.len);
     }
 }
 
@@ -1144,7 +1148,7 @@ test "exact value roots lifecycle guards" {
         if (std.mem.eql(u8, mode, "1")) outer.deactivate();
         if (std.mem.eql(u8, mode, "2")) rt.destroy();
         if (std.mem.eql(u8, mode, "3")) {
-            rt.gc_running = true;
+            rt.gc.hot.collecting = true;
             inner.deactivate();
         }
     }
@@ -1220,17 +1224,6 @@ fn publishEmptyModule(
     return publishFreshModule(registry, module_name, &pending);
 }
 
-fn liveRealmCount(rt: *core.JSRuntime) usize {
-    var count: usize = 0;
-    var current = rt.firstContext();
-    while (current) |ctx| : (current = ctx.runtime_next) count += 1;
-    return count;
-}
-
-fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.BacktraceLocation {
-    return .{ .line_num = @intCast(pc), .col_num = @intCast(pc + 10) };
-}
-
 const appendWeakCollectionEntry = helpers.appendWeakCollectionEntry;
 
 fn appendFinalizationRegistryCell(
@@ -1241,20 +1234,6 @@ fn appendFinalizationRegistryCell(
     unregister_token: core.JSValue,
 ) !void {
     try registry.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
-}
-
-/// What the first registerBorrowedReferenceHolder allocates, measured on a
-/// scratch runtime so the OOM-injection tests below follow the holder list's
-/// growth policy instead of restating it.
-fn borrowedHolderInitialAllocationBytes() usize {
-    const probe = core.JSRuntime.create(std.testing.allocator, .{}) catch unreachable;
-    defer probe.destroy();
-    const holder = core.Object.create(probe, core.class.ids.object, null) catch unreachable;
-    const before = probe.memory.diagnostics.allocations.allocated_bytes;
-    probe.registerBorrowedReferenceHolder(holder) catch unreachable;
-    const bytes = probe.memory.diagnostics.allocations.allocated_bytes - before;
-    probe.unregisterBorrowedReferenceHolder(holder);
-    return bytes;
 }
 
 /// TGC S2-i: force a full collection before every allocation, the shape
@@ -1268,545 +1247,9 @@ const TailBufferForceGcProbe = struct {
         _ = size;
         const self: *TailBufferForceGcProbe = @ptrCast(@alignCast(ctx.?));
         self.fired += 1;
-        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
+        _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
-
-fn tailBufferText(rt: *core.JSRuntime, allocator: std.mem.Allocator, value: core.JSValue) ![]u8 {
-    _ = rt;
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-    var index: usize = 0;
-    const len = core.string.stringValueLen(value);
-    while (index < len) : (index += 1) {
-        const unit = core.string.stringValueCodeUnitAt(value, index).?;
-        try out.append(allocator, @intCast(unit & 0xff));
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-var finalizer_calls: usize = 0;
-var payload_finalizer_calls: usize = 0;
-var payload_mark_calls: usize = 0;
-var reentrant_collection_clear_target: ?*core.Object = null;
-var reentrant_collection_clear_calls: usize = 0;
-var reentrant_array_delete_target: ?*core.Object = null;
-var reentrant_array_delete_calls: usize = 0;
-var reentrant_property_delete_target: ?*core.Object = null;
-var reentrant_property_delete_key: core.atom.Atom = core.atom.null_atom;
-var reentrant_property_delete_calls: usize = 0;
-var reentrant_regexp_last_index_target: ?*core.Object = null;
-var reentrant_regexp_last_index_calls: usize = 0;
-var reentrant_mapped_arguments_target: ?*core.Object = null;
-var reentrant_mapped_arguments_key: core.atom.Atom = core.atom.null_atom;
-var reentrant_mapped_arguments_calls: usize = 0;
-var reentrant_cached_iterator_next_target: ?*core.Object = null;
-var reentrant_cached_iterator_next_calls: usize = 0;
-var reentrant_exception_slot_target: ?*core.exception.ExceptionSlot = null;
-var reentrant_exception_slot_calls: usize = 0;
-var reentrant_array_iterator_target: ?*core.Object = null;
-var reentrant_array_iterator_calls: usize = 0;
-
-fn countFinalizer() void {
-    finalizer_calls += 1;
-}
-
-fn countNativeCleanup(ptr: *anyopaque) void {
-    const count: *usize = @ptrCast(@alignCast(ptr));
-    count.* += 1;
-}
-
-fn countPayloadFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-}
-
-fn countPayloadMark(
-    _: *anyopaque,
-    _: *anyopaque,
-    payload: *core.class.Payload,
-    visitor: *core.class.PayloadVisitor,
-) void {
-    payload_mark_calls += 1;
-    visitor.value(@ptrCast(payload));
-}
-
-fn countVisitedValue(context: *anyopaque, _: *anyopaque) void {
-    const count: *usize = @ptrCast(@alignCast(context));
-    count.* += 1;
-}
-
-const TestExternalPayload = struct {
-    value: core.JSValue = core.JSValue.undefinedValue(),
-};
-
-const TestExternalObjectPayload = struct {
-    object: ?*core.Object = null,
-};
-
-const ClassConstructionGrowthProbe = struct {
-    rt: *core.JSRuntime,
-    target_id: core.ClassId,
-    growth_id: core.ClassId,
-    fired: bool = false,
-    register_failed: bool = false,
-    target_record_after_growth: usize = 0,
-
-    fn trigger(raw: ?*anyopaque, _: usize) void {
-        const self: *@This() = @ptrCast(@alignCast(raw.?));
-        if (self.fired) return;
-        self.fired = true;
-        self.rt.registerClass(.{ .class_name = "GrowthDuringConstruction" }) catch {
-            self.register_failed = true;
-            return;
-        };
-        self.target_record_after_growth = @intFromPtr(self.rt.classes.recordPtr(self.target_id).?);
-    }
-};
-
-fn accountedPlainObjectBytes() usize {
-    const prefix = core.gc.metadata_prefix_size;
-    return core.gc_block_heap.accountedBodyBytesForRequest(
-        prefix + core.Object.objectBodyBytes(core.class.ids.object, false),
-        prefix,
-    ).?;
-}
-
-fn emptyRootShapeAllocationBytes() usize {
-    return @sizeOf(core.shape.Shape) +
-        @sizeOf(u32) * core.shape.initial_hash_size +
-        @sizeOf(core.shape.Property) * core.shape.initial_prop_size;
-}
-
-const ObjectConstructionOrderProbe = struct {
-    rt: *core.JSRuntime,
-    prototype: *core.Object,
-    live_shape_count_before: usize,
-    shape_hash_count_before: usize,
-    heap_live_bytes_before: usize,
-    object_boundary_calls: usize = 0,
-    shape_owned_at_object_boundary: bool = false,
-
-    fn trigger(raw: ?*anyopaque, size: usize) void {
-        const self: *@This() = @ptrCast(@alignCast(raw.?));
-        // The trigger receives the bytes about to be charged: for a block
-        // Object that is its class-rounded physical body capacity.
-        if (size != accountedPlainObjectBytes()) return;
-        self.object_boundary_calls += 1;
-        // The Shape is fully initialized, hash-visible, and published before
-        // the reentrant object-allocation boundary. The boundary roots it
-        // until the Object takes ownership. Under the tracer the prototype
-        // ownership is the Shape's edge and leaves no count for a probe to
-        // read, so the retain is only observable in the build that counts.
-        const proto_owned_by_shape = true;
-        const shape_reserved = self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
-            proto_owned_by_shape;
-        const shape_published = self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
-            self.rt.gcDetailedStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes();
-        self.shape_owned_at_object_boundary = shape_reserved and shape_published;
-    }
-};
-
-const InlineClassFinalizerReentry = struct {
-    var target_id: core.ClassId = core.class.invalid_class_id;
-    var growth_id: core.ClassId = core.class.invalid_class_id;
-    var property_atom: core.Atom = core.atom.null_atom;
-    var calls: usize = 0;
-    var register_failed: bool = false;
-    var definition_visible_during_callback: bool = false;
-    var property_storage_was_stripped: bool = false;
-    var prototype_was_stripped: bool = false;
-    var own_property_was_stripped: bool = false;
-    var property_read_was_undefined: bool = false;
-    var property_read_failed: bool = false;
-    var owner_thread_observed: bool = false;
-
-    fn reset() void {
-        target_id = core.class.invalid_class_id;
-        growth_id = core.class.invalid_class_id;
-        property_atom = core.atom.null_atom;
-        calls = 0;
-        register_failed = false;
-        definition_visible_during_callback = false;
-        property_storage_was_stripped = false;
-        prototype_was_stripped = false;
-        own_property_was_stripped = false;
-        property_read_was_undefined = false;
-        property_read_failed = false;
-        owner_thread_observed = false;
-    }
-
-    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
-        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
-        calls += 1;
-        owner_thread_observed = rt.isOwnerThread() and rt.classes.isOwnerThread();
-        property_storage_was_stripped = !object.hasPropertyStorage();
-        prototype_was_stripped = object.getPrototype() == null;
-        own_property_was_stripped = !object.hasOwnProperty(property_atom);
-        const property_value = object.getProperty(property_atom) catch blk: {
-            property_read_failed = true;
-            break :blk core.JSValue.undefinedValue();
-        };
-        property_read_was_undefined = property_value.is(.undefined_value);
-        definition_visible_during_callback = rt.classes.isRegistered(target_id);
-        rt.registerClass(.{ .class_name = "GrowthDuringInlineFinalizer" }) catch {
-            register_failed = true;
-        };
-        payload.* = null;
-    }
-};
-
-const InlineObjectLifecycleProbe = struct {
-    var expected_object: ?*core.Object = null;
-    var expected_heap_live_bytes: usize = 0;
-    var expected_allocated_bytes: usize = 0;
-    var calls: usize = 0;
-    var identity_matches: bool = false;
-    var owns_object: bool = false;
-    var heap_live_bytes: usize = 0;
-    var allocated_bytes: usize = 0;
-
-    fn reset() void {
-        expected_object = null;
-        expected_heap_live_bytes = 0;
-        expected_allocated_bytes = 0;
-        calls = 0;
-        identity_matches = false;
-        owns_object = false;
-        heap_live_bytes = 0;
-        allocated_bytes = 0;
-    }
-
-    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
-        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
-        calls += 1;
-        identity_matches = object == expected_object;
-        owns_object = identity_matches and rt.ownsObject(object);
-        heap_live_bytes = rt.gcDetailedStats().heap_live_bytes;
-        allocated_bytes = rt.diagnostics.allocations.allocated_bytes;
-        payload.* = null;
-    }
-};
-
-const SideAuthorityDestroyProbe = struct {
-    const object_count = 7;
-
-    var expected_objects: [object_count]?*core.Object = @splat(null);
-    var calls: [object_count]usize = @splat(0);
-    var unknown_calls: usize = 0;
-
-    fn reset() void {
-        expected_objects = @splat(null);
-        calls = @splat(0);
-        unknown_calls = 0;
-    }
-
-    fn finalize(_: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
-        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
-        for (expected_objects, 0..) |expected, index| {
-            if (expected == object) {
-                calls[index] += 1;
-                payload.* = null;
-                return;
-            }
-        }
-        unknown_calls += 1;
-        payload.* = null;
-    }
-};
-
-fn registerStandaloneInlineObjectTestClass(
-    rt: *core.JSRuntime,
-    class_name: []const u8,
-    finalizer: ?core.class.PayloadFinalizer,
-) !core.ClassId {
-    const binding = try rt.registerClass(.{
-        .class_name = class_name,
-        .inline_payload_size = 32,
-        .inline_payload_align = 8,
-        .payload_finalizer = finalizer,
-    });
-    return binding.id;
-}
-
-/// Path proof shared by the non-block Object fixtures below. A dynamic inline
-/// payload forces `Object.createInternal` through its raw aligned allocation,
-/// and the two counters prove the resulting header is both published and
-/// enumerated exactly once by the collector rather than merely having the
-/// expected allocation flag by accident.
-fn expectPublishedStandaloneInlineObject(rt: *core.JSRuntime, object: *core.Object) !void {
-    const header = object.gcHeader();
-    try std.testing.expectEqual(core.gc.GcKind.object, header.metaConst().flags.kind);
-    try std.testing.expect(header.metaConst().alloc_info.standalone);
-    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(header));
-    try std.testing.expect(header.metaConst().alloc_info.heap_accounted);
-    try std.testing.expect(rt.gc.address_registry.by_header.contains(@intFromPtr(header)));
-    try std.testing.expect(rt.gc.nonblock_objects.?.items.items.len >= 1);
-
-    var list_matches: usize = 0;
-    var list_cursor = rt.gc.lists.objects.sentinel.next_non_object;
-    while (list_cursor) |candidate| {
-        if (candidate == &rt.gc.lists.objects.sentinel) break;
-        if (candidate == header) list_matches += 1;
-        list_cursor = candidate.nextNonObject();
-    }
-    try std.testing.expectEqual(@as(usize, 0), list_matches);
-
-    var matching_headers: usize = 0;
-    var published_nonblock_objects: usize = 0;
-    var iterator = rt.gc.objectIterator(.all);
-    while (iterator.next()) |candidate| {
-        if (candidate.metaConst().flags.kind == .object and
-            !core.gc.Registry.isBlockCellHeader(candidate))
-        {
-            published_nonblock_objects += 1;
-        }
-        if (candidate == header) matching_headers += 1;
-    }
-    try std.testing.expect(published_nonblock_objects >= 1);
-    try std.testing.expectEqual(@as(usize, 1), matching_headers);
-}
-
-fn countYoungHeader(rt: *core.JSRuntime, expected: *core.gc.Header) usize {
-    var matches: usize = 0;
-    var iterator = rt.gc.objectIterator(.young);
-    while (iterator.next()) |candidate| {
-        if (candidate == expected) matches += 1;
-    }
-    return matches;
-}
-
-const ExternalObjectLifecyclePayload = struct {
-    event: u8,
-};
-
-const ExternalObjectLifecycleProbe = struct {
-    const max_events = 2;
-
-    var expected_objects: [max_events]?*core.Object = @splat(null);
-    var calls: usize = 0;
-    var events: [max_events]u8 = @splat(0xff);
-    var identity_matches: [max_events]bool = @splat(false);
-    var owns_objects: [max_events]bool = @splat(false);
-    var allocated_bytes: [max_events]usize = @splat(0);
-
-    fn reset() void {
-        expected_objects = @splat(null);
-        calls = 0;
-        events = @splat(0xff);
-        identity_matches = @splat(false);
-        owns_objects = @splat(false);
-        allocated_bytes = @splat(0);
-    }
-
-    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
-        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-        const typed: *ExternalObjectLifecyclePayload = @ptrCast(@alignCast(payload.*.?));
-        const event: usize = typed.event;
-        const index = calls;
-        calls += 1;
-        if (index < max_events) {
-            events[index] = typed.event;
-            identity_matches[index] = if (event < max_events and expected_objects[event] != null)
-                @intFromPtr(object_ptr) == @intFromPtr(expected_objects[event].?)
-            else
-                false;
-            owns_objects[index] = identity_matches[index] and
-                rt.ownsObject(@ptrCast(@alignCast(object_ptr)));
-            allocated_bytes[index] = rt.diagnostics.allocations.allocated_bytes;
-        }
-        rt.destroyNative(ExternalObjectLifecyclePayload, typed);
-        payload.* = null;
-    }
-};
-
-const ExternalClassFinalizerReentry = struct {
-    var target_id: core.ClassId = core.class.invalid_class_id;
-    var expected_object: ?*core.Object = null;
-    var calls: usize = 0;
-    var identity_matches: bool = false;
-    var owns_object: bool = false;
-    var definition_visible_during_callback: bool = false;
-
-    fn reset() void {
-        target_id = core.class.invalid_class_id;
-        expected_object = null;
-        calls = 0;
-        identity_matches = false;
-        owns_object = false;
-        definition_visible_during_callback = false;
-    }
-
-    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
-        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
-        calls += 1;
-        identity_matches = object == expected_object;
-        owns_object = identity_matches and rt.ownsObject(object);
-        definition_visible_during_callback =
-            rt.classes.isRegistered(target_id);
-
-        const ptr = payload.* orelse return;
-        const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
-        rt.destroyNative(TestExternalPayload, typed);
-        payload.* = null;
-    }
-};
-
-fn createExternalObjectLifecycleProbe(
-    rt: *core.JSRuntime,
-    class_id: core.ClassId,
-    event: u8,
-) !*core.Object {
-    const object = try core.Object.create(rt, class_id, null);
-    const payload = try rt.createNative(ExternalObjectLifecyclePayload);
-    payload.* = .{ .event = event };
-    object.installExternalClassPayload(rt, @ptrCast(payload));
-    return object;
-}
-
-fn finalizeTestExternalPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    const ptr = payload.* orelse return;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
-    rt.destroyNative(TestExternalPayload, typed);
-    payload.* = null;
-}
-
-fn finalizeTestExternalObjectPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    const ptr = payload.* orelse return;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
-    rt.destroyNative(TestExternalObjectPayload, typed);
-    payload.* = null;
-}
-
-fn reentrantCollectionClearFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_collection_clear_calls != 0) return;
-    reentrant_collection_clear_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const map = reentrant_collection_clear_target orelse return;
-    _ = engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{}) catch return;
-}
-
-fn reentrantArrayDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_array_delete_calls != 0) return;
-    reentrant_array_delete_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const array = reentrant_array_delete_target orelse return;
-    _ = array.deleteProperty(rt, core.Atom.taggedInt(0));
-}
-
-fn reentrantPropertyDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_property_delete_calls != 0) return;
-    reentrant_property_delete_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const object = reentrant_property_delete_target orelse return;
-    _ = object.deleteProperty(rt, reentrant_property_delete_key);
-}
-
-fn reentrantRegExpLastIndexFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_regexp_last_index_calls != 0) return;
-    reentrant_regexp_last_index_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const regexp = reentrant_regexp_last_index_target orelse return;
-    regexp.setProperty(rt, core.atom.ids.lastIndex, core.JSValue.int32(99)) catch {};
-}
-
-fn reentrantMappedArgumentsFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_mapped_arguments_calls != 0) return;
-    reentrant_mapped_arguments_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const arguments = reentrant_mapped_arguments_target orelse return;
-    arguments.defineOwnProperty(
-        rt,
-        reentrant_mapped_arguments_key,
-        core.Descriptor.data(core.JSValue.int32(99), .all),
-    ) catch {};
-}
-
-fn reentrantCachedIteratorNextFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_cached_iterator_next_calls != 0) return;
-    reentrant_cached_iterator_next_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const object = reentrant_cached_iterator_next_target orelse return;
-    object.clearCachedIteratorNext(rt);
-}
-
-fn reentrantExceptionSlotFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_exception_slot_calls != 0) return;
-    reentrant_exception_slot_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const slot = reentrant_exception_slot_target orelse return;
-    slot.clear(rt);
-}
-
-fn reentrantArrayIteratorFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
-    payload_finalizer_calls += 1;
-    payload.* = null;
-    if (reentrant_array_iterator_calls != 0) return;
-    reentrant_array_iterator_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const iterator = reentrant_array_iterator_target orelse return;
-    _ = engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{}) catch return;
-}
-
-fn markTestExternalPayload(
-    _: *anyopaque,
-    _: *anyopaque,
-    payload: *core.class.Payload,
-    visitor: *core.class.PayloadVisitor,
-) void {
-    payload_mark_calls += 1;
-    const ptr = payload.* orelse return;
-    const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
-    visitor.value(@ptrCast(&typed.value));
-}
-
-fn markTestExternalObjectPayload(
-    _: *anyopaque,
-    _: *anyopaque,
-    payload: *core.class.Payload,
-    visitor: *core.class.PayloadVisitor,
-) void {
-    payload_mark_calls += 1;
-    const ptr = payload.* orelse return;
-    const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
-    visitor.object(@ptrCast(&typed.object));
-}
-
-/// Single-winner resolution for tests: the last published GC header the
-/// registry's candidate walk reports for `addr` (null when none).
-fn registryResolveOne(rt: *core.JSRuntime, addr: usize) ?*core.gc.Header {
-    const Probe = struct {
-        last: ?*core.gc.Header = null,
-        fn visit(raw: *anyopaque, header: *core.gc.Header) void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.last = header;
-        }
-    };
-    var probe: Probe = .{};
-    _ = rt.gc.address_registry.forEachTraceCandidateAt(addr, rt.gc.address_registry.rebuildScanFilter(), &probe, Probe.visit);
-    return probe.last;
-}
 
 const DefineFieldForceGcProbe = struct {
     rt: *core.JSRuntime,
@@ -1819,279 +1262,14 @@ const DefineFieldForceGcProbe = struct {
         // Full cycle removal before every allocation — the force-GC shape of
         // `-Dzjs_force_gc=true` — so the collection lands inside the append
         // over-hang and the replace-branch shape mutation.
-        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
+        _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
-
-const deep_gc_chain_length: usize = 20_000;
-
-fn createDeepOwnedPropertyChain(rt: *core.JSRuntime, key: core.Atom, length: usize) !*core.Object {
-    std.debug.assert(length != 0);
-    const head = try core.Object.create(rt, core.class.ids.object, null);
-
-    var tail = head;
-    for (1..length) |_| {
-        const child = try core.Object.create(rt, core.class.ids.object, null);
-        tail.defineOwnProperty(
-            rt,
-            key,
-            core.Descriptor.data(child.value(), .all),
-        ) catch |err| {
-            return err;
-        };
-        // The property is now the child's sole owner. Keeping only a raw tail
-        // pointer makes releasing `head` exercise the real RC cascade.
-        tail = child;
-    }
-    return head;
-}
-
-const live_empty_object_gc_count: usize = 2;
-const single_object_self_cycle_reclaimed_count: usize = 2;
-/// Same graph, but the single object owns one external storage cell -- a named
-/// property's `.property_storage` buffer or a dense array's `.array_storage`
-/// buffer -- which TGC S4-b made a collected carrier.
-const single_object_self_cycle_with_storage_count: usize = 3;
-/// TGC S4-b: plus the two objects' external `.property_storage` cells.
-const closed_property_cycle_reclaimed_count: usize = 7;
-/// Same two-object cycle, but a third live object still holds the empty root
-/// shape: two JS objects plus their two transition shapes.
-const closed_property_cycle_root_kept_reclaimed_count: usize = 6;
-/// Fast array + plain object: the two objects, the object's transition shape
-/// and the array's own root shape; the plain-object root was unshared and
-/// freed the moment the object left it.
-/// TGC S4-b adds the plain object's `.property_storage` cell.
-const iterator_next_cache_cycle_reclaimed_count: usize = 5;
-
-/// Accounted bytes of an object's external `.property_storage` cell, zero when
-/// the storage is the empty sentinel or the inline slots2 tail (TGC S4-b).
-fn externalPropertyStorageBytes(rt: anytype, obj: *const core.Object) usize {
-    const storage = obj.prop_values;
-    if (!obj.propertyStoragePointerIsExternal(storage)) return 0;
-    const header: *const core.gc.Header = @ptrCast(@alignCast(storage));
-    return core.gc.Registry.heapByteSizeFromHeader(rt, header);
-}
-
-fn expectNoLiveGc(rt: *core.JSRuntime) !void {
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.shape));
-}
-
-fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
-    // Shapes are GC objects now, so cycle reclaim counts include collected
-    // object shapes in addition to the JS objects themselves. TGC S4-b added
-    // the property/element storage cells and TGC S4-c the a-class payload
-    // cells (`.ordinary`, `.proxy`, `.bound_function`, ...), so an out-of-line
-    // payload contributes one more. Built-in Promise state is now inline.
-    try std.testing.expectEqual(@as(usize, expected), actual);
-    try expectNoLiveGc(rt);
-}
-
-fn expectAllLiveGcReclaimed(rt: *core.JSRuntime) !void {
-    const live_before = rt.gc.liveCount();
-    try std.testing.expectEqual(live_before, rt.collectForTest());
-    try expectNoLiveGc(rt);
-}
 
 /// Zero a Zig pointer local that no longer holds a GC object, so a
 /// conservative scan cannot treat leftover stack bits as a root (§7.2).
 fn dropGcPtr(ptr: anytype) void {
     @memset(std.mem.asBytes(ptr), 0);
-}
-
-fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
-    // Shape is a GC object. This graph collects the two JS objects plus the two
-    // one-property transition shapes, plus the empty root shape both objects
-    // started from: it was shared, so leaving it does not free it (the shared
-    // bit is sticky) and the sweep reclaims it with the rest.
-    try std.testing.expectEqual(@as(usize, closed_property_cycle_reclaimed_count), freed);
-    try expectNoLiveGc(rt);
-}
-
-/// Records the child headers the production edge authority reports for one
-/// header (the same per-kind dispatch as `gc_trace_stw.traceHeaderEdges`), so
-/// tests can assert that a specific edge is visited.
-const TraceEdges = struct {
-    fn recordHeader(set: *std.AutoHashMap(usize, void), header: *core.gc.Header) void {
-        set.put(@intFromPtr(header), {}) catch unreachable;
-    }
-
-    const Visitor = struct {
-        set: *std.AutoHashMap(usize, void),
-
-        pub fn visitValue(self: Visitor, val: *core.JSValue) void {
-            if (val.cycleMarkHeader()) |header| recordHeader(self.set, header);
-        }
-
-        pub fn visitObject(self: Visitor, obj_ptr: *?*core.Object) void {
-            if (obj_ptr.*) |obj| {
-                if (@intFromPtr(obj) == 0) return;
-                recordHeader(self.set, obj.gcHeader());
-            }
-        }
-
-        pub fn visitShape(self: Visitor, shape_ref: *core.Shape) void {
-            recordHeader(self.set, &shape_ref.header);
-        }
-
-        pub fn visitRealm(self: Visitor, ctx_ptr: *?*core.context.RealmContext) void {
-            if (ctx_ptr.*) |ctx| recordHeader(self.set, &ctx.header);
-        }
-
-        pub fn visitModule(self: Visitor, record: *core.ModuleRecord) void {
-            recordHeader(self.set, &record.header);
-        }
-
-        pub fn storageCell(self: Visitor, edge: core.gc_visit.CellSlot) void {
-            const header: *core.gc.Header = @ptrFromInt(edge.address());
-            recordHeader(self.set, header);
-        }
-
-        pub fn visitWeakCollectionEntry(_: Visitor, _: *core.object.WeakCollectionEntry) void {}
-
-        pub fn visitFinalizationCell(self: Visitor, entry: *core.object.FinalizationRegistryCell) void {
-            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
-        }
-    };
-
-    fn collect(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
-        var set = std.AutoHashMap(usize, void).init(allocator);
-        defer set.deinit();
-        const visitor = Visitor{ .set = &set };
-        switch (header.meta().flags.kind) {
-            .object => {
-                const obj = core.Object.fromHeader(header);
-                obj.traceChildEdgesNoFail(rt, visitor);
-            },
-            .function_bytecode => {
-                const fb: *engine.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                var realm = fb.realm.ptr;
-                visitor.visitRealm(&realm);
-                fb.realm.ptr = realm;
-                for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
-            },
-            .var_ref => {
-                const ref: *core.VarRef = @alignCast(@fieldParentPtr("header", header));
-                visitor.visitValue(&ref.value);
-            },
-            .shape => {
-                const shape_ref: *core.Shape = @alignCast(@fieldParentPtr("header", header));
-                shape_ref.traceChildEdgesNoFail(rt, visitor);
-            },
-            .realm_context => {
-                const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", header));
-                ctx.traceChildEdgesNoFail(visitor);
-            },
-            .module => {
-                const record: *core.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
-                record.traceChildEdgesNoFail(rt, visitor);
-            },
-            .rope => {
-                const node: *core.string.StringRope = @ptrCast(@alignCast(header));
-                if (node.buffer) |buf| visitor.storageCell(buf.header());
-                visitor.visitValue(&node.left);
-                visitor.visitValue(&node.right);
-            },
-            .string, .string_buffer, .big_int, .property_storage, .array_storage, .payload => {},
-        }
-        const keys = try allocator.alloc(usize, set.count());
-        var index: usize = 0;
-        var iterator = set.keyIterator();
-        while (iterator.next()) |key| {
-            keys[index] = key.*;
-            index += 1;
-        }
-        std.mem.sort(usize, keys, {}, std.sort.asc(usize));
-        return keys;
-    }
-
-    fn expectContains(headers: []const usize, header: *core.gc.Header) !void {
-        const ptr = @intFromPtr(header);
-        for (headers) |item| {
-            if (item == ptr) return;
-        }
-        return error.TestUnexpectedResult;
-    }
-};
-
-// ---------------------------------------------------------------------------
-// TGC S2 lane A: symbol bodies are tracer-owned cells, so every weak seam that
-// already worked for objects has to work for a symbol target too. The atom
-// table's `entry.str` binding is NOT the authority during a sweep -- these
-// four pin the mark as the authority instead.
-// ---------------------------------------------------------------------------
-
-fn weakPersistentCounterCallback(_: *core.JSRuntime, context: ?*anyopaque) void {
-    const counter: *usize = @ptrCast(@alignCast(context.?));
-    counter.* += 1;
-}
-
-fn interruptOnce(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
-    const count: *usize = @ptrCast(@alignCast(userdata.?));
-    count.* += 1;
-    return true;
-}
-
-var exotic_define_calls: usize = 0;
-var exotic_delete_calls: usize = 0;
-
-fn exoticGet(_: *core.Object, _: core.Atom) ?core.Descriptor {
-    return core.Descriptor.data(core.JSValue.int32(99), .{ .configurable = true });
-}
-
-fn exoticDefine(_: *core.Object, _: core.Atom, _: core.Descriptor) bool {
-    exotic_define_calls += 1;
-    return true;
-}
-
-fn exoticDelete(_: *core.Object, _: core.Atom) bool {
-    exotic_delete_calls += 1;
-    return true;
-}
-
-fn exoticOwnKeys(_: *core.Object, rt: *core.JSRuntime) ![]core.Atom {
-    const keys = try rt.allocNative(core.Atom, 1);
-    keys[0] = core.atom.ids.length;
-    return keys;
-}
-
-/// How many times the whole-heap iterator yields `header`, and how many
-/// extent strings it sees in total. Extents live in the block heap's
-/// medium/large tables -- no list link, no cell, no bitmap -- so this is the
-/// Latin1 length whose body cannot fit a block cell, sized off the frozen
-/// class table rather than a literal: S2-f raised `measured_max_small_payload`
-/// from 128 to 3760, and every one of these tests would otherwise have gone on
-/// "testing extents" against block cells.
-const extent_latin1_len: usize = core.gc_space.max_small_payload;
-
-/// only enumeration that can prove they are visible to census/verify.
-fn countExtentStringHeaders(rt: *core.JSRuntime, header: *const core.gc.Header) struct {
-    matches: usize,
-    extents: usize,
-} {
-    var matches: usize = 0;
-    var extents: usize = 0;
-    var iterator = rt.gc.objectIterator(.all);
-    while (iterator.next()) |candidate| {
-        if (candidate.metaConst().flags.kind != .string) continue;
-        if (core.gc.Registry.isBlockCellHeader(candidate)) continue;
-        extents += 1;
-        if (candidate == header) matches += 1;
-    }
-    return .{ .matches = matches, .extents = extents };
-}
-
-/// TGC S3: an atom entry is not a heap object, so no `objectIterator` can save
-/// or restore it -- its liveness is a stamp compared against `Heap.mark_epoch`.
-/// One known id is a sharper probe than a table-wide count: the minor's own
-/// trace re-stamps whatever it reaches, and a count would hide a lost stamp
-/// behind that work.
-fn atomMarkEpochForTest(rt: *core.JSRuntime, id: anytype) ?u64 {
-    for (rt.atoms.entries) |*entry| {
-        if (!entry.occupied) continue;
-        if (entry.id == id) return entry.mark_epoch;
-    }
-    return null;
 }
 
 test "runtime teardown owns a detached generator shell" {
@@ -2119,7 +1297,6 @@ fn s3MarkEpoch(rt: *core.JSRuntime) u64 {
 
 fn s3RunMajor(rt: *core.JSRuntime) !void {
     _ = try rt.forceGC(null);
-    helpers.finishGcCycles(rt);
 }
 
 test "TGC S3: a shape property key is an atom trace edge" {
@@ -2727,7 +1904,7 @@ test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" 
     // `debitBlockBytes` batch) would land below it; a missed debit above.
     var round: usize = 0;
     while (round < 2) : (round += 1) {
-        const before_owner = rt.diagnostics.allocations.allocated_bytes;
+        const before_owner = rt.allocation_diagnostics.allocated_bytes;
         array_slot = try core.Object.createArray(rt, null);
         // Promote the owner first: every cell it adopts from here is an
         // old-to-young bulk write, so `rememberOwnerForBulkWrite` puts the
@@ -2736,25 +1913,25 @@ test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" 
         // unconditionally under the lifecycle audit as well).
         _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
         try std.testing.expect(!array_slot.?.gcHeader().metaConst().flags.young);
-        const before_cells = rt.diagnostics.allocations.allocated_bytes;
+        const before_cells = rt.allocation_diagnostics.allocated_bytes;
 
         try fillS4bDenseArray(rt, array_slot.?, 40);
         try std.testing.expect(rt.gc.generation.rememberedCount() != 0);
         try std.testing.expect(rt.gc.liveCountKind(.array_storage) > 4);
-        const grown = rt.diagnostics.allocations.allocated_bytes;
+        const grown = rt.allocation_diagnostics.allocated_bytes;
         try std.testing.expect(grown > before_cells);
 
         // The superseded buffers owe no destructor: bitmap route only.
         _ = rt.collectForTest();
         try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
-        const one_cell = rt.diagnostics.allocations.allocated_bytes;
+        const one_cell = rt.allocation_diagnostics.allocated_bytes;
         try std.testing.expect(one_cell < grown);
         try std.testing.expect(one_cell > before_cells);
 
         array_slot = null;
         _ = rt.collectForTest();
         try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
-        if (round == 1) try std.testing.expectEqual(before_owner, rt.diagnostics.allocations.allocated_bytes);
+        if (round == 1) try std.testing.expectEqual(before_owner, rt.allocation_diagnostics.allocated_bytes);
     }
 }
 
@@ -2899,6 +2076,28 @@ fn registerS4cPayloadClass(
     return binding.id;
 }
 
+test "destroying an old remembered Object removes it from the remembered set" {
+    // An `errdefer destroyFromHeader` after user code ran can free an object
+    // a barrier remembered; its cell may be reused by another kind.
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    var owner: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{&owner});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!owner.?.gcHeader().metaConst().flags.young);
+    const young = try core.Object.create(rt, core.class.ids.object, null);
+    rt.gc.generationalBarrier(owner.?.gcHeader(), young.gcHeader());
+    const address = @intFromPtr(owner.?.gcHeader());
+    try std.testing.expect(rt.gc.generation.remembered.contains(address));
+    const header = owner.?.gcHeader();
+    owner = null;
+    core.Object.destroyFromHeader(rt, header);
+    try std.testing.expect(!rt.gc.generation.remembered.contains(address));
+}
+
 test "promise coallocation: state and reactions survive through the sole owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -2918,15 +2117,13 @@ test "promise coallocation: state and reactions survive through the sole owner" 
     const result_slot = promise.?.promiseResultSlot();
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(!promise.?.gcHeader().metaConst().flags.young);
-    var targets: [4]*core.gc.Header = undefined;
+    var targets: [2]*core.gc.Header = undefined;
     for (&targets, 0..) |*header, index| {
         temporary = try core.Object.create(rt, core.class.ids.object, null);
         header.* = temporary.?.gcHeader();
         switch (index) {
             0 => try promise.?.setPromiseResult(rt, temporary.?.value()),
-            1 => try promise.?.setPromiseReactionCallback(rt, temporary.?.value()),
-            2 => try promise.?.setPromiseReactionArg(rt, temporary.?.value()),
-            3 => for (0..6) |_| {
+            1 => for (0..6) |_| {
                 try engine.exec.promise_ops.appendPromiseReaction(rt, promise.?, temporary.?.value());
             },
             else => unreachable,
@@ -2963,7 +2160,7 @@ test "promise coallocation: accounting and allocation failure share the object c
     try std.testing.expectEqual(expected, promise.?.allocationSize(rt));
     try std.testing.expectEqual(expected, core.gc.Registry.heapByteSizeFromHeader(rt, promise.?.gcHeader()));
     const objects_before = rt.gc.liveCountKind(.object);
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, core.class.ids.promise, null));
     rt.setNativeBytesLimitForTest(null);
@@ -3477,8 +2674,13 @@ test "gc stress finalization registry dead target queues pending job" {
     try std.testing.expectEqual(@as(usize, 3), collected.freed_objects);
     // `processWeak` enqueues the cleanup in the same collection that unreaches
     // the target.
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.countKind(.finalization));
+    // The cell stays in [[Cells]], target released, until its job takes it
+    // (so `unregister` can still cancel the callback).
+    const cells = registry.finalizationRegistryCells();
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(core.object.FinalizationRegistryCellState.queued, cells[0].state);
+    try std.testing.expectEqual(@as(?usize, null), cells[0].target_identity);
     // cleanup + registry + held object + construction realm, plus the shared root shape and the
     // held object's one-property transition shape.
     try std.testing.expectEqual(@as(usize, 7), rt.gc.liveCount());
@@ -3550,7 +2752,6 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
 // Catchable-OOM contract: unbounded JS growth under an 8MB cap becomes a JS
 // InternalError, the process stays alive, and delivering the preallocated OOM
 // exception allocates nothing.
-const BindingContext = zjs.JSContext;
 
 const cap_bytes: usize = 8 * 1024 * 1024;
 
@@ -3620,7 +2821,7 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
 
 /// Counts allocations that actually reach the backing allocator. Used to
 /// prove the exhausted-heap OOM delivery window performs zero allocations:
-/// the runtime limit rejects Runtime allocation helpers-tracked allocations before they
+/// the runtime limit rejects runtime-tracked allocations before they
 /// reach this wrapper, and any path that bypassed the account (or released
 /// the limit) would be counted here and fail the pin.
 const CountingAllocator = struct {
@@ -3669,14 +2870,14 @@ const ExhaustState = struct {
         const self = call.state(ExhaustState);
         self.snapshot = self.counting.success_count;
         // Freeze the heap: every further accounted allocation fails.
-        self.rt.setAllocationDiagnosticLimit(self.rt.diagnostics.allocations.allocated_bytes);
+        self.rt.setNativeBytesLimitForTest(self.rt.allocation_diagnostics.allocated_bytes);
         return core.JSValue.undefinedValue();
     }
 
     fn report(call: *zjs.native.Call) core.JSValue {
         const self = call.state(ExhaustState);
         self.window_allocations = self.counting.success_count - self.snapshot;
-        self.rt.setAllocationDiagnosticLimit(null);
+        self.rt.setNativeBytesLimitForTest(null);
         return core.JSValue.undefinedValue();
     }
 };
@@ -3898,16 +3099,16 @@ test "installed event loop keeps a released realm and its timer callbacks alive"
         try root.set(rt, try core.function.nativeFunction(ctx, "timerCallback", 0));
         break :callback try root.get(rt);
     };
-    try loop.enqueueTimer(ctx, 1, callback, 0, false);
+    try loop.enqueueTimer(ctx, 1, callback, 0);
     const callback_header = callback.cycleMarkHeader().?;
     // The host drops its context reference while the loop is installed.
     ctx.destroy();
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(&ctx.header));
     try std.testing.expect(rt.gc.containsHeader(callback_header));
     // Clearing the scheduler releases both.
     loop.deinit();
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(!rt.gc.containsHeader(callback_header));
 }
 
@@ -3936,6 +3137,26 @@ test "production event loop does not add product runtime globals" {
         "1\n2\nundefined undefined undefined undefined undefined undefined\n",
         output.buffered(),
     );
+}
+
+test "host print quotes property names longer than its stack buffer" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    var output_buffer: [2048]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    try @import("zjs_host").output.install(ctx.core, try zjs.globalObjectPtr(ctx));
+
+    _ = try ctx.eval(
+        \\print({ ['-'.repeat(300)]: 1 });
+        \\print({ ['é'.repeat(300)]: 2 });
+    , .{ .output = &output });
+
+    const expected = "{ \"" ++ "-" ** 300 ++ "\": 1 }\n" ++ "{ \"" ++ "\u{e9}" ** 300 ++ "\": 2 }\n";
+    try std.testing.expectEqualStrings(expected, output.buffered());
 }
 
 test "production embedding can install external host functions" {
@@ -4006,6 +3227,40 @@ test "production embedding can create objects and define data properties" {
     try std.testing.expectEqual(@as(?i32, 42), answer.as(.int));
 }
 
+test "production embedding objects and buffers get their realm prototypes" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    var state = BytesStoreState{ .allocator = std.testing.allocator };
+    const owned_backing = try std.testing.allocator.alloc(u8, 2);
+    var owned_store = zjs.JSBytes.Store.owned(owned_backing, .{ .deinit = BytesStoreState.deinit, .context = &state });
+    errdefer owned_store.release();
+    const shared_backing = try std.testing.allocator.alloc(u8, 2);
+    var shared_store = zjs.JSBytes.Store.shared(shared_backing, .{ .deinit = BytesStoreState.deinit, .context = &state });
+    errdefer shared_store.release();
+
+    const global = try ctx.globalObject();
+    try ctx.defineDataProperty(global, "hostObject", try ctx.createObject(), .{});
+    try ctx.defineDataProperty(global, "hostBuffer", try ctx.arrayBuffer(&owned_store), .{});
+    const shared = try ctx.arrayBuffer(&shared_store);
+    try ctx.defineDataProperty(global, "hostShared", shared, .{});
+    var shared_ref = try ctx.retainSharedArrayBuffer(shared);
+    defer shared_ref.release();
+    try ctx.defineDataProperty(global, "hostRewrapped", try ctx.sharedArrayBufferFromRef(shared_ref), .{});
+
+    const result = try ctx.eval(
+        \\Object.getPrototypeOf(hostObject) === Object.prototype &&
+        \\  String(hostObject) === "[object Object]" &&
+        \\  hostBuffer instanceof ArrayBuffer && hostBuffer.byteLength === 2 &&
+        \\  hostShared instanceof SharedArrayBuffer &&
+        \\  hostRewrapped instanceof SharedArrayBuffer && hostRewrapped.byteLength === 2
+    , .{});
+    try std.testing.expectEqual(@as(?bool, true), result.as(.boolean));
+}
+
 test "production embedding can inspect own property descriptors by JS key" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -4054,7 +3309,8 @@ test "production embedding can inspect own property descriptors by JS key" {
     try std.testing.expectEqual(@as(?i32, 99), proxy_desc.value.as(.int));
 
     const revoked = try ctx.eval("const r = Proxy.revocable({ visible: 1 }, {}); r.revoke(); r.proxy", .{});
-    try std.testing.expectError(error.TypeError, ctx.ownPropertyDescriptor(revoked, visible_key, .{}));
+    try std.testing.expectError(error.JSException, ctx.ownPropertyDescriptor(revoked, visible_key, .{}));
+    try std.testing.expect(try ctx.consumePendingExceptionIfErrorName("TypeError"));
 }
 
 test "production embedding can create strings and convert values to owned utf8" {
@@ -4176,10 +3432,12 @@ test "production embedding can inspect arrays and indexed values" {
 
     const object = try ctx.eval("({ length: 1, 0: 9 })", .{});
     try std.testing.expect(!try ctx.isArray(object));
-    try std.testing.expectError(error.TypeError, ctx.arrayLength(object));
+    try std.testing.expectError(error.JSException, ctx.arrayLength(object));
+    try std.testing.expect(try ctx.consumePendingExceptionIfErrorName("TypeError"));
 
     const revoked = try ctx.eval("const r = Proxy.revocable([], {}); r.revoke(); r.proxy", .{});
-    try std.testing.expectError(error.TypeError, ctx.isArray(revoked));
+    try std.testing.expectError(error.JSException, ctx.isArray(revoked));
+    try std.testing.expect(try ctx.consumePendingExceptionIfErrorName("TypeError"));
 }
 
 test "ordinary runtime stats do not walk the heap" {
@@ -4208,20 +3466,20 @@ test "runtime allocation profiling survives profile replacement and detach" {
     defer rt.destroy();
     var first: core.OpcodeProfile = .{};
     var second: core.OpcodeProfile = .{};
-    rt.setOpcodeProfile(&first);
-    const mem = try rt.allocRuntime(u8, 24);
-    rt.freeRuntime(u8, mem);
+    rt.opcode_profile = &first;
+    const mem = try rt.allocNative(u8, 24);
+    rt.freeNative(u8, mem);
     try std.testing.expectEqual(@as(u64, 1), first.alloc_count);
 
-    rt.setOpcodeProfile(&second);
-    const next = try rt.allocRuntime(u8, 32);
-    rt.freeRuntime(u8, next);
+    rt.opcode_profile = &second;
+    const next = try rt.allocNative(u8, 32);
+    rt.freeNative(u8, next);
     try std.testing.expectEqual(@as(u64, 1), first.alloc_count);
     try std.testing.expectEqual(@as(u64, 1), second.alloc_count);
 
-    rt.setOpcodeProfile(null);
-    const detached = try rt.allocRuntime(u8, 8);
-    rt.freeRuntime(u8, detached);
+    rt.opcode_profile = null;
+    const detached = try rt.allocNative(u8, 8);
+    rt.freeNative(u8, detached);
     try std.testing.expectEqual(@as(u64, 1), second.alloc_count);
 }
 
@@ -4245,24 +3503,24 @@ test "production embedding roots host-held values with public handles" {
     const object = try ctx.eval("({ answer: 42 })", .{});
 
     var scope = rt.enterHandleScope();
-    const local = try scope.localDup(object);
+    const local = try scope.local(object);
 
-    try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.roots.local_root_slots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
     try std.testing.expect(local.get().is(.object));
 
     var persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
     scope.deinit();
-    try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.local_root_slots.items.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.roots.persistent_root_slots.items.len);
 
     const answer = try ctx.getProperty(persistent.get(), "answer");
     try std.testing.expectEqual(@as(?i32, 42), answer.as(.int));
 
     persistent.deinit();
-    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
 }
 
 test "production embedding can expose owned and shared byte stores" {
@@ -4368,7 +3626,7 @@ test "production runtime can detach array buffers" {
     errdefer shared_store.release();
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
-    try std.testing.expectError(error.TypeError, zjs.exec.buffer_ops.detachArrayBuffer(rt, shared_value));
+    try std.testing.expectError(error.NotAnArrayBuffer, zjs.exec.buffer_ops.detachArrayBuffer(rt, shared_value));
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
 
@@ -4407,7 +3665,8 @@ test "production embedding can retain and rewrap shared array buffers" {
     try std.testing.expectEqualSlices(u8, &.{ 1, 9, 3 }, original_view.slice());
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 
-    try std.testing.expectError(error.TypeError, ctx.retainSharedArrayBuffer(zjs.JSValue.int32(1)));
+    try std.testing.expectError(error.JSException, ctx.retainSharedArrayBuffer(zjs.JSValue.int32(1)));
+    try std.testing.expect(try ctx.consumePendingExceptionIfErrorName("TypeError"));
 }
 
 test "production embedding lifecycle deinitializes repeated script and module evals" {
@@ -4494,13 +3753,13 @@ test "heap budget caps published cells without capping native alloc or external 
     try std.testing.expectEqual(after_collect, rt.gc.heap_budget.bytes);
 
     rt.setMemoryLimit(0);
-    const native = try rt.allocRuntime(u8, 32);
+    const native = try rt.allocNative(u8, 32);
     const heap_before_remap = rt.gc.heap_budget.bytes;
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, rt.remapRuntime(u8, native, 128));
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectError(error.OutOfMemory, rt.remapNative(u8, native, 128));
     try std.testing.expectEqual(heap_before_remap, rt.gc.heap_budget.bytes);
     rt.setNativeBytesLimitForTest(null);
-    rt.freeRuntime(u8, native);
+    rt.freeNative(u8, native);
 
     const external_before = rt.gc.heap_budget.bytes;
     var token = try rt.reportExternalAlloc(128);
@@ -4586,9 +3845,9 @@ test "native byte cap does not retry the heap limit" {
     rt.setGCThreshold(std.math.maxInt(usize));
     const retries = rt.gc.heap_budget.limit_retries;
     const majors = rt.gc.stats.collections;
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectError(error.OutOfMemory, rt.allocRuntime(u8, 64));
+    try std.testing.expectError(error.OutOfMemory, rt.allocNative(u8, 64));
     try std.testing.expectEqual(retries, rt.gc.heap_budget.limit_retries);
     try std.testing.expectEqual(majors, rt.gc.stats.collections);
 }
@@ -4598,8 +3857,8 @@ test "heap limit retry does not nest while a collection is running" {
     defer rt.destroy();
     rt.setGCThreshold(std.math.maxInt(usize));
     rt.setMemoryLimit(rt.gc.heap_budget.bytes);
-    rt.gc_running = true;
-    defer rt.gc_running = false;
+    rt.gc.hot.collecting = true;
+    defer rt.gc.hot.collecting = false;
     const retries = rt.gc.heap_budget.limit_retries;
     const majors = rt.gc.stats.collections;
     try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, core.class.ids.object, null));
@@ -4614,7 +3873,7 @@ test "production embedding memory limit reports allocation failure without leaki
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
 
     try std.testing.expectError(error.OutOfMemory, ctx.eval("({ payload: new Array(32).fill('x') });", .{}));
@@ -4629,8 +3888,8 @@ test "production embedding public API allocation failures keep host ownership in
 
     const object = try ctx.eval("({ answer: 42 })", .{});
 
-    const persistent_before = rt.persistentRootCountForTest();
-    const local_before = rt.localRootCountForTest();
+    const persistent_before = rt.roots.persistent_root_slots.items.len;
+    const local_before = rt.roots.local_root_slots.items.len;
 
     // Collect first, THEN pin the native cap to what is left.
     //
@@ -4640,7 +3899,7 @@ test "production embedding public API allocation failures keep host ownership in
     // the live set rather than whatever garbage the previous test left behind.
     _ = rt.collectForTest();
 
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
 
     if (rt.createPersistentValue(object)) |handle| {
@@ -4650,16 +3909,16 @@ test "production embedding public API allocation failures keep host ownership in
     } else |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
     }
-    try std.testing.expectEqual(persistent_before, rt.persistentRootCountForTest());
-    try std.testing.expectEqual(local_before, rt.localRootCountForTest());
+    try std.testing.expectEqual(persistent_before, rt.roots.persistent_root_slots.items.len);
+    try std.testing.expectEqual(local_before, rt.roots.local_root_slots.items.len);
 
     if (ctx.createString("must allocate")) |_| {
         return error.TestExpectedError;
     } else |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
     }
-    try std.testing.expectEqual(persistent_before, rt.persistentRootCountForTest());
-    try std.testing.expectEqual(local_before, rt.localRootCountForTest());
+    try std.testing.expectEqual(persistent_before, rt.roots.persistent_root_slots.items.len);
+    try std.testing.expectEqual(local_before, rt.roots.local_root_slots.items.len);
 
     var finalizer_state = HostFinalizerState{};
     if (ctx.createFunction(
@@ -4704,6 +3963,242 @@ test "production embedding interrupt handler aborts unbounded execution" {
 
     try std.testing.expectError(error.Interrupted, ctx.eval("while (true) {}", .{}));
     try std.testing.expect(state.hits > 0);
+}
+
+const CountdownInterrupt = struct {
+    remaining: usize,
+
+    fn poll(_: *zjs.JSRuntime, ctx: ?*anyopaque) bool {
+        const self: *CountdownInterrupt = @ptrCast(@alignCast(ctx.?));
+        if (self.remaining == 0) return true;
+        self.remaining -= 1;
+        return false;
+    }
+};
+
+test "production embedding interrupt while resuming an async function settles it" {
+    // Each `await 0` resumes the function from an async-resume job. Sweep the
+    // countdown across two iterations' polls: an interrupt there used to be
+    // swallowed and the function dropped with its promise pending forever.
+    // `eval` drains the microtasks, so the loop only ends by interrupt.
+    var countdown: usize = 0;
+    while (countdown < 6) : (countdown += 1) {
+        const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        var state = CountdownInterrupt{ .remaining = countdown };
+        rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+        defer rt.setInterruptHandler(null, null);
+        const result = ctx.eval(
+            \\globalThis.state = "pending";
+            \\(async function () { for (;;) await 0; })().catch(() => { state = "rejected"; });
+        , .{});
+        rt.setInterruptHandler(null, null);
+        if (result) |_| {} else |err| {
+            try std.testing.expectEqual(error.Interrupted, err);
+            continue;
+        }
+        // Inside the body the interrupt rejects the function's promise, as
+        // a promise job does with one; the function is never just dropped.
+        try rt.runMicrotasks();
+        try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("state === \"rejected\"", .{})).as(.boolean));
+    }
+}
+
+test "production embedding interrupt reaches a global replace made of short matches" {
+    // Each match takes a few backtrack steps; the executor's poll countdown
+    // must carry across matches for the builtin to observe the interrupt.
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.eval("globalThis.input = 'a,'.repeat(200000);", .{});
+    var state = CountdownInterrupt{ .remaining = 0 };
+    rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+    defer rt.setInterruptHandler(null, null);
+    try std.testing.expectError(error.Interrupted, ctx.eval("input.replace(/,/g, '').length", .{}));
+}
+
+test "production embedding interrupt reaches long native loops" {
+    // Each operation runs well past one native poll interval without calling
+    // back into JavaScript, so only its own loop poll can observe the handler
+    // (the countdown lets the eval's entry poll pass).
+    const Case = struct { setup: []const u8, run: []const u8 };
+    const cases = [_]Case{
+        .{ .setup = "var a = []; a.length = 100000;", .run = "a.join()" },
+        .{ .setup = "var a = []; a.length = 100000;", .run = "a.forEach(Math.abs)" },
+        .{ .setup = "var o = { length: 100000 };", .run = "Array.prototype.copyWithin.call(o, 0, 1)" },
+        .{ .setup = "var o = { length: 100000 };", .run = "Array.from(o)" },
+        .{ .setup = "var a = []; for (var i = 0; i < 20000; i++) a.push(20000 - i);", .run = "a.sort()" },
+        .{ .setup = "var a = new Array(100000).fill(1);", .run = "a.join()" },
+        .{ .setup = "var j = '[' + '1,'.repeat(100000) + '1]';", .run = "JSON.parse(j)" },
+        .{ .setup = "var j = '[' + '{\"k\":1},'.repeat(20000) + '{}]';", .run = "JSON.parse(j)" },
+        .{ .setup = "var rows = []; for (var i = 0; i < 20000; i++) rows.push({ k: i });", .run = "JSON.stringify(rows)" },
+        .{ .setup = "var s = '\\u00e9'.repeat(100000);", .run = "encodeURIComponent(s)" },
+        .{ .setup = "var s = '%41'.repeat(100000);", .run = "decodeURIComponent(s)" },
+        .{ .setup = "", .run = "''.padStart(1000000, 'ab')" },
+        .{ .setup = "var s = 'a'.repeat(100000);", .run = "s.replaceAll('a', 'b')" },
+        .{ .setup = "var s = 'a'.repeat(100000);", .run = "s.split('')" },
+    };
+    for (cases) |case| {
+        const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        _ = try ctx.eval(case.setup, .{});
+        var state = CountdownInterrupt{ .remaining = 3 };
+        rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+        try std.testing.expectError(error.Interrupted, ctx.eval(case.run, .{}));
+        rt.setInterruptHandler(null, null);
+        // An interrupted sort leaves the array a permutation of itself.
+        try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("typeof a !== 'object' || a.length !== 20000 || (new Set(a).size === 20000 && a.every((v) => v >= 1 && v <= 20000))", .{})).as(.boolean));
+    }
+}
+
+test "production embedding interrupt reaches the compiler and bulk native work" {
+    // Compiling, BigInt arithmetic and conversion, and bulk string and
+    // object work run in native code that cannot call back into JavaScript;
+    // their own polls (or their work charged to the countdown, for a loop of
+    // calls too short to reach the VM's poll) must stop them, and the
+    // interruption stays uncatchable.
+    const Case = struct { setup: []const u8, run: []const u8 };
+    const cases = [_]Case{
+        .{ .setup = "var src = 'x = 1;\\n'.repeat(20000);", .run = "Function(src)" },
+        .{ .setup = "var src = 'x = 1;\\n'.repeat(20000);", .run = "eval(src)" },
+        .{ .setup = "var src = 'x = 1;\\n'.repeat(20000);", .run = "(0, eval)(src)" },
+        .{ .setup = "var b = (1n << 100000n) - 1n;", .run = "String(b)" },
+        .{ .setup = "var b = (1n << 100000n) - 1n;", .run = "b.toString(7)" },
+        // The parser names a BigInt literal property in base 10.
+        .{ .setup = "var src = 'return { 0x' + ((1n << 100000n) - 1n).toString(16) + 'n: 1 }';", .run = "Function(src)" },
+        .{ .setup = "var b = (1n << 100000n) - 1n;", .run = "for (var i = 0; i < 100; i++) b * b" },
+        .{ .setup = "var s = '9'.repeat(100000);", .run = "BigInt(s)" },
+        .{ .setup = "var s = ' '.repeat(100000);", .run = "s.trim()" },
+        .{ .setup = "var s = 'a'.repeat(4000000);", .run = "s.toUpperCase()" },
+        .{ .setup = "var s = 'a'.repeat(100000);", .run = "s.localeCompare(s)" },
+        .{ .setup = "var s = 'a'.repeat(1000000);", .run = "for (var i = 0; i < 100; i++) s.startsWith('b')" },
+        .{ .setup = "var f = Function('x'.repeat(1000000));", .run = "for (var i = 0; i < 100; i++) f.toString()" },
+        .{ .setup = "", .run = "'ab'.repeat(5000000)" },
+        .{ .setup = "", .run = "new Uint8Array(10000000).fill(1)" },
+        .{ .setup = "var t = new Float64Array(20000);", .run = "t.toReversed()" },
+        .{ .setup = "var t = new Float64Array(20000);", .run = "t.with(0, 1)" },
+        .{ .setup = "var o = {}; for (var i = 0; i < 20000; i++) o['k' + i] = i;", .run = "Object.keys(o)" },
+        .{ .setup = "var o = {}; for (var i = 0; i < 20000; i++) o['k' + i] = i;", .run = "Object.assign({}, o)" },
+        .{ .setup = "var a = new Set(), b = new Set(); for (var i = 0; i < 20000; i++) { a.add(i); b.add(-i); }", .run = "a.union(b)" },
+        .{ .setup = "var a = new Array(20000).fill(1);", .run = "[...a]" },
+        // A trap-less Proxy makes these prototype chains endless.
+        .{ .setup = "var a = { q: 1 }; Object.setPrototypeOf(a, Object.create(new Proxy(a, {})));", .run = "a instanceof function F() {}" },
+        .{ .setup = "var a = { q: 1 }; Object.setPrototypeOf(a, Object.create(new Proxy(a, {})));", .run = "({}).isPrototypeOf(a)" },
+        .{ .setup = "var a = { q: 1 }; Object.setPrototypeOf(a, Object.create(new Proxy(a, {})));", .run = "for (var k in a);" },
+    };
+    for (cases) |case| {
+        const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        _ = try ctx.eval(case.setup, .{});
+        const run = try std.fmt.allocPrint(std.testing.allocator, "var caught = false; try {{ {s}; }} catch (e) {{ caught = true; }}", .{case.run});
+        defer std.testing.allocator.free(run);
+        var state = CountdownInterrupt{ .remaining = 3 };
+        rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+        try std.testing.expectError(error.Interrupted, ctx.eval(run, .{}));
+        rt.setInterruptHandler(null, null);
+        try std.testing.expectEqual(@as(?bool, false), (try ctx.eval("caught", .{})).as(.boolean));
+    }
+}
+
+test "production embedding eval of a module under a loaded filename is a TypeError" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.eval("globalThis.runs = 1; export const a = 1;", .{ .mode = .module, .filename = "a.mjs" });
+    // The second source used to be ignored in favour of the loaded record.
+    try std.testing.expectError(error.JSException, ctx.eval("globalThis.runs = 2;", .{ .mode = .module, .filename = "a.mjs" }));
+    const thrown = ctx.takeException();
+    const text = try ctx.formatException(thrown, std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("TypeError: module 'a.mjs' is already loaded; evaluate new module source under a new filename", text);
+    try std.testing.expectEqual(@as(?i32, 1), (try ctx.eval("runs", .{})).as(.int));
+    // Unnamed modules skip a `<eval>#N` the embedder already used.
+    _ = try ctx.eval("export const b = 1;", .{ .mode = .module, .filename = "<eval>#1" });
+    _ = try ctx.eval("globalThis.runs = 3;", .{ .mode = .module });
+    _ = try ctx.eval("globalThis.runs += 1;", .{ .mode = .module });
+    try std.testing.expectEqual(@as(?i32, 4), (try ctx.eval("runs", .{})).as(.int));
+}
+
+test "String.prototype.repeat copies whole repetitions past its poll slice" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    // 7 does not divide the copy slice; an unaligned copy broke the period.
+    try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("var u = 'abcdefg'; u.repeat(400000) === new Array(400001).join(u) && '\\u00e9z\\u4e00'.repeat(500000) === new Array(500001).join('\\u00e9z\\u4e00')", .{})).as(.boolean));
+}
+
+test "production embedding interrupt at any compile poll leaves the realm usable" {
+    // Sweep the stop across every poll of one compile -- parser, variable
+    // and label resolution, stack sizing -- until it completes.
+    var countdown: usize = 0;
+    while (true) : (countdown += 1) {
+        try std.testing.expect(countdown < 1000);
+        const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        _ = try ctx.eval("var src = 'if (x) { x = [x, x + 1]; }\\n'.repeat(3000); var x = 0;", .{});
+        var state = CountdownInterrupt{ .remaining = countdown };
+        rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+        const result = ctx.eval("var f; try { f = Function(src); } catch (e) { f = e; }", .{});
+        rt.setInterruptHandler(null, null);
+        if (result) |_| {
+            try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("typeof f === 'function' && f() === undefined && x === 0", .{})).as(.boolean));
+            break;
+        } else |err| try std.testing.expectEqual(error.Interrupted, err);
+        try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("f === undefined", .{})).as(.boolean));
+        try std.testing.expectEqual(@as(?i32, 3), (try ctx.eval("Function('return 1 + 2')()", .{})).as(.int));
+    }
+}
+
+test "production embedding interrupt and termination stop a blocked Atomics.wait" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{ .can_block = true });
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.eval("var view = new Int32Array(new SharedArrayBuffer(4));", .{});
+    var state = CountdownInterrupt{ .remaining = 3 };
+    rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+    // Without a timeout this would block forever.
+    try std.testing.expectError(error.Interrupted, ctx.eval("Atomics.wait(view, 0, 0)", .{}));
+    rt.setInterruptHandler(null, null);
+    // The waiter was removed: a later notify finds nobody.
+    try std.testing.expectEqual(@as(?i32, 0), (try ctx.eval("Atomics.notify(view, 0)", .{})).as(.int));
+}
+
+test "production embedding interrupt inside a dispose callback stays uncatchable" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    // Disposal collects ordinary throws into its completion; an interruption
+    // must not be collected, run later callbacks, or reach the JS catch. The
+    // countdown lets the setup run so the interrupt lands in the dispose loop.
+    var state = CountdownInterrupt{ .remaining = 1000 };
+    rt.setInterruptHandler(CountdownInterrupt.poll, &state);
+    defer rt.setInterruptHandler(null, null);
+    try std.testing.expectError(error.Interrupted, ctx.eval(
+        \\globalThis.reached = false;
+        \\globalThis.caught = false;
+        \\try { using a = { [Symbol.dispose]() { reached = true; } }; using b = { [Symbol.dispose]() { for (;;) {} } }; } catch (e) { caught = true; }
+    , .{}));
+    state.remaining = 1000;
+    try std.testing.expectError(error.Interrupted, ctx.eval(
+        \\try { const s = new DisposableStack(); s.defer(() => { for (;;) {} }); s.dispose(); } catch (e) { caught = true; }
+    , .{}));
+    rt.setInterruptHandler(null, null);
+    try std.testing.expectEqual(@as(?bool, true), (try ctx.eval("reached === false && caught === false", .{})).as(.boolean));
 }
 
 test "production embedding interrupt handler aborts conditional-only backedge" {
@@ -4829,7 +4324,7 @@ test "production embedding can create independent realms" {
         const realm_array = try ctx.getProperty(realm_global, "Array");
         try std.testing.expect(!realm_array.sameValue(current_array));
 
-        break :blk .{ try ctx.createValueHandle(realm_global), realm_global_object };
+        break :blk .{ try ctx.runtimePtr().createPersistentValue(realm_global), realm_global_object };
     };
 
     var realm_global_handle = retained[0];
@@ -4880,7 +4375,8 @@ test "production embedding can eval script source in explicit function realms" {
     const function_global = (try ctx.functionRealmGlobal(function)) orelse return error.TestExpectedEqual;
     try std.testing.expect(function_global == realm_global_object);
 
-    try std.testing.expectError(error.TypeError, ctx.evalScriptValue(zjs.JSValue.int32(1), .{}));
+    try std.testing.expectError(error.JSException, ctx.evalScriptValue(zjs.JSValue.int32(1), .{}));
+    try std.testing.expect(try ctx.consumePendingExceptionIfErrorName("TypeError"));
 }
 
 test "production embedding getProperty follows JavaScript accessors" {
@@ -4948,16 +4444,8 @@ const S3HostDefineMajorProbe = struct {
         _ = size;
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!self.active) return;
-        const saved_trigger_fn = self.rt.gc.heap_budget.probe;
-        const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
-        self.rt.gc.heap_budget.probe = null;
-        self.rt.gc.heap_budget.probe_ctx = null;
-        defer {
-            self.rt.gc.heap_budget.probe = saved_trigger_fn;
-            self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-        }
         const before = self.rt.gc.block_heap.mark_epoch;
-        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        _ = self.rt.collectFull(null, .engine_active) catch {};
         if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
     }
 };
@@ -5104,33 +4592,33 @@ test "runtime create initializes defaults and options on prefilled storage" {
         try std.testing.expectEqual(.explicit, rt.microtasks.policy);
         try std.testing.expectEqual(@as(?usize, 16 * 1024 * 1024), rt.gc.heap_budget.limit);
         try std.testing.expectEqual(@as(usize, 512 * 1024), rt.gc.heap_budget.gc_threshold);
-        try std.testing.expectEqual(@as(usize, 128 * 1024), rt.stack_size);
-        try std.testing.expectEqual(@as(u62, 128 * 1024), rt.vm_stack_frame_storage.limit);
-        try std.testing.expectEqual(.frame_window, rt.vm_stack_frame_storage.ownership);
-        try std.testing.expectEqual(native_stack_size, rt.native_stack_size);
-        try std.testing.expect(rt.native_stack_top != 0);
-        try std.testing.expectEqual(if (native_stack_size == 0) 0 else rt.native_stack_top -| native_stack_size, rt.native_stack_limit);
+        try std.testing.expectEqual(@as(usize, 128 * 1024), rt.stack.limit);
+        try std.testing.expectEqual(@as(u62, 128 * 1024), rt.stack.frame_storage.limit);
+        try std.testing.expectEqual(.frame_window, rt.stack.frame_storage.ownership);
+        try std.testing.expectEqual(native_stack_size, rt.stack.native_size);
+        try std.testing.expect(rt.stack.native_top != 0);
+        try std.testing.expectEqual(if (native_stack_size == 0) 0 else rt.stack.native_top -| native_stack_size, rt.stack.native_limit);
         try std.testing.expect(rt.can_block);
         try std.testing.expect(!rt.runInterruptHandler());
         try std.testing.expect(interrupted);
 
         try std.testing.expect(!rt.termination_requested.load(.monotonic));
-        try std.testing.expect(rt.current_exception.is(.uninitialized));
-        try std.testing.expect(!rt.current_exception_uncatchable);
-        try std.testing.expect(!rt.current_exception_out_of_memory);
-        try std.testing.expectEqual(@as(usize, 1), rt.next_weak_id);
-        try std.testing.expectEqual(@as(usize, 0), rt.call_depth);
+        try std.testing.expect(rt.exception.value.is(.uninitialized));
+        try std.testing.expect(!rt.exception.uncatchable);
+        try std.testing.expect(!rt.exception.out_of_memory);
+        try std.testing.expectEqual(@as(usize, 1), rt.weak.next_id);
+        try std.testing.expectEqual(@as(usize, 0), rt.stack.call_depth);
         try std.testing.expectEqual(@as(usize, 0), rt.vm_stack.chunk_count);
         for (rt.vm_stack.chunks, rt.vm_stack.used) |chunk, used| {
             try std.testing.expectEqual(@as(usize, 0), chunk.len);
             try std.testing.expectEqual(@as(usize, 0), used);
         }
-        for (rt.single_byte_strings, rt.percent_hex_strings, rt.small_int_strings) |single, percent, integer| {
+        for (rt.strings.single_byte, rt.strings.percent_hex, rt.strings.small_int) |single, percent, integer| {
             try std.testing.expect(single == null and percent == null and integer == null);
         }
-        for (rt.recent_atom_strings) |entry| try std.testing.expect(entry == null);
-        try std.testing.expect(rt.empty_string == null and rt.recent_two_unit_string == null);
-        try std.testing.expectEqual(@as(u8, 0), rt.recent_atom_string_next);
+        for (rt.strings.recent_atoms) |entry| try std.testing.expect(entry == null);
+        try std.testing.expect(rt.strings.empty == null and rt.strings.recent_two_unit == null);
+        try std.testing.expectEqual(@as(u8, 0), rt.strings.recent_atom_next);
         try expectUnsetCompletionWait(rt);
         try std.testing.expect(rt.roots.usingInline());
         try std.testing.expect(rt.job_queue.runtime == rt);
@@ -5229,25 +4717,25 @@ test "runtime subsystem allocators preserve probes and accounting" {
         budget.probe = saved_probe;
         budget.probe_ctx = saved_context;
     }
-    const baseline = rt.diagnostics.allocations.allocated_bytes;
+    const baseline = rt.allocation_diagnostics.allocated_bytes;
     const direct = try rt.allocNative(u8, 37);
-    const direct_charge = rt.diagnostics.allocations.allocated_bytes - baseline;
+    const direct_charge = rt.allocation_diagnostics.allocated_bytes - baseline;
     rt.freeNative(u8, direct);
     try std.testing.expectEqual(@as(usize, 1), calls);
 
     const storage = rt.atoms.storage_allocator;
     const indirect = try storage.alloc(u8, 37);
-    const indirect_charge = rt.diagnostics.allocations.allocated_bytes - baseline;
+    const indirect_charge = rt.allocation_diagnostics.allocated_bytes - baseline;
     storage.free(indirect);
     try std.testing.expectEqual(@as(usize, 2), calls);
     try std.testing.expectEqual(direct_charge, indirect_charge);
-    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.allocation_diagnostics.allocated_bytes);
 
     const native = rt.atoms.native_allocator;
     const unprobed = try native.alloc(u8, 37);
     native.free(unprobed);
     try std.testing.expectEqual(@as(usize, 2), calls);
-    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "runtime subsystems create without a Runtime and keep stable dependencies" {
@@ -5424,9 +4912,9 @@ test "runtime termination crosses threads and idle recovery permits new executio
     try std.testing.expect(rt.isExecutionTerminating());
     try std.testing.expectError(error.Interrupted, ctx.eval("1 + 1", .{}));
     _ = ctx.takeException();
-    rt.call_depth = 1;
+    rt.stack.call_depth = 1;
     try std.testing.expectError(error.RuntimeBusy, rt.cancelTerminateExecution());
-    rt.call_depth = 0;
+    rt.stack.call_depth = 0;
     try rt.cancelTerminateExecution();
 }
 
@@ -5643,7 +5131,7 @@ test "microtask checkpoint roots notified exception through precise collection" 
         }
         fn report(runtime: *core.JSRuntime, value: core.JSValue, raw: ?*anyopaque) core.errors.HostError!void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            _ = runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch return error.SystemError;
+            _ = runtime.collectFull(null, .declared_only) catch return error.SystemError;
             const object = core.Object.expect(value) catch return error.SystemError;
             if (!runtime.ownsObject(object)) return error.SystemError;
             self.observed = true;
@@ -5719,12 +5207,13 @@ test "microtask checkpoint WeakRef kept-alive spans jobs and clears only on comp
         object: ?*core.Object = null,
         observed: bool = false,
         fn keep(context: *core.JSContext, args: []const core.JSValue) core.JSValue {
-            context.runtime.keepAliveWeakRefTarget(args[0]);
+            const identity = (core.Object.weakIdentityFromValue(context.runtime, args[0]) catch null) orelse return context.throwValue(core.JSValue.int32(-1));
+            context.runtime.keepAliveWeakRefTarget(identity, args[0]) catch return context.throwValue(core.JSValue.int32(-1));
             return core.JSValue.undefinedValue();
         }
         fn collect(context: *core.JSContext, _: []const core.JSValue) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(context.runtime.microtasks.userdata.?));
-            _ = context.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch return context.throwValue(core.JSValue.int32(-1));
+            _ = context.runtime.collectFull(null, .declared_only) catch return context.throwValue(core.JSValue.int32(-1));
             self.observed = context.runtime.ownsObject(self.object.?);
             return core.JSValue.undefinedValue();
         }
@@ -5736,7 +5225,7 @@ test "microtask checkpoint WeakRef kept-alive spans jobs and clears only on comp
     try rt.runMicrotasks();
     try std.testing.expect(probe.observed);
     try std.testing.expectEqual(@as(usize, 0), rt.weakref_kept_alive.items.len);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(!rt.ownsObject(probe.object.?));
 }
 
@@ -5908,8 +5397,8 @@ test "runtime review handler installed OOM keeps its failure classification" {
     defer ctx.destroy();
     const Handler = struct {
         fn report(r: *core.JSRuntime, _: core.JSValue, _: ?*anyopaque) core.errors.HostError!void {
-            @import("../src/core/exception.zig").install(r, core.JSValue.int32(99));
-            r.current_exception_out_of_memory = true;
+            r.exception.install(core.JSValue.int32(99));
+            r.exception.out_of_memory = true;
         }
     };
     rt.setMicrotaskExceptionHandler(Handler.report, null);
@@ -5930,7 +5419,7 @@ const BufferCollectionProbe = struct {
         // The copy is complete when provider growth allocates. Its source
         // may now change through a reentrant owner, without changing the copy.
         if (self.calls == 2) @memset(self.source_to_clear, core.JSValue.undefinedValue());
-        _ = self.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+        _ = self.runtime.collectFull(null, .declared_only) catch |err| {
             self.failure = err;
         };
     }
@@ -5968,7 +5457,7 @@ test "ValueRootBuffer protects copy and provider growth then owns liveness" {
     try std.testing.expect(rt.atoms.name(first_id) != null);
     try std.testing.expect(rt.active_value_roots == null);
     source[0] = core.JSValue.undefinedValue();
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.atoms.name(first_id) != null);
     try std.testing.expect(!first.values()[0].is(.undefined_value));
 
@@ -5981,11 +5470,11 @@ test "ValueRootBuffer protects copy and provider growth then owns liveness" {
     first.deinit();
     first.deinit();
     try std.testing.expectEqual(@as(usize, 0), first.values().len);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.atoms.name(first_id) == null);
     try std.testing.expect(rt.atoms.name(second_id) != null);
     second.deinit();
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(rt.atoms.name(second_id) == null);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.value_root_buffers);
 }
@@ -6082,7 +5571,7 @@ test "ValueRootBuffer registration survives allocation probe reentry" {
     try std.testing.expect(probe.calls >= 2);
     try std.testing.expectEqual(@as(usize, 4), rt.roots.value_root_buffers);
     try std.testing.expectEqual(@as(usize, 5), rt.roots.providers().len);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
 }
 
 test "conservative scan retains nursery objects named only by native frames" {
@@ -6177,6 +5666,39 @@ test "nursery evacuation moves self-referencing owners with inline and external 
     }
 }
 
+test "the minor audit reports an old owner holding an unbarriered young child" {
+    // A store that skips the write barrier leaves the old array unremembered,
+    // so the minor condemns the child the array still names: exactly what
+    // `ZJS_GC_AUDIT` exists to report. Verify is off here -- it would (rightly)
+    // reject the deliberately broken heap first.
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    // After `create`: registry creation re-reads ZJS_GC_* from the environment.
+    core.gc.forensics = .{ .audit = .count };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var frame = core.runtime.ValueRootFrame{ .slices = &slices };
+    frame.activate(rt);
+    defer frame.deactivate(rt);
+    const array = try core.Object.createArray(rt, null);
+    values[0] = array.value();
+    try array.appendFastArrayPushValues(rt, &.{core.JSValue.int32(1)});
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!array.gcHeader().metaConst().flags.young);
+    try std.testing.expect(!rt.gc.generation.isRemembered(array.gcHeader()));
+
+    const child = try core.Object.createPlainObject(rt, null);
+    array.arrayElements()[0] = child.value(); // no barrier
+    const reports_before = core.gc.forensics.audit_reports;
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    // The child is gone; drop the dangling slot before anything reads it.
+    array.arrayElements()[0] = core.JSValue.int32(0);
+    try std.testing.expect(core.gc.forensics.audit_reports > reports_before);
+}
+
 test "dense array in-capacity append remembers an old array" {
     const saved_forensics = core.gc.forensics;
     defer core.gc.forensics = saved_forensics;
@@ -6206,4 +5728,359 @@ test "dense array in-capacity append remembers an old array" {
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(child_header));
     try std.testing.expect(array.arrayElements()[2].same(child.value()));
+}
+
+test "an interrupt during a RegExp match is uncatchable for exec, test, and replace" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    // `arm()` makes every later interrupt poll fire. Catastrophic
+    // backtracking reaches the matcher's poll long before the interpreter's.
+    const Switch = struct {
+        armed: bool = false,
+
+        fn arm(c: *zjs.Call) zjs.Value {
+            c.state(@This()).armed = true;
+            return zjs.Value.undefinedValue();
+        }
+
+        fn poll(_: *zjs.JSRuntime, raw: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return self.armed;
+        }
+    };
+    var state = Switch{};
+    _ = try ctx.defineFunction("arm", Switch.arm, .{ .state = @ptrCast(&state) });
+    rt.setInterruptHandler(Switch.poll, &state);
+    defer rt.setInterruptHandler(null, null);
+
+    const sources = [_][]const u8{
+        "var s = 'a'.repeat(40) + 'b'; arm(); try { /(a|aa)+$/.exec(s); } catch (e) {}",
+        "var s = 'a'.repeat(40) + 'b'; arm(); try { /(a|aa)+$/.test(s); } catch (e) {}",
+        "var s = 'a'.repeat(40) + 'b'; arm(); try { s.replace(/(a|aa)+$/g, ''); } catch (e) {}",
+    };
+    for (sources) |source| {
+        state.armed = false;
+        try std.testing.expectError(error.Interrupted, ctx.eval(source, .{}));
+        try std.testing.expect(ctx.hasException());
+        ctx.clearException();
+    }
+}
+
+test "Call.throwError reports a failure to build the Error instead of a bare JSException" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    const Host = struct {
+        fn throwUnderLimit(c: *zjs.Call) !zjs.Value {
+            c.runtime().setMemoryLimit(0);
+            return c.throwTypeError("unreachable message");
+        }
+    };
+    _ = try ctx.defineFunction("throwUnderLimit", zjs.native.managed(Host.throwUnderLimit), .{});
+    defer rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, ctx.eval("throwUnderLimit()", .{}));
+}
+
+test "a tracked unhandled rejection from a native call leaves no pending exception" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{ .track_unhandled_rejections = true });
+    defer ctx.destroy();
+
+    const result = try ctx.eval("Promise.reject(2); Promise.all(1); Math.max(1, 2)", .{});
+    try std.testing.expectEqual(@as(?i32, 2), result.as(.int));
+    try std.testing.expect(ctx.hasUnhandledRejection());
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqual(@as(?i32, 2), ctx.takeUnhandledRejection().as(.int));
+
+    // Handling the rejection later removes it from the report.
+    _ = try ctx.eval("const late = Promise.reject(3); late.catch(() => {});", .{});
+    try ctx.runJobs(null);
+    try std.testing.expect(ctx.hasUnhandledRejection()); // the Promise.all(1) rejection
+    _ = ctx.takeUnhandledRejection();
+    try std.testing.expect(!ctx.hasUnhandledRejection());
+}
+
+test "parser handles very long array literals and reports operand limits as SyntaxErrors" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator, .{});
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+
+    // Past the operand-stack collection limit the literal switches to
+    // running-index mode; distinct constants exceed u16 constant indices.
+    try source.appendSlice(allocator, "var a = [");
+    for (0..70_000) |i| try source.print(allocator, "{d}.5,", .{i});
+    try source.appendSlice(allocator, "]; a.length + a[69999]");
+    const sum = try ctx.eval(source.items, .{});
+    try std.testing.expectEqual(@as(?f64, 70_000 + 69_999.5), sum.as(.float64));
+
+    const Case = struct { prefix: []const u8, item: []const u8, suffix: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .prefix = "(function () {})(", .item = "0,", .suffix = ")", .message = "Too many call arguments" },
+        .{ .prefix = "`", .item = "${0}", .suffix = "`", .message = "too many template substitutions" },
+        .{ .prefix = "(function () {", .item = "var v", .suffix = "})", .message = "implementation limit exceeded: function too large" },
+    };
+    for (cases) |case| {
+        source.clearRetainingCapacity();
+        try source.appendSlice(allocator, case.prefix);
+        for (0..70_000) |i| {
+            if (std.mem.eql(u8, case.item, "var v")) try source.print(allocator, "var v{d};", .{i}) else try source.appendSlice(allocator, case.item);
+        }
+        try source.appendSlice(allocator, case.suffix);
+        try std.testing.expectError(error.JSException, ctx.eval(source.items, .{}));
+        try std.testing.expect(try ctx.pendingExceptionMatchesErrorName("SyntaxError"));
+        const thrown = ctx.takeException();
+        const message = try ctx.toOwnedUtf8(try ctx.getProperty(thrown, "message"), allocator);
+        defer allocator.free(message);
+        try std.testing.expectEqualStrings(case.message, message);
+    }
+}
+
+test "takePendingException prefers the thrown exception over an unhandled rejection" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    ctx.setTrackUnhandledRejections(true);
+
+    _ = try ctx.eval("Promise.reject(1)", .{});
+    try ctx.runJobs(null);
+    try std.testing.expect(ctx.hasUnhandledRejection());
+    try std.testing.expectError(error.JSException, ctx.eval("throw 2", .{}));
+
+    try std.testing.expectEqual(@as(?i32, 2), ctx.takePendingException().as(.int));
+    try std.testing.expect(ctx.hasUnhandledRejection());
+    try std.testing.expectEqual(@as(?i32, 1), ctx.takePendingException().as(.int));
+    try std.testing.expect(!ctx.hasUnhandledRejection());
+}
+
+test "finalization registry unregister cancels a queued cleanup" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var ctx = try core.JSContext.create(rt, .{});
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    const token = try core.Object.create(rt, core.class.ids.object, null);
+    var cleanup_slot: ?*core.Object = cleanup;
+    var registry_slot: ?*core.Object = registry;
+    var token_slot: ?*core.Object = token;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot, &token_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value();
+
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(rt, target.value(), core.JSValue.int32(7), token.value());
+    dropGcPtr(&target);
+
+    _ = try rt.forceGC(null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.countKind(.finalization));
+    // The target is dead and its job queued, but the cell is still in
+    // [[Cells]]: unregister finds it, and the job then has nothing to run.
+    try std.testing.expect(registry.unregisterFinalizationRegistryCells(rt, token.value()));
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+    var job = rt.job_queue.takeFirst().?;
+    defer job.deinit();
+    try std.testing.expect(!registry.takeQueuedFinalizationCell(rt, job.payload.finalization.cell_id));
+
+    registry_slot = null;
+    cleanup_slot = null;
+    token_slot = null;
+    ctx.destroy();
+    ctx_alive = false;
+    dropGcPtr(&ctx);
+    _ = try rt.forceGC(null);
+}
+
+test "weak holders are allocated old so the raw holder chain never names a nursery husk" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    rt.gc.nursery.enabled = true;
+    var roots = core.runtime.ExactValueRoots(4){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const holder_classes = [_]core.ClassId{ core.class.ids.weakmap, core.class.ids.weakset, core.class.ids.weak_ref, core.class.ids.finalization_registry };
+    var holders: [holder_classes.len]*core.Object = undefined;
+    inline for (holder_classes, 0..) |class_id, index| {
+        holders[index] = try core.Object.create(rt, class_id, null);
+        try (try roots.ref(index)).set(rt, holders[index].value());
+        // `gc_weak` links holders by raw address and evacuation does not
+        // relink them, so no holder may be born in the nursery.
+        try std.testing.expect(rt.gc.nursery.pageOf(@intFromPtr(holders[index].gcHeader())) == null);
+    }
+    const plain = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(rt.gc.nursery.pageOf(@intFromPtr(plain.gcHeader())) != null);
+    _ = try rt.collectFull(null, .declared_only);
+    inline for (0..holders.len) |index| {
+        try std.testing.expectEqual(holders[index].value().bits, (try (try roots.ref(index)).get(rt)).bits);
+    }
+}
+
+test "production embedding native stack budget stays inside a small thread stack" {
+    // The default budget is larger than this thread's whole stack; the guard
+    // must still raise its catchable error before the real stack runs out.
+    const Run = struct {
+        fn run(result: *?anyerror) void {
+            result.* = runChecked();
+        }
+        fn runChecked() ?anyerror {
+            const rt = zjs.JSRuntime.create(std.heap.c_allocator, .{}) catch |err| return err;
+            defer rt.destroy();
+            const ctx = zjs.JSContext.create(rt, .{}) catch |err| return err;
+            defer ctx.destroy();
+            const value = ctx.eval(
+                \\function r(n) { return n ? [n].map(() => r(n - 1))[0] : 0; }
+                \\var caught = '';
+                \\try { r(1e6); } catch (e) { caught = e.constructor.name; }
+                \\caught === 'InternalError';
+            , .{}) catch |err| return err;
+            if (value.as(.boolean) != true) return error.TestUnexpectedResult;
+            return null;
+        }
+    };
+    var result: ?anyerror = error.TestUnexpectedResult;
+    const thread = try std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, Run.run, .{&result});
+    thread.join();
+    if (result) |err| return err;
+}
+
+test "TGC S3: a module's export names stay rooted from compile to install" {
+    // The parsed record parks its names in plain fields between the end of
+    // the compile and the module install that copies them; a major in that
+    // window (every allocation here, as in a force-GC build) used to free a
+    // second `as` alias and leave the module record naming a dead atom.
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.globalObject();
+
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
+    var probe = S3HostDefineMajorProbe{ .rt = rt };
+    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    }
+
+    rt.atoms.atom_audit_stale_edge = 0;
+    probe.active = true;
+    const result = ctx.eval(
+        \\let zq = 1, zr = 2, zs = 3;
+        \\export { zq, zr as zjsModuleAliasTwo, zs as zjsModuleAliasThree };
+    , .{ .mode = .module, .filename = "self-alias.mjs" });
+    probe.active = false;
+    _ = result catch |err| return err;
+
+    try std.testing.expect(probe.majors > 0);
+    // The audit counts any edge a later major finds naming a freed atom.
+    _ = try rt.forceGC(null);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_stale_edge);
+}
+
+test "TGC S3: a number property key stays rooted through proxy traps and accessor naming" {
+    // A number key becomes a fresh atom nothing else holds. A proxy trap's
+    // lookup and call run JavaScript, and naming a computed getter
+    // ("get 1.5") allocates, before the key is used again; a major there
+    // used to free it, handing the trap `undefined` or defining the getter
+    // under a dead atom.
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.globalObject();
+    _ = try ctx.eval(
+        \\var handler = new Proxy({}, { get(t, name) { return function (t, k) { return String(k); }; } });
+        \\var p = new Proxy({}, handler);
+        \\var h2 = { has(t, k) { return k === String(1.5 + 1); }, deleteProperty(t, k) { return k === String(1.5 + 2); } };
+        \\var p2 = new Proxy({}, h2);
+    , .{});
+
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
+    var probe = S3HostDefineMajorProbe{ .rt = rt };
+    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    }
+
+    rt.atoms.atom_audit_stale_edge = 0;
+    probe.active = true;
+    const result = ctx.eval(
+        \\var x = 1.5, n = 1e20;
+        \\var o = { get [x + 8]() { return 1; } };
+        \\p[x] === String(x) && p[n * 10] === String(n * 10) && ((x + 1) in p2) && delete p2[x + 2] && Object.keys(o)[0] === String(x + 8);
+    , .{});
+    probe.active = false;
+    const value = result catch |err| return err;
+
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expectEqual(@as(?bool, true), value.as(.boolean));
+    _ = try rt.forceGC(null);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_stale_edge);
+}
+
+test "TGC S3: a number property key stays rooted through primitive [[Set]] and sparse array conversion" {
+    // Setting on a primitive boxes it (an allocation) and a dense array
+    // written at an index of 2^31 or more converts its elements (more
+    // allocations) before the fresh key atom is stored; a major there used
+    // to free it, so the trap saw undefined or the element landed under a
+    // reused atom.
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    _ = try ctx.globalObject();
+    _ = try ctx.eval(
+        \\var seen;
+        \\Object.setPrototypeOf(Number.prototype, new Proxy({}, { set(t, k) { seen = k; return true; } }));
+    , .{});
+
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
+    var probe = S3HostDefineMajorProbe{ .rt = rt };
+    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    }
+
+    rt.atoms.atom_audit_stale_edge = 0;
+    probe.active = true;
+    const result = ctx.eval(
+        \\var k = 1.5, big = 2 ** 32 - 2;
+        \\(5)[k + 1] = 0;
+        \\var a = [1, 2, 3]; a[big] = 7; var s = {}; s[big + 3] = 0;
+        \\seen === String(k + 1) && Object.keys(a).join() === '0,1,2,' + big && a[big] === 7;
+    , .{});
+    probe.active = false;
+    const value = result catch |err| return err;
+
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expectEqual(@as(?bool, true), value.as(.boolean));
+    _ = try rt.forceGC(null);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_stale_edge);
 }

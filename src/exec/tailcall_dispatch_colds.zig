@@ -17,40 +17,28 @@ const cold = dispatch.cold;
 const coldOp = dispatch.coldOp;
 const op = bytecode.opcode.op;
 
-const vm_value = @import("vm_opcodes.zig");
-const vm_arith = @import("vm_opcodes.zig");
-const vm_control = @import("vm_opcodes.zig");
-const vm_call = @import("vm_opcodes.zig");
+const vm_opcodes = @import("vm_opcodes.zig");
 const object_ops = @import("object_ops.zig");
-const exception_ops = @import("exception_ops.zig");
-const vm_literal = @import("vm_opcodes.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const vm_regexp = @import("vm_opcodes.zig");
-const vm_eval_module = @import("vm_opcodes.zig");
-const vm_property_locals = @import("vm_property.zig");
-const vm_property_ref = @import("vm_property.zig");
-const vm_property_globals = @import("vm_property.zig");
-const vm_property_field = @import("vm_property.zig");
-const vm_property_private = @import("vm_property.zig");
-const using_ops = @import("vm_opcodes.zig");
+const vm_property = @import("vm_property.zig");
 
 // ---- Shared handlers (op groups sharing helper+args) ----
-pub const h_varref = coldOp(vm_property_locals.varRefVm);
-pub const h_checkedloc = coldOp(vm_property_locals.checkedLocVm);
-pub const h_loc = coldOp(vm_property_locals.loc);
-pub const h_arg = coldOp(vm_property_locals.getArg);
-pub const h_get_arg_short = coldOp(vm_property_locals.getArgShort);
-pub const h_binary = coldOp(vm_arith.binaryVm);
-pub const h_unary = coldOp(vm_arith.unaryVm);
-pub const h_field = coldOp(vm_property_field.field);
-pub const h_get_array_element = coldOp(vm_property_field.getArrayElement);
-pub const h_put_array_element = cold(vm_property_field.putArrayElementAfterFastMiss);
-pub const h_get_var = coldOp(vm_property_globals.getVar);
+pub const h_varref = coldOp(vm_property.varRefVm);
+pub const h_checkedloc = coldOp(vm_property.checkedLocVm);
+pub const h_loc = coldOp(vm_property.loc);
+pub const h_arg = coldOp(vm_property.getArg);
+pub const h_get_arg_short = coldOp(vm_property.getArgShort);
+pub const h_binary = coldOp(vm_opcodes.binaryVm);
+pub const h_unary = coldOp(vm_opcodes.unaryVm);
+pub const h_field = coldOp(vm_property.field);
+pub const h_get_array_element = coldOp(vm_property.getArrayElement);
+pub const h_put_array_element = cold(vm_property.putArrayElementAfterFastMiss);
+pub const h_get_var = coldOp(vm_property.getVar);
 /// Miss continuation for `dispatch.op_put_var` (and OP_put_var in the all-cold
 /// table). The cell direct-write arm lives in the resident handler, not here.
-pub const h_put_var = cold(vm_property_globals.putVar);
-pub const h_dyn_env_probe = cold(vm_property_ref.dynEnvProbe);
-pub const h_make_slot_ref = coldOp(vm_property_ref.makeSlotRef);
+pub const h_put_var = cold(vm_property.putVar);
+pub const h_dyn_env_probe = cold(vm_property.dynEnvProbe);
+pub const h_make_slot_ref = coldOp(vm_property.makeSlotRef);
 pub const h_define_class = coldOp(object_ops.defineClass);
 pub const h_for_of_start = coldOp(iterator_ops.forOfStartVm);
 
@@ -66,6 +54,7 @@ pub const SpecialHandlers = struct {
     op_call_method_apply_fwd: Handler,
     op_apply: Handler,
     op_call_constructor: Handler,
+    op_init_ctor: Handler,
     op_for_of_next: Handler,
     op_tail_call: Handler,
     op_tail_call_method: Handler,
@@ -97,27 +86,27 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     };
 
     // --- pushes ---
-    t[op.push_i32] = cold(vm_value.pushInt32Operand);
-    t[op.push_bigint_i32] = cold(vm_value.pushBigIntI32Operand);
-    t[op.push_i16] = cold(vm_value.pushI16Operand);
-    t[op.push_i8] = cold(vm_value.pushI8Operand);
-    t[op.push_const] = cold(vm_value.pushConst);
-    t[op.push_const8] = cold(vm_value.pushConst8);
+    t[op.push_i32] = cold(vm_opcodes.pushInt32Operand);
+    t[op.push_bigint_i32] = cold(vm_opcodes.pushBigIntI32Operand);
+    t[op.push_i16] = cold(vm_opcodes.pushI16Operand);
+    t[op.push_i8] = cold(vm_opcodes.pushI8Operand);
+    t[op.push_const] = cold(vm_opcodes.pushConst);
+    t[op.push_const8] = cold(vm_opcodes.pushConst8);
     t[op.private_symbol] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.pushPrivateSymbol(vm.ctx, vm.stack, vm.function, vm.frame);
+            try vm_opcodes.pushPrivateSymbol(vm.ctx, vm.stack, vm.function, vm.frame);
         }
     }.body);
-    t[op.regexp] = cold(vm_regexp.pushLiteral);
-    t[op.fclosure] = coldOp(vm_call.closure);
+    t[op.regexp] = cold(vm_opcodes.pushLiteral);
+    t[op.fclosure] = coldOp(vm_opcodes.closure);
     t[op.fclosure8] = t[op.fclosure];
-    t[op.undefined] = cold(vm_value.pushUndefined);
-    t[op.null] = cold(vm_value.pushNull);
-    t[op.push_false] = coldOp(vm_value.pushBoolean);
-    t[op.push_true] = coldOp(vm_value.pushBoolean);
-    inline for ([_]u8{ op.push_minus1, op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 }) |o| t[o] = coldOp(vm_value.pushSmallInt);
-    t[op.push_atom_value] = cold(vm_value.pushAtomValue);
-    t[op.push_empty_string] = cold(vm_value.pushEmptyString);
+    t[op.undefined] = cold(vm_opcodes.pushUndefined);
+    t[op.null] = cold(vm_opcodes.pushNull);
+    t[op.push_false] = coldOp(vm_opcodes.pushBoolean);
+    t[op.push_true] = coldOp(vm_opcodes.pushBoolean);
+    inline for ([_]u8{ op.push_minus1, op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 }) |o| t[o] = coldOp(vm_opcodes.pushSmallInt);
+    t[op.push_atom_value] = cold(vm_opcodes.pushAtomValue);
+    t[op.push_empty_string] = cold(vm_opcodes.pushEmptyString);
 
     // --- locals / args / var_refs / checked ---
     inline for ([_]u8{ op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3 }) |o| t[o] = h_loc;
@@ -131,11 +120,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // (execution reaches toPropKeyVm through the `using` carrier).
     t[op.set_name] = coldStd(struct {
         fn body(vm: *Vm, pc: [*]const u8) HostError!void {
-            try vm_property_field.setName(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, pc[0]);
+            try vm_property.setName(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, pc[0]);
         }
     }.body);
     // set_name_computed likewise: quarantined byte, reached via the ext0 carrier.
-    t[op.nip_catch] = cold(vm_value.nipCatch);
+    t[op.nip_catch] = cold(vm_opcodes.nipCatch);
 
     // --- arith / compare / unary ---
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
@@ -148,13 +137,13 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // Reached indirectly through cold_table so the int32 fast-path codegen is undisturbed.
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = dispatch.opCompareCold(o);
     inline for ([_]u8{ op.neg, op.to_number, op.inc, op.dec }) |o| t[o] = h_unary;
-    t[op.in] = coldOp(vm_property_field.inOrInstanceof);
-    t[op.instanceof] = coldOp(vm_property_field.inOrInstanceof);
+    t[op.in] = coldOp(vm_property.inOrInstanceof);
+    t[op.instanceof] = coldOp(vm_property.inOrInstanceof);
     t[op.private_in] = cold(object_ops.privateInVm);
-    t[op.not] = cold(vm_arith.bitNotVm);
-    t[op.lnot] = cold(vm_value.logicalNot);
-    t[op.post_inc] = coldOp(vm_arith.postUpdateVm);
-    t[op.post_dec] = coldOp(vm_arith.postUpdateVm);
+    t[op.not] = cold(vm_opcodes.bitNotVm);
+    t[op.lnot] = cold(vm_opcodes.logicalNot);
+    t[op.post_inc] = coldOp(vm_opcodes.postUpdateVm);
+    t[op.post_dec] = coldOp(vm_opcodes.postUpdateVm);
     // Register-resident cold inc_loc/dec_loc (float counters); same indirect install.
     t[op.inc_loc] = dispatch.op_update_loc_cold;
     t[op.dec_loc] = dispatch.op_update_loc_cold;
@@ -163,155 +152,155 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
 
     // --- control ---
     // qjs polls interrupts on every goto: the back edge is a pure loop's only poll point.
-    t[op.goto] = cold(vm_control.gotoPoll32);
-    t[op.goto16] = cold(vm_control.gotoPoll16);
-    t[op.goto8] = cold(vm_control.gotoPoll8);
-    t[op.if_false] = coldOp(vm_control.branchPoll32);
-    t[op.if_true] = coldOp(vm_control.branchPoll32);
-    t[op.if_false8] = coldOp(vm_control.branchPoll8);
-    t[op.if_true8] = coldOp(vm_control.branchPoll8);
-    t[op.gosub] = cold(vm_control.gosub);
-    t[op.ret] = cold(vm_control.ret);
+    t[op.goto] = cold(vm_opcodes.gotoPoll32);
+    t[op.goto16] = cold(vm_opcodes.gotoPoll16);
+    t[op.goto8] = cold(vm_opcodes.gotoPoll8);
+    t[op.if_false] = coldOp(vm_opcodes.branchPoll32);
+    t[op.if_true] = coldOp(vm_opcodes.branchPoll32);
+    t[op.if_false8] = coldOp(vm_opcodes.branchPoll8);
+    t[op.if_true8] = coldOp(vm_opcodes.branchPoll8);
+    t[op.gosub] = cold(vm_opcodes.gosub);
+    t[op.ret] = cold(vm_opcodes.ret);
 
     // --- globals / refs / with ---
     t[op.get_var] = h_get_var;
     t[op.get_var_undef] = h_get_var;
     t[op.put_var] = h_put_var;
     inline for ([_]u8{ op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref }) |o| t[o] = h_make_slot_ref;
-    t[op.make_var_ref] = cold(vm_property_ref.makeVarRefVm);
-    t[op.get_ref_value] = cold(vm_property_ref.getRefValueVm);
-    t[op.put_ref_value] = cold(vm_property_ref.putRefValueVm);
+    t[op.make_var_ref] = cold(vm_property.makeVarRefVm);
+    t[op.get_ref_value] = cold(vm_property.getRefValueVm);
+    t[op.put_ref_value] = cold(vm_property.putRefValueVm);
     t[op.dyn_env_probe] = h_dyn_env_probe;
 
     // --- fields / private / array_el / super ---
     inline for ([_]u8{ op.get_field, op.get_field2, op.put_field }) |o| t[o] = h_field;
-    t[op.get_private_field] = cold(vm_property_private.getPrivateFieldVm);
-    t[op.put_private_field] = cold(vm_property_private.putPrivateFieldVm);
-    t[op.define_private_field] = cold(vm_property_private.definePrivateFieldVm);
+    t[op.get_private_field] = cold(vm_property.getPrivateFieldVm);
+    t[op.put_private_field] = cold(vm_property.putPrivateFieldVm);
+    t[op.define_private_field] = cold(vm_property.definePrivateFieldVm);
     inline for ([_]u8{ op.get_array_el, op.get_array_el2, op.get_array_el3 }) |o| t[o] = h_get_array_element;
     t[op.put_array_el] = h_put_array_element;
     t[op.get_super] = cold(object_ops.getSuper);
     t[op.get_super_value] = cold(object_ops.getSuperValue);
-    t[op.get_length] = cold(vm_literal.getLength);
+    t[op.get_length] = cold(vm_opcodes.getLength);
 
     // --- literals / class ---
-    t[op.object] = cold(vm_literal.objectLiteral);
-    t[op.object_slots2] = cold(vm_literal.objectReserved2);
-    t[op.array_from] = cold(vm_literal.arrayFrom);
-    t[op.define_field] = cold(vm_literal.defineField);
+    t[op.object] = cold(vm_opcodes.objectLiteral);
+    t[op.object_slots2] = cold(vm_opcodes.objectReserved2);
+    t[op.array_from] = cold(vm_opcodes.arrayFrom);
+    t[op.define_field] = cold(vm_opcodes.defineField);
     t[op.set_home_object] = cold(object_ops.setHomeObject);
     t[op.define_class] = h_define_class;
     t[op.define_class_computed] = h_define_class;
-    t[op.define_array_el] = cold(vm_literal.defineArrayEl);
+    t[op.define_array_el] = cold(vm_opcodes.defineArrayEl);
     t[op.define_method] = cold(object_ops.defineMethod);
     t[op.define_method_computed] = cold(object_ops.defineMethodComputed);
-    t[op.append] = coldOp(vm_literal.appendSpreadValuesVm);
-    t[op.copy_data_properties] = cold(vm_literal.copyDataProperties);
-    t[op.put_var_init] = coldOp(vm_property_globals.globalDefinition);
-    t[op.special_object] = cold(vm_literal.specialObject);
-    t[op.ext0] = cold(using_ops.execVm);
-    t[op.rest] = cold(vm_literal.rest);
+    t[op.append] = coldOp(vm_opcodes.appendSpreadValuesVm);
+    t[op.copy_data_properties] = cold(vm_opcodes.copyDataProperties);
+    t[op.put_var_init] = coldOp(vm_property.globalDefinition);
+    t[op.special_object] = cold(vm_opcodes.specialObject);
+    t[op.ext0] = cold(vm_opcodes.execVm);
+    t[op.rest] = cold(vm_opcodes.rest);
 
     // --- typeof / is_* ---
-    t[op.typeof] = cold(vm_value.typeOf);
+    t[op.typeof] = cold(vm_opcodes.typeOf);
     // Three type tests whose opcode slots fusion reclaimed; parked in `keep` (not
     // reachable arms) so the island geometry is unchanged. ICF folds the pair.
     keep[0] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
         }
     }.body);
     keep[1] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.typeOfIsFunction(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.typeOfIsFunction(vm.ctx.runtime, vm.stack);
         }
     }.body);
-    t[op.is_undefined_or_null] = cold(vm_value.isUndefinedOrNull);
+    t[op.is_undefined_or_null] = cold(vm_opcodes.isUndefinedOrNull);
     keep[2] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.isUndefined(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.isUndefined(vm.ctx.runtime, vm.stack);
         }
     }.body);
-    t[op.is_null] = cold(vm_value.isNull);
+    t[op.is_null] = cold(vm_opcodes.isNull);
 
     // --- stack manipulation ---
-    t[op.dup] = cold(vm_value.dup);
-    t[op.swap] = cold(vm_value.swap);
-    t[op.nip] = cold(vm_value.nip);
+    t[op.dup] = cold(vm_opcodes.dup);
+    t[op.swap] = cold(vm_opcodes.swap);
+    t[op.nip] = cold(vm_opcodes.nip);
     keep[11] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.dup1(vm.ctx, vm.stack);
+            try vm_opcodes.dup1(vm.stack);
         }
     }.body);
     keep[6] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.dup2(vm.ctx, vm.stack);
+            try vm_opcodes.dup2(vm.stack);
         }
     }.body);
     keep[10] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.dup3(vm.ctx, vm.stack);
+            try vm_opcodes.dup3(vm.stack);
         }
     }.body);
-    t[op.insert2] = cold(vm_value.insert2);
-    t[op.insert3] = cold(vm_value.insert3);
+    t[op.insert2] = cold(vm_opcodes.insert2);
+    t[op.insert3] = cold(vm_opcodes.insert3);
     keep[3] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.insert4(vm.ctx, vm.stack);
+            try vm_opcodes.insert4(vm.stack);
         }
     }.body);
-    t[op.rot3l] = cold(vm_value.rot3l);
+    t[op.rot3l] = cold(vm_opcodes.rot3l);
     keep[8] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.rot3r(vm.ctx, vm.stack);
+            try vm_opcodes.rot3r(vm.stack);
         }
     }.body);
     keep[9] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.rot4l(vm.ctx, vm.stack);
+            try vm_opcodes.rot4l(vm.stack);
         }
     }.body);
     keep[4] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.rot5l(vm.ctx, vm.stack);
+            try vm_opcodes.rot5l(vm.stack);
         }
     }.body);
-    t[op.perm3] = cold(vm_value.perm3);
-    t[op.perm4] = cold(vm_value.perm4);
+    t[op.perm3] = cold(vm_opcodes.perm3);
+    t[op.perm4] = cold(vm_opcodes.perm4);
     keep[5] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.perm5(vm.ctx, vm.stack);
+            try vm_opcodes.perm5(vm.stack);
         }
     }.body);
     keep[7] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_value.swap2(vm.ctx, vm.stack);
+            try vm_opcodes.swap2(vm.stack);
         }
     }.body);
 
     // --- ctor / brand / misc ---
     t[op.@"catch"] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_control.catchTarget(vm.function, vm.frame, vm.stack, vm.catch_target);
+            try vm_opcodes.catchTarget(vm.function, vm.frame, vm.stack, vm.catch_target);
         }
     }.body);
-    t[op.check_ctor] = cold(vm_call.checkCtorVm);
-    t[op.init_ctor] = cold(vm_call.initCtorVm);
+    t[op.check_ctor] = cold(vm_opcodes.checkCtorVm);
+    t[op.init_ctor] = s.op_init_ctor;
     t[op.check_brand] = cold(object_ops.checkBrandVm);
     t[op.add_brand] = cold(object_ops.addBrandVm);
-    t[op.close_loc] = cold(vm_property_locals.closeLoc);
+    t[op.close_loc] = cold(vm_property.closeLoc);
     t[op.nop] = cold(struct {
         fn body(vm: *Vm) HostError!void {
             _ = vm;
         }
     }.body);
-    t[op.push_this] = cold(vm_value.pushThisVm);
-    t[op.delete_var] = cold(vm_property_ref.deleteVar);
-    t[op.delete] = cold(vm_property_ref.deletePropertyVm);
+    t[op.push_this] = cold(vm_opcodes.pushThisVm);
+    t[op.delete_var] = cold(vm_property.deleteVar);
+    t[op.delete] = cold(vm_property.deletePropertyVm);
     t[op.apply] = s.op_apply;
     t[op.call_constructor] = s.op_call_constructor;
-    t[op.apply_eval] = cold(vm_eval_module.applyEval);
-    t[op.import] = cold(vm_eval_module.dynamicImport);
+    t[op.apply_eval] = cold(vm_opcodes.applyEval);
+    t[op.import] = cold(vm_opcodes.dynamicImport);
 
     // --- iterators ---
     t[op.for_of_start] = h_for_of_start;

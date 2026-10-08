@@ -30,14 +30,6 @@ pub const Kind = enum(u8) {
     /// buffer instead of being fixed at construction.
     data_view_length_tracking = 13,
 
-    /// A concrete typed-array element kind (not `none` / the DataView marker).
-    pub fn isElement(self: Kind) bool {
-        return switch (self) {
-            .none, .data_view_length_tracking => false,
-            else => true,
-        };
-    }
-
     /// The non-BigInt element kinds: decoded and encoded without allocating.
     pub fn isNumeric(self: Kind) bool {
         return switch (self) {

@@ -28,7 +28,6 @@
 //! hundreds of these and they only matter on the paths that actually collect.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const checked = std.debug.runtime_safety;
 

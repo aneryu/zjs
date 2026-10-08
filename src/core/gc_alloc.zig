@@ -40,29 +40,6 @@ const carrier_audit_enabled = gc_carrier.audit_enabled;
 /// it.
 pub const oom_injection_enabled: bool = build_options.zjs_oom_injection;
 
-/// Issue the next slab pop's block-header fetch one allocation early.
-///
-/// The free chain qjs threads through the free blocks themselves
-/// (`JSMallocBlockHeader.u.next_block`, quickjs.c) costs one load per pop,
-/// and that load's result is what names the *following* pop's block -- so
-/// without this it cannot start until the caller has finished initializing the
-/// previous object.
-///
-/// Under refcounting that load is free and this would be pure cost: the alloc
-/// side cycles a handful of arenas that never leave L1/L2 (measured on splay:
-/// 4.8 free arenas per class, 16.6% of arena switches return to one of the
-/// last 8 that class used). Under tracing the identical code walks a set two
-/// orders of magnitude larger -- 2,733 free arenas per class, 0.04% revisits
-/// -- because a sweep leaves thousands of arenas partially free at once and
-/// the alloc side then drains each exactly once. Every arena visit lands on a
-/// cold page and the chain becomes a serial run of cold dependent loads:
-/// 80.4% of `allocAlignedBytesNoTrigger`'s self cycles and sixty times rc's
-/// L2D refill count.
-///
-/// Measurements, and the two heavier designs this was chosen over, live
-/// in git history (2026-08-29 slab-reuse account).
-const slab_alloc_prefetch: bool = true;
-
 /// qjs `MALLOC_OVERHEAD`: 0 on Apple, 8 elsewhere.
 /// Added to every `js_malloc` usable size in `js_def_malloc`.
 pub const malloc_overhead: usize = if (builtin.os.tag.isDarwin()) 0 else 8;
@@ -72,8 +49,8 @@ pub const SmallObjectSlab = @import("gc_slab.zig").Slab;
 /// qjs `js_def_malloc` / `js_def_free`:
 /// `malloc_size ±= js_def_malloc_usable_size(ptr) + MALLOC_OVERHEAD`.
 ///
-/// Slab: `__js_malloc_usable_size` is `block_size - header`
-///. Plus `MALLOC_OVERHEAD` that equals the class
+/// Slab: `__js_malloc_usable_size` is `block_size - header`.
+/// Plus `MALLOC_OVERHEAD` that equals the class
 /// size on Linux (96/112/…), which is what we charge. Standalone / large
 /// have no class; charge the backing request. Adding another
 /// `MALLOC_OVERHEAD` there would double-count the 8-byte GC prefix that
@@ -186,11 +163,6 @@ inline fn gcAlignment(comptime T: type) std.mem.Alignment {
     return comptime if (@alignOf(T) > gc_prefix_size) std.mem.Alignment.of(T) else std.mem.Alignment.fromByteUnits(gc_prefix_size);
 }
 
-inline fn gcSlabClassIndex(self: *const Registry, payload_bytes: usize, alignment: std.mem.Alignment) ?usize {
-    if (!self.cell_storage.slab_enabled) return null;
-    return SmallObjectSlab.classIndex(payload_bytes, alignment);
-}
-
 inline fn rawAllocForGc(self: *Registry, bytes: usize, alignment: std.mem.Alignment, slab_index: ?usize) ![*]u8 {
     if (slab_index) |index| return self.cell_storage.slab.allocAtIndex(self.allocator, index, false);
     return self.allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
@@ -260,7 +232,6 @@ pub fn commitGcExtent(
     if (comptime carrier_audit_enabled) gcCarrier(self).extent_lifecycle.commit(base);
     if (comptime carrier_audit_enabled) {
         if (gcCarrier(self).heap_oracle) |oracle| oracle.recordRawAlloc(.{
-            .audit_id = 0,
             .base = base,
             .raw_base = raw_base,
             .raw_bytes = raw_bytes,
@@ -280,7 +251,6 @@ fn recordBlockGcAllocation(self: *Registry, base: usize, payload_bytes: usize) v
         0;
     const raw_bytes = heap.rawBytesForCell(base, gc_prefix_size).?;
     if (gcCarrier(self).heap_oracle) |oracle| oracle.recordRawAlloc(.{
-        .audit_id = 0,
         .base = base,
         .raw_base = base - gc_prefix_size,
         .raw_bytes = raw_bytes,
@@ -827,8 +797,8 @@ pub fn destroyWithFam(self: *Registry, comptime T: type, ptr: *T, fam_bytes: usi
             }
         }
     }
-    // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
-    //: the block header byte carries the class index,
+    // Straight-line slab arm mirroring qjs `__js_free`'s small-block path:
+    // the block header byte carries the class index,
     // so the free never re-derives the class from the byte size.
     if (info & alloc_info_standalone == 0) {
         const slab_class: usize = info & alloc_info_class_mask;
@@ -1086,13 +1056,7 @@ pub inline fn noteAllocProbe(self: *Registry, byte_count: usize) void {
     const budget = &self.heap_budget;
     if (budget.suspend_alloc_notify) return;
     if (comptime builtin.is_test) {
-        if (budget.probe) |probe| {
-            const saved = budget.suspend_alloc_notify;
-            budget.suspend_alloc_notify = true;
-            defer budget.suspend_alloc_notify = saved;
-            probe(budget.probe_ctx, byte_count);
-            return;
-        }
+        if (budget.runProbe(byte_count)) return;
     }
     if (budget.owner_notify) |notify| notify(budget.owner_ctx, byte_count);
 }
@@ -1172,13 +1136,13 @@ test "allocation ownership keeps native bytes outside each Registry budget" {
     defer first.freeNative(u8, bytes);
     try std.testing.expectError(error.OutOfMemory, first.gc.createCellNoTrigger(Cell));
     try std.testing.expectEqual(@as(usize, 0), first.gc.heap_budget.bytes);
-    try std.testing.expectEqual(@as(usize, 32), first.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 32), first.allocation_diagnostics.allocated_bytes);
     const other = try second.gc.createCellNoTrigger(Cell);
     try std.testing.expectEqual(@as(usize, 0), second.gc.heap_budget.bytes);
     try std.testing.expect(second.hasOutstandingAllocations());
     second.gc.destroyCell(Cell, other);
     try std.testing.expect(!second.hasOutstandingAllocations());
-    try std.testing.expectEqual(@as(usize, 32), first.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 32), first.allocation_diagnostics.allocated_bytes);
 }
 
 test "createWithFamInternalSlow shares allocSlowErased ledger for FAM payloads" {
@@ -1204,15 +1168,15 @@ test "createWithFamInternalSlow shares allocSlowErased ledger for FAM payloads" 
 
     const extras = [_]usize{ 0, 8, 64, 256 };
     for (extras) |extra| {
-        const before = account.diagnostics.allocations.allocated_bytes;
+        const before = account.allocation_diagnostics.allocated_bytes;
         const ptr = try account.gc.createWithFam(TestGc, extra);
         ptr.* = .{};
         const meta: [*]const u8 = @ptrFromInt(@intFromPtr(ptr) - gc_alloc.gc_prefix_size);
         try std.testing.expectEqual(TestGc.gc_kind_tag, meta[3] & 0x7);
         const prefix = gc_alloc.gcPrefixSize(TestGc);
-        try std.testing.expectEqual(before + prefix + @sizeOf(TestGc) + extra, account.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(before + prefix + @sizeOf(TestGc) + extra, account.allocation_diagnostics.allocated_bytes);
         account.gc.destroyWithFam(TestGc, ptr, extra);
-        try std.testing.expectEqual(before, account.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(before, account.allocation_diagnostics.allocated_bytes);
     }
 }
 
@@ -1236,8 +1200,8 @@ test "reallocElements matches alloc(T, n+1) ledger for exact-fit append" {
         );
 
         for (0..8) |n| {
-            const before_typed = typed.diagnostics.allocations.allocated_bytes;
-            const before_erased = erased.diagnostics.allocations.allocated_bytes;
+            const before_typed = typed.allocation_diagnostics.allocated_bytes;
+            const before_erased = erased.allocation_diagnostics.allocated_bytes;
             const next_typed = try typed.allocNative(u32, n + 1);
             @memcpy(next_typed[0..n], typed_items);
             next_typed[n] = @intCast(n);
@@ -1255,7 +1219,7 @@ test "reallocElements matches alloc(T, n+1) ledger for exact-fit append" {
             erased_items = @as([*]u32, @ptrCast(@alignCast(next_erased.ptr)))[0 .. n + 1];
             erased_items[n] = @intCast(n);
 
-            try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes - before_typed, erased.diagnostics.allocations.allocated_bytes - before_erased);
+            try std.testing.expectEqual(typed.allocation_diagnostics.allocated_bytes - before_typed, erased.allocation_diagnostics.allocated_bytes - before_erased);
             try std.testing.expectEqual(typed_items.len, erased_items.len);
             try std.testing.expectEqualSlices(u32, typed_items, erased_items);
         }
@@ -1280,12 +1244,12 @@ test "destroyConstFam shares destroyErased ledger for GC objects" {
             defer account.gc.cell_storage.slab.deinit(std.testing.allocator);
             defer account.gc.deinitGcCarrier();
             account.gc.cell_storage.slab_enabled = slab_enabled;
-            const before = account.diagnostics.allocations.allocated_bytes;
+            const before = account.allocation_diagnostics.allocated_bytes;
             const ptr = try account.gc.createCell(T);
             ptr.* = .{};
-            try std.testing.expect(account.diagnostics.allocations.allocated_bytes > before);
+            try std.testing.expect(account.allocation_diagnostics.allocated_bytes > before);
             account.gc.destroyCell(T, ptr);
-            try std.testing.expectEqual(before, account.diagnostics.allocations.allocated_bytes);
+            try std.testing.expectEqual(before, account.allocation_diagnostics.allocated_bytes);
         }
     }
 }
@@ -1309,13 +1273,13 @@ test "free shares freeAlignedBytes ledger for non-GC elements" {
 
                 const typed_items = try typed.allocNative(T, count);
                 const erased_items = try erased.allocNative(T, count);
-                const before_typed = typed.diagnostics.allocations.allocated_bytes;
-                const before_erased = erased.diagnostics.allocations.allocated_bytes;
+                const before_typed = typed.allocation_diagnostics.allocated_bytes;
+                const before_erased = erased.allocation_diagnostics.allocated_bytes;
                 typed.freeNative(T, typed_items);
                 const erased_bytes = @as([*]u8, @ptrCast(erased_items.ptr))[0 .. erased_items.len * @sizeOf(T)];
                 erased.freeNativeAlignedBytes(erased_bytes, std.mem.Alignment.of(T));
-                try std.testing.expectEqual(@as(usize, 0), typed.diagnostics.allocations.allocated_bytes);
-                try std.testing.expectEqual(@as(usize, 0), erased.diagnostics.allocations.allocated_bytes);
+                try std.testing.expectEqual(@as(usize, 0), typed.allocation_diagnostics.allocated_bytes);
+                try std.testing.expectEqual(@as(usize, 0), erased.allocation_diagnostics.allocated_bytes);
                 try std.testing.expectEqual(before_typed, before_erased);
             }
         }
@@ -1335,16 +1299,16 @@ test "allocElements matches alloc(T) ledger for non-GC elements" {
 
         const counts = [_]usize{ 1, 4, 8, 16 };
         for (counts) |count| {
-            const before_typed = typed.diagnostics.allocations.allocated_bytes;
-            const before_erased = erased.diagnostics.allocations.allocated_bytes;
+            const before_typed = typed.allocation_diagnostics.allocated_bytes;
+            const before_erased = erased.allocation_diagnostics.allocated_bytes;
             const typed_items = try typed.allocNative(u32, count);
             const erased_bytes = try erased.allocNativeElements(count, @sizeOf(u32), std.mem.Alignment.of(u32));
-            try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes - before_typed, erased.diagnostics.allocations.allocated_bytes - before_erased);
+            try std.testing.expectEqual(typed.allocation_diagnostics.allocated_bytes - before_typed, erased.allocation_diagnostics.allocated_bytes - before_erased);
             try std.testing.expectEqual(typed_items.len * @sizeOf(u32), erased_bytes.len);
             typed.freeNative(u32, typed_items);
             erased.freeNativeAlignedBytes(erased_bytes, std.mem.Alignment.of(u32));
-            try std.testing.expectEqual(before_typed, typed.diagnostics.allocations.allocated_bytes);
-            try std.testing.expectEqual(before_erased, erased.diagnostics.allocations.allocated_bytes);
+            try std.testing.expectEqual(before_typed, typed.allocation_diagnostics.allocated_bytes);
+            try std.testing.expectEqual(before_erased, erased.allocation_diagnostics.allocated_bytes);
         }
     }
 }
@@ -1361,11 +1325,11 @@ test "aligned byte allocations charge the request with the slab enabled" {
         var byte_count: usize = 1;
         while (byte_count <= SmallObjectSlab.max_size + 64) : (byte_count += 1) {
             for ([_]std.mem.Alignment{ .@"1", .@"8", .@"16", .@"64" }) |alignment| {
-                const before = account.diagnostics.allocations.allocated_bytes;
+                const before = account.allocation_diagnostics.allocated_bytes;
                 const bytes = try account.allocNativeAlignedBytesNoTrigger(byte_count, alignment);
-                try std.testing.expectEqual(byte_count, account.diagnostics.allocations.allocated_bytes - before);
+                try std.testing.expectEqual(byte_count, account.allocation_diagnostics.allocated_bytes - before);
                 account.freeNativeAlignedBytes(bytes, alignment);
-                try std.testing.expectEqual(before, account.diagnostics.allocations.allocated_bytes);
+                try std.testing.expectEqual(before, account.allocation_diagnostics.allocated_bytes);
             }
         }
     }
@@ -1380,17 +1344,17 @@ test "ordinary native allocation bypasses the small object slab" {
     const Native = struct { value: u64 = 0 };
     const created = try account.createNative(Native);
     created.* = .{ .value = 9 };
-    try std.testing.expectEqual(@sizeOf(Native), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@sizeOf(Native), account.allocation_diagnostics.allocated_bytes);
     for (account.gc.cell_storage.slab.arenas) |arena| try std.testing.expect(arena == null);
 
     const bytes = try account.allocNative(u8, 24);
-    try std.testing.expectEqual(@sizeOf(Native) + 24, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@sizeOf(Native) + 24, account.allocation_diagnostics.allocated_bytes);
     for (account.gc.cell_storage.slab.arenas) |arena| try std.testing.expect(arena == null);
 
-    account.setAllocationDiagnosticLimit(account.diagnostics.allocations.allocated_bytes);
+    account.setNativeBytesLimitForTest(account.allocation_diagnostics.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, account.allocNative(u8, 8));
-    try std.testing.expectEqual(@sizeOf(Native) + 24, account.diagnostics.allocations.allocated_bytes);
-    account.setAllocationDiagnosticLimit(null);
+    try std.testing.expectEqual(@sizeOf(Native) + 24, account.allocation_diagnostics.allocated_bytes);
+    account.setNativeBytesLimitForTest(null);
 
     var items = try account.allocNative(u32, 2);
     items[0] = 7;
@@ -1407,7 +1371,7 @@ test "ordinary native allocation bypasses the small object slab" {
     }
     account.freeNative(u8, bytes);
     account.destroyNative(Native, created);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
     for (account.gc.cell_storage.slab.arenas) |arena| try std.testing.expect(arena == null);
 }
 
@@ -1493,7 +1457,7 @@ test "small slab GC allocation reuses allocator header for metadata" {
     // qjs js_def_malloc: usable + MALLOC_OVERHEAD per block.
     // 64-byte TestGc lands in class 72; Linux charge is the class size.
     const test_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), gc_alloc.gcAlignment(TestGc)).?;
-    try std.testing.expectEqual(2 * gc_alloc.accountedMallocSize(@sizeOf(TestGc), test_class), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(2 * gc_alloc.accountedMallocSize(@sizeOf(TestGc), test_class), account.allocation_diagnostics.allocated_bytes);
 
     const second_meta: [*]const u8 = @ptrFromInt(@intFromPtr(second) - gc_alloc.gc_prefix_size);
     // Byte 2 = allocator class stamp (qjs block_size_idx), byte 3 = kind in
@@ -1514,7 +1478,7 @@ test "small slab GC allocation reuses allocator header for metadata" {
 
     account.gc.destroyCell(TestGc, reused);
     account.gc.destroyCell(TestGc, first);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
 }
 
 test "GC ledger charges slab class usable plus malloc overhead (qjs:2168)" {
@@ -1537,15 +1501,15 @@ test "GC ledger charges slab class usable plus malloc overhead (qjs:2168)" {
     const ptr = try account.allocNative(u8, request);
     // The class-size formula above is what a GC slab block charges. An
     // ordinary byte slice charges the request even while the slab is enabled.
-    try std.testing.expectEqual(request, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(request, account.allocation_diagnostics.allocated_bytes);
     account.freeNative(u8, ptr);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
 
     const standalone_request: usize = 600;
     const standalone = try account.allocNative(u8, standalone_request);
-    try std.testing.expectEqual(standalone_request, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(standalone_request, account.allocation_diagnostics.allocated_bytes);
     account.freeNative(u8, standalone);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
 }
 test "memory account tracks same-allocator allocation and free" {
     const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
@@ -1561,12 +1525,12 @@ test "memory account treats zero-length allocations as inert" {
     defer account.destroy();
     const empty = try account.allocNative(u8, 0);
 
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
     try std.testing.expect(!account.hasOutstandingAllocations());
 
     account.freeNative(u8, empty);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
     try std.testing.expect(!account.hasOutstandingAllocations());
 }

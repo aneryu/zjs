@@ -1,4 +1,4 @@
-//! Phase 3b: compute_pc2line_info
+//! compute_pc2line_info
 //!
 //! Mirrors `compute_pc2line_info` at `quickjs.c`.
 //!
@@ -31,8 +31,6 @@
 
 const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
-const bytecode = @import("../bytecode.zig");
-const runtime = @import("../runtime.zig");
 
 /// PC2LINE encoding constants (mirror `quickjs.c`).
 pub const PC2LINE_BASE: i32 = -1;
@@ -303,15 +301,15 @@ test "pc2line: empty slot list contains the mandatory QuickJS header" {
     defer account.destroy();
     var encoded = try encode(account.nativeAllocator(), &.{}, 1, 1);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, encoded.bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.alloc_calls);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
-    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.peak_allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.alloc_calls);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_diagnostics.peak_allocation_count);
     const header = try decodeHeader(encoded.bytes);
     try std.testing.expectEqual(@as(i32, 1), header.line_num);
     try std.testing.expectEqual(@as(i32, 1), header.col_num);
     try std.testing.expectEqual(@as(usize, 2), header.payload_offset);
     encoded.deinit();
-    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_diagnostics.allocation_count);
 }
 
 test "pc2line: QuickJS header is zero-based ULEB128 byte-for-byte" {

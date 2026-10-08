@@ -5,8 +5,7 @@
 //! Temporary BigInts, UTF buffers, and formatting storage are released in this
 //! module. Realm-aware coercion remains in exec callers, while bare-runtime
 //! string policy delegates to core. QuickJS coordinates include
-//! `JS_ToNumberHintFree` at quickjs.c, `JS_StringToBigInt` at
-//! quickjs.c, and `JS_ToCStringLen2` at quickjs.c.
+//! `JS_ToNumberHintFree`, `JS_StringToBigInt` and `JS_ToCStringLen2`.
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -15,13 +14,13 @@ const bignum = @import("../libs/bigint.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const std = @import("std");
 
-pub const AppendStringError = core.value_string.AppendStringError;
+const AppendStringError = core.value_string.AppendStringError;
 
 pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
-    if (a.is(.symbol) or b.is(.symbol)) return error.TypeError;
+    if (a.is(.symbol) or b.is(.symbol)) return error.SymbolToNumber;
     if (a.isBigInt() or b.isBigInt()) {
-        if (!a.isBigInt() or !b.isBigInt()) return error.TypeError;
+        if (!a.isBigInt() or !b.isBigInt()) return error.BigIntToNumber;
         return binaryBigInt(rt, op, a, b);
     }
     if (op == bytecode.opcode.op.shl or op == bytecode.opcode.op.sar or op == bytecode.opcode.op.shr or
@@ -43,15 +42,8 @@ pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !co
         };
         return core.JSValue.int32(out);
     }
-    if (a.isNumber() and b.isNumber()) return binaryNumber(rt, op, a, b);
-    if (op == bytecode.opcode.op.add or op == bytecode.opcode.op.sub or op == bytecode.opcode.op.mul or
-        op == bytecode.opcode.op.div or op == bytecode.opcode.op.mod or op == bytecode.opcode.op.pow)
-    {
-        return binaryNumber(rt, op, a, b);
-    }
-    // Leftover integer toInt32+switch after the bitwise and number/arith
-    // arms was unreachable: every production binop is handled above.
-    unreachable;
+    // Every remaining production binop is arithmetic.
+    return binaryNumber(rt, op, a, b);
 }
 
 pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
@@ -77,8 +69,8 @@ pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !c
         };
         return core.JSValue.boolean(out);
     }
-    const lhs = if (numberValue(a)) |number| number else try toIntegerOrInfinity(rt, a);
-    const rhs = if (numberValue(b)) |number| number else try toIntegerOrInfinity(rt, b);
+    const lhs = if (numberValue(a)) |number| number else try primitiveToNumber(rt, a);
+    const rhs = if (numberValue(b)) |number| number else try primitiveToNumber(rt, b);
     const out = switch (op) {
         bytecode.opcode.op.lt => lhs < rhs,
         bytecode.opcode.op.lte => lhs <= rhs,
@@ -102,23 +94,23 @@ fn compareBigIntToNonBigInt(rt: *core.JSRuntime, bigint_value: core.JSValue, oth
     if (other.isString()) {
         var parsed = parseStringToBigInt(rt, other) catch return null;
         defer parsed.deinit();
-        var lhs = try cloneBigIntValue(rt, bigint_value);
+        var lhs = try core.value_format.BigIntView.init(rt.nativeAllocator(), bigint_value);
         defer lhs.deinit();
-        return lhs.compare(parsed);
+        return lhs.int.compare(parsed);
     }
     if (numberValue(other)) |number| return try compareBigIntToNumber(rt, bigint_value, number);
     if (other.as(.boolean)) |bool_value| {
         var rhs = try bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), if (bool_value) 1 else 0);
         defer rhs.deinit();
-        var lhs = try cloneBigIntValue(rt, bigint_value);
+        var lhs = try core.value_format.BigIntView.init(rt.nativeAllocator(), bigint_value);
         defer lhs.deinit();
-        return lhs.compare(rhs);
+        return lhs.int.compare(rhs);
     }
     if (other.is(.null_value)) {
         const zero = bignum.BigInt{ .allocator = rt.nativeAllocator() };
-        var lhs = try cloneBigIntValue(rt, bigint_value);
+        var lhs = try core.value_format.BigIntView.init(rt.nativeAllocator(), bigint_value);
         defer lhs.deinit();
-        return lhs.compare(zero);
+        return lhs.int.compare(zero);
     }
     if (other.is(.undefined_value)) return null;
     return error.TypeError;
@@ -132,7 +124,7 @@ pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.Big
     // via skip_spaces — the same trimmer ToNumber uses.
     const trimmed = core.value_format.trimJsWhitespace(buffer.items);
     if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.nativeAllocator() };
-    return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed);
+    return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed, rt);
 }
 
 fn compareBigIntToNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number: f64) !?std.math.Order {
@@ -142,9 +134,9 @@ fn compareBigIntToNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number
 
     var rhs = try truncatedFiniteNumberToBigInt(rt.nativeAllocator(), number);
     defer rhs.deinit();
-    var lhs = try cloneBigIntValue(rt, bigint_value);
+    var lhs = try core.value_format.BigIntView.init(rt.nativeAllocator(), bigint_value);
     defer lhs.deinit();
-    const order = lhs.compare(rhs);
+    const order = lhs.int.compare(rhs);
     if (order != .eq) return order;
     if (@trunc(number) == number) return .eq;
     return if (number > 0) .lt else .gt;
@@ -180,7 +172,8 @@ fn truncatedFiniteNumberToBigInt(allocator: std.mem.Allocator, number: f64) !big
 }
 
 pub fn integerNumberToBigIntValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
-    if (!std.math.isFinite(number) or @trunc(number) != number) return error.RangeError;
+    if (!std.math.isFinite(number)) return error.NonFiniteToBigInt;
+    if (@trunc(number) != number) return error.NonIntegerToBigInt;
     var bigint = try truncatedFiniteNumberToBigInt(rt.nativeAllocator(), number);
     defer bigint.deinit();
     return createBigIntValue(rt, bigint);
@@ -244,7 +237,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         return numberToValue(out);
     }
     if (value.isBigInt()) {
-        if (op == bytecode.opcode.op.to_number) return error.TypeError;
+        if (op == bytecode.opcode.op.to_number) return error.BigIntUnaryPlus;
         if (value.as(.short_big_int)) |short| {
             if (shortBigIntUnary(op, short)) |out| return out;
         }
@@ -290,16 +283,8 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         };
         return numberToValue(out);
     }
-    const n = try toInt32(rt, value);
-    const out = switch (op) {
-        bytecode.opcode.op.neg => return numberToValue(-@as(f64, @floatFromInt(n))),
-        bytecode.opcode.op.to_number => n,
-        bytecode.opcode.op.not => ~n,
-        bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => n - 1,
-        bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => n + 1,
-        else => unreachable,
-    };
-    return core.JSValue.int32(out);
+    // `not` returned above; every other production unary op is in the arm above.
+    unreachable;
 }
 
 pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -352,12 +337,12 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
 }
 
 pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.is(.symbol)) return error.TypeError;
+    if (value.is(.symbol)) return error.SymbolToNumber;
     // qjs JS_ToNumberHintFree: the BIG_INT/SHORT_BIG_INT
     // arm throws TypeError "cannot convert bigint to number" under the plain
     // ToNumber hint; only ToNumeric passes bigints through. Callers that need
     // ToNumeric semantics convert via bigIntToNumber before calling.
-    if (value.isBigInt()) return error.TypeError;
+    if (value.isBigInt()) return error.BigIntToNumber;
     if (numberValue(value)) |number| return numberToValue(number);
     if (value.as(.boolean)) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
     if (value.is(.null_value)) return core.JSValue.int32(0);
@@ -382,12 +367,12 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 }
 
 pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSValue, unsigned: bool) !core.JSValue {
-    if (bits_value.isBigInt() or bits_value.is(.symbol)) return error.TypeError;
-    const bits_number = try toIntegerOrInfinity(rt, bits_value);
-    if (!std.math.isFinite(bits_number)) return error.RangeError;
+    if (bits_value.isBigInt()) return error.BigIntToNumber;
+    if (bits_value.is(.symbol)) return error.SymbolToNumber;
+    const bits_number = try primitiveToNumber(rt, bits_value);
     const truncated = @trunc(bits_number);
-    if (truncated < 0) return error.RangeError;
-    if (truncated > 9007199254740991.0) return error.RangeError;
+    // ToIndex(bits).
+    if (!(truncated >= 0 and truncated <= 9007199254740991.0)) return error.InvalidArrayIndex;
     const bits: usize = @intFromFloat(truncated);
     var input = try toBigIntValue(rt, bigint_value);
     defer input.deinit();
@@ -422,9 +407,21 @@ pub fn numberToValue(value: f64) core.JSValue {
     return core.JSValue.float64(value);
 }
 
-/// Leftover empty + ascii/utf8 string mint. candidate90 still compiled two
-/// leftover local copies (`string_builtin_ops` 173, `regexp_ops` 271) plus
-/// many inlined sites of this same walk. Take the mint once as `noinline`.
+/// `createStringValue` for host bytes that need not be UTF-8 (a file path):
+/// ill-formed sequences become U+FFFD instead of failing.
+pub fn createStringValueLossy(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+    return createStringValue(rt, bytes) catch |err| switch (err) {
+        error.InvalidUtf8 => {
+            const replaced = try std.fmt.allocPrint(rt.nativeAllocator(), "{f}", .{std.unicode.fmtUtf8(bytes)});
+            defer rt.nativeAllocator().free(replaced);
+            return createStringValue(rt, replaced);
+        },
+        else => |other| return other,
+    };
+}
+
+/// Mint a string value from bytes (cached empty string, ASCII, or UTF-8).
+/// `noinline` so the many callers share one copy.
 pub noinline fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
@@ -502,39 +499,17 @@ pub const numberValue = core.number.numberValue;
 /// limbs, no decimal round trip.
 pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (value.as(.short_big_int)) |short| return @floatFromInt(short);
-    var bigint = try cloneBigIntValue(rt, value);
+    var bigint = try core.value_format.BigIntView.init(rt.nativeAllocator(), value);
     defer bigint.deinit();
-    return bigint.toFloat64();
+    return bigint.int.toFloat64();
 }
 
-pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    if (numberValue(value)) |number| return number;
-    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
-    // (qjs JS_ToNumberHintFree quickjs.c via JS_ToFloat64Free).
-    if (value.isBigInt()) return error.TypeError;
-    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
-    if (value.is(.null_value)) return 0;
-    if (value.is(.undefined_value)) return std.math.nan(f64);
-
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.nativeAllocator());
-    try appendValueString(rt, &buffer, value);
-    return parseJsNumber(buffer.items);
-}
-
-pub fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
-    const number = try toIntegerOrInfinity(rt, value);
-    if (std.math.isNan(number)) return 0;
-    if (!std.math.isFinite(number)) return error.RangeError;
-    const truncated = @trunc(number);
-    if (truncated < 0) return error.RangeError;
-    if (truncated == 0) return 0;
-    return @intFromFloat(truncated);
-}
+pub const primitiveToNumber = core.typed_array.primitiveToNumber;
+pub const toIndexUsize = core.typed_array.toIndexUsize;
 
 pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt()) return cloneBigIntValue(rt, value);
-    if (value.isNumber()) return error.TypeError;
+    if (value.isNumber()) return error.CannotConvertToBigInt;
     if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), if (bool_value) 1 else 0);
 
     var buffer = std.ArrayList(u8).empty;
@@ -544,15 +519,16 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
         // qjs JS_StringToBigInt + skip_spaces.
         const trimmed = core.value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), 0);
-        return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed) catch |err| switch (err) {
+        return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed, rt) catch |err| switch (err) {
             // qjs js_atobigint throws its RangeError through js_atof rather
             // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
             error.OutOfMemory => error.OutOfMemory,
+            error.Interrupted => error.Interrupted,
             error.InvalidBigInt => error.SyntaxError,
         };
     }
-    return error.TypeError;
+    return error.CannotConvertToBigInt;
 }
 
 test "string boundary numeric conversion reads ropes without materialization" {
@@ -601,11 +577,11 @@ test "string boundary numeric conversion reads ropes without materialization" {
     defer rt.setMemoryLimit(null);
     var bigint = try toBigIntValue(rt, try input.get(rt));
     defer bigint.deinit();
-    const decimal = try bigint.formatBase10Alloc(rt.nativeAllocator());
+    const decimal = try bigint.formatBase10Alloc(rt.nativeAllocator(), null);
     defer rt.nativeAllocator().free(decimal);
     try std.testing.expectEqualStrings("123456789012345678901234567890", decimal);
     try std.testing.expect(!rope.isLinearized());
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, toNumberValue(rt, try input.get(rt)));
     try std.testing.expect(!rope.isLinearized());
@@ -619,7 +595,7 @@ test "string boundary BigInt conversion preserves allocation failures" {
         const rt = try core.JSRuntime.create(failing.allocator(), .{});
         defer rt.destroy();
         const value = (try core.string.String.createAscii(rt, "123456789012345678901234567890123456789012345678901234567890")).value();
-        const native_before = rt.diagnostics.allocations.allocated_bytes;
+        const native_before = rt.allocation_diagnostics.allocated_bytes;
         const epoch = rt.gc.collection_epoch;
         failing.fail_index = failing.alloc_index + offset;
         const result = toBigIntValue(rt, value);
@@ -632,7 +608,7 @@ test "string boundary BigInt conversion preserves allocation failures" {
             try std.testing.expectEqual(error.OutOfMemory, err);
             failed += 1;
         }
-        try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
         try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
         if (succeeded) break;
     }
@@ -646,7 +622,11 @@ inline fn heapBigInt(value: core.JSValue) ?*core.bigint.BigInt {
     return @alignCast(@fieldParentPtr("header", header));
 }
 
-pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
+fn heapBigIntLimbCount(value: core.JSValue) usize {
+    return if (heapBigInt(value)) |big| big.limbs().len else 1;
+}
+
+fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.as(.short_big_int)) |big_int| return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -745,6 +725,16 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     // tracer-owned BigInt has no count to prove uniqueness, so every heap
     // add allocates its result (S1-c; revisit if bigint-heavy code shows it).
 
+    // Multiplication and division are quadratic in the limb count: charge
+    // that work to the native interrupt countdown so a loop of them over
+    // large operands polls (contract C8).
+    switch (op) {
+        bytecode.opcode.op.mul, bytecode.opcode.op.div, bytecode.opcode.op.mod, bytecode.opcode.op.pow => {
+            try rt.pollNativeBulkWork(heapBigIntLimbCount(a) * heapBigIntLimbCount(b) * @sizeOf(bignum.Limb));
+        },
+        else => {},
+    }
+
     // Single-allocation multiplication: the wrapper and the product's limbs
     // come from one createWithFam instead of mulAlloc's limb block plus
     // createFromOwned's wrapper. This is qjs's topology (js_bigint_new is one
@@ -799,7 +789,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         bytecode.opcode.op.@"or" => try lhs.bitwise(rhs, allocator, .@"or"),
         bytecode.opcode.op.shl => try shiftBigInt(allocator, lhs, rhs, .left),
         bytecode.opcode.op.sar => try shiftBigInt(allocator, lhs, rhs, .right),
-        bytecode.opcode.op.shr => return error.TypeError,
+        bytecode.opcode.op.shr => return error.BigIntUnsignedShift,
         else => unreachable,
     };
     return createBigIntOwned(rt, out);
@@ -861,15 +851,15 @@ fn shortBigIntMul(lhs: i64, rhs: i64) ?core.JSValue {
 }
 
 fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    const lhs = if (numberValue(a)) |number| number else try toIntegerOrInfinity(rt, a);
-    const rhs = if (numberValue(b)) |number| number else try toIntegerOrInfinity(rt, b);
+    const lhs = if (numberValue(a)) |number| number else try primitiveToNumber(rt, a);
+    const rhs = if (numberValue(b)) |number| number else try primitiveToNumber(rt, b);
     const out = switch (op) {
         bytecode.opcode.op.mul => lhs * rhs,
         bytecode.opcode.op.div => lhs / rhs,
         bytecode.opcode.op.mod => @rem(lhs, rhs),
         bytecode.opcode.op.add => lhs + rhs,
         bytecode.opcode.op.sub => lhs - rhs,
-        bytecode.opcode.op.pow => jsMathPow(lhs, rhs),
+        bytecode.opcode.op.pow => core.number.exponentiate(lhs, rhs),
         else => unreachable,
     };
     // qjs js_add_slow / js_binary_arith_slow: two JS_TAG_INT operands take the
@@ -881,26 +871,26 @@ fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
 }
 
 fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try primitiveToNumber(rt, value);
     if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
     const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
     const wrapped: u32 = @intFromFloat(@mod(integer, 4294967296));
     return @bitCast(wrapped);
 }
 
-fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
+pub fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
     var values = [_]core.JSValue{ a, b };
     const slots: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
-    if (a.is(.symbol) or b.is(.symbol)) return error.TypeError;
+    if (a.is(.symbol) or b.is(.symbol)) return error.SymbolToString;
     if (a.isString() and b.is(.int)) {
-        if (try stringAddStringInt(rt, a, b.as(.int).?, .suffix)) |out| return out;
+        return stringAddStringInt(rt, a, b.as(.int).?, .suffix);
     }
     if (a.is(.int) and b.isString()) {
-        if (try stringAddStringInt(rt, b, a.as(.int).?, .prefix)) |out| return out;
+        return stringAddStringInt(rt, b, a.as(.int).?, .prefix);
     }
     if (a.isString() and b.isString()) return stringAddStringsOwned(rt, a, b);
     var buffer = std.ArrayList(u8).empty;
@@ -915,7 +905,7 @@ const StringIntPosition = enum {
     suffix,
 };
 
-fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !?core.JSValue {
+fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !core.JSValue {
     var values = [_]core.JSValue{ string_value, core.JSValue.int32(int_value) };
     const slots: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
@@ -931,7 +921,8 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         return try core.string.String.createBalancedRope(rt, left, right);
     }
 
-    const string = core.string.asFlat(string_value) orelse return null;
+    // Callers checked isString() and ropes returned above.
+    const string = core.string.asFlat(string_value).?;
     if (string.len() == 0) {
         return try toStringValue(rt, core.JSValue.int32(int_value));
     }
@@ -988,7 +979,7 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
             // spent / the buffer full, doubles it). This has to precede the
             // QJS short-right merge below: a view's `right` is an undefined
             // VALUE, which that arm would read.
-            if (node.buffer != null and b_len <= core.string.String.rope_short_len) {
+            if (node.buffer != null) {
                 const appended = try core.string.appendTailBufferRope(rt, node, b_string);
                 return appended.value();
             }
@@ -1014,15 +1005,16 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
             if (a_len == 0) {
                 return b;
             }
-            if (b_len <= core.string.String.rope_short_len and a_len <= core.string.String.rope_short2_len) {
+            if (a_len <= core.string.String.rope_short2_len) {
                 // TGC S2-i: past the seed length the flat arm below is the
                 // quadratic term of `s = s + x`; start a tail buffer instead
-                // and pay `a`'s copy exactly once.
+                // and pay `a`'s copy exactly once. The buffer amortizes any
+                // `b`, so its length does not gate the seed.
                 if (a_len >= core.string.String.tail_buffer_seed_len) {
                     const seeded = try core.string.createTailBufferRope(rt, a_string, b_string);
                     return seeded.value();
                 }
-                return concatFlatStringBodiesOwned(rt, a_string, b_string);
+                if (b_len <= core.string.String.rope_short_len) return concatFlatStringBodiesOwned(rt, a_string, b_string);
             }
         }
     } else {
@@ -1124,15 +1116,8 @@ fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isBigInt() and b.isBigInt()) {
         return (compareBigIntValues(a, b) orelse return false) == .eq;
     }
-    if (a.isNumber() and b.isNumber()) {
-        const av = numberValue(a) orelse return false;
-        const bv = numberValue(b) orelse return false;
-        if (std.math.isNan(av) or std.math.isNan(bv)) return false;
-        return av == bv;
-    }
-    if (a.as(.int)) |ai| {
-        if (b.as(.int)) |bi| return ai == bi;
-    }
+    // IEEE `==` is already false for NaN.
+    if (a.isNumber() and b.isNumber()) return numberValue(a).? == numberValue(b).?;
     if (a.as(.boolean)) |ab| {
         if (b.as(.boolean)) |bb| return ab == bb;
     }
@@ -1144,41 +1129,7 @@ fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     return a.same(b);
 }
 
-fn compareBigIntValues(a: core.JSValue, b: core.JSValue) ?std.math.Order {
-    var lhs_scratch: [2]bignum.Limb = undefined;
-    var rhs_scratch: [2]bignum.Limb = undefined;
-    const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
-    const rhs = bigIntParts(b, &rhs_scratch) orelse return null;
-    return bignum.compareParts(lhs.negative, lhs.limbs, rhs.negative, rhs.limbs);
-}
-
-const BigIntParts = struct {
-    negative: bool,
-    limbs: []const bignum.Limb,
-};
-
-fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
-    if (value.as(.short_big_int)) |short| {
-        const signed: i128 = short;
-        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
-        var len: usize = 0;
-        while (magnitude != 0) {
-            scratch[len] = @truncate(magnitude);
-            magnitude >>= @bitSizeOf(bignum.Limb);
-            len += 1;
-        }
-        return .{
-            .negative = short < 0,
-            .limbs = scratch[0..len],
-        };
-    }
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return .{ .negative = big.negative(), .limbs = big.limbs() };
-    }
-    return null;
-}
+const compareBigIntValues = core.value.compareBigIntValues;
 
 pub fn isHTMLDDA(value: core.JSValue) bool {
     return core.value_semantics.isHTMLDDA(value);
@@ -1186,11 +1137,6 @@ pub fn isHTMLDDA(value: core.JSValue) bool {
 
 fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32 {
     return core.string.compareStringValues(a, b, eq_only);
-}
-
-fn jsMathPow(lhs: f64, rhs: f64) f64 {
-    if (!std.math.isFinite(rhs) and @abs(lhs) == 1) return std.math.nan(f64);
-    return std.math.pow(f64, lhs, rhs);
 }
 
 // Strict equality over runtime values (moved from the VM call runtime).
@@ -1231,10 +1177,9 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     return core.value_string.appendValueString(rt, buffer, value, .{ .symbol = .describe });
 }
 
-// ----- merged from coercion_ops.zig -----
+// ----- Primitive coercion -----
 // Primitive coercion: ToPrimitive/ToNumber/ToLength/ToUint32 helpers and wrapper extraction.
 const frame_mod = @import("frame.zig");
-const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -1265,7 +1210,7 @@ fn toPrimitiveForAdditionObject(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    return toPrimitiveWithHint(ctx, output, global, value, "default");
+    return toPrimitiveWithHint(ctx, output, global, value, "default", null, null);
 }
 
 pub fn toPrimitiveForNumber(
@@ -1275,7 +1220,20 @@ pub fn toPrimitiveForNumber(
     value: core.JSValue,
 ) !core.JSValue {
     if (!value.is(.object)) return value;
-    return toPrimitiveWithHint(ctx, output, global, value, "number");
+    return toPrimitiveWithHint(ctx, output, global, value, "number", null, null);
+}
+
+/// ToPrimitive(value, string): `toString` before `valueOf`.
+pub fn toPrimitiveForString(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (!value.is(.object)) return value;
+    return toPrimitiveWithHint(ctx, output, global, value, "string", caller_function, caller_frame);
 }
 
 fn toPrimitiveWithHint(
@@ -1284,6 +1242,8 @@ fn toPrimitiveWithHint(
     global: *core.Object,
     value: core.JSValue,
     comptime hint: []const u8,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var values = [_]core.JSValue{ global.value(), value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     const live: []core.JSValue = &values;
@@ -1292,29 +1252,34 @@ fn toPrimitiveWithHint(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
 
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
-    values[2] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], symbol_to_primitive, null, null);
+    const symbol_to_primitive = comptime core.atom.predefinedId("Symbol.toPrimitive", .symbol).?;
+    values[2] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], symbol_to_primitive, caller_function, caller_frame);
     if (!values[2].is(.undefined_value) and !values[2].is(.null_value)) {
         // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
-        // object return value throws "toPrimitive".
+        // object return value throws a TypeError.
         if (!isCallableValue(values[2])) return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "not a function");
         values[3] = try createStringValue(ctx.runtime, hint);
-        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, objectFromValue(values[0]).?, values[1], values[2], values[3..4], null, null);
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, objectFromValue(values[0]).?, values[1], values[2], values[3..4], caller_function, caller_frame);
         if (primitive.is(.object)) {
-            return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "toPrimitive");
+            return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "Symbol.toPrimitive must return a primitive value");
         }
         return primitive;
     }
 
-    return toOrdinaryPrimitive(ctx, output, objectFromValue(values[0]).?, values[1]);
+    return ordinaryToPrimitive(ctx, output, objectFromValue(values[0]).?, values[1], comptime std.mem.eql(u8, hint, "string"), caller_function, caller_frame);
 }
 
-pub fn toOrdinaryPrimitive(
+/// OrdinaryToPrimitive: `toString` first for the string hint, `valueOf`
+/// first otherwise.
+pub fn ordinaryToPrimitive(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
+    comptime string_first: bool,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var values = [_]core.JSValue{ global.value(), value };
     const live: []core.JSValue = &values;
@@ -1322,19 +1287,15 @@ pub fn toOrdinaryPrimitive(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (try callObjectToPrimitiveMethod(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.valueOf, null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.toString, null, null)) |primitive| return primitive;
-    // JS_ToPrimitiveInternal: no primitive from valueOf/toString.
-    return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "toPrimitive");
-}
-
-pub fn toOrdinaryPrimitiveNumber(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    return toOrdinaryPrimitive(ctx, output, global, value);
+    const order = if (string_first)
+        [2]core.Atom{ core.atom.ids.toString, core.atom.ids.valueOf }
+    else
+        [2]core.Atom{ core.atom.ids.valueOf, core.atom.ids.toString };
+    inline for (order) |method| {
+        if (try callObjectToPrimitiveMethod(ctx, output, objectFromValue(values[0]).?, values[1], method, caller_function, caller_frame)) |primitive| return primitive;
+    }
+    // JS_ToPrimitiveInternal: no primitive from either method.
+    return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "cannot convert object to primitive value");
 }
 
 pub fn valueTruthy(value: core.JSValue) bool {
@@ -1377,15 +1338,19 @@ pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
     return @intFromFloat(length_number);
 }
 
-pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
+/// ToNumber through ToPrimitive(number); like JS_ToNumber, a BigInt throws
+/// "cannot convert bigint to number". Always returns an int32 or float64.
+fn toNumberRejectingBigInt(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    // JS_ToNumber on a bigint throws "cannot convert bigint to number".
     if (primitive.isBigInt()) {
-        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+        _ = try throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
         return error.TypeError;
     }
-    const number_value = try toNumberValue(ctx.runtime, primitive);
-    const number = numberValue(number_value) orelse std.math.nan(f64);
+    return toNumberValue(ctx.runtime, primitive);
+}
+
+pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
+    const number = numberValue(try toNumberRejectingBigInt(ctx, output, global, value)).?;
     if (std.math.isNan(number) or number <= 0) return 0;
     const max_length = 9007199254740991.0;
     if (number >= max_length) return max_length;
@@ -1424,24 +1389,14 @@ pub fn coerceOptionalNumberMethodArgument(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    preserve_undefined: bool,
 ) !?core.JSValue {
-    if (args.len == 0) return null;
-    if (preserve_undefined and args[0].is(.undefined_value)) return null;
-    const primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
-    // JS_ToNumber on a bigint throws "cannot convert bigint to number".
-    if (primitive.isBigInt()) {
-        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
-        return error.TypeError;
-    }
-    return try toNumberValue(ctx.runtime, primitive);
+    if (args.len == 0 or args[0].is(.undefined_value)) return null;
+    return try toNumberRejectingBigInt(ctx, output, global, args[0]);
 }
 
 /// The `[[PrimitiveValue]]` slot of a Number/Boolean/BigInt/Symbol wrapper, or
-/// null for anything else. `rt` is unused (borrowed reads only) and is kept
-/// only so the cross-file call sites keep their uniform `(rt, value)` shape.
-pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue {
-    _ = rt;
+/// null for anything else.
+pub fn primitiveWrapperStoredValue(value: core.JSValue) ?core.JSValue {
     if (!value.is(.object)) return null;
     const object = core.value_semantics.objectFromValue(value) orelse return null;
     switch (object.class_id) {
@@ -1454,37 +1409,17 @@ pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?co
     }
 }
 
+/// Date argument coercion: qjs never accepts BigInts here either.
 pub fn toNumberForDateMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (value.is(.object)) {
-        const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-        // JS_ToFloat64 on a bigint primitive throws "cannot convert bigint to
-        // number"; qjs date argument coercion never accepts bigints.
-        if (primitive.isBigInt()) {
-            _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
-            return error.TypeError;
-        }
-        return toNumberValue(ctx.runtime, primitive);
-    }
-    // Neither leg needs the caller frame today: `toPrimitiveForNumber` opens
-    // its own native environment. The pair stays so the ~10 date_ops call
-    // sites keep passing the frame they already hold.
-    _ = caller_function;
-    _ = caller_frame;
-    if (value.isBigInt()) {
-        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
-        return error.TypeError;
-    }
-    return toNumberValue(ctx.runtime, value);
+    return toNumberRejectingBigInt(ctx, output, global, value);
 }
 
-// ----- merged from primitive_ops.zig -----
+// ----- Primitive-wrapper and Symbol records -----
 // Native record tables and dispatch for primitive wrappers and Symbol helpers.
 //
 // Boolean, BigInt, String, Number valueOf, and Symbol records share this
@@ -1493,14 +1428,8 @@ pub fn toNumberForDateMethod(
 // values are owned.
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const exceptions = @import("exception_ops.zig");
-const HostError = exceptions.HostError;
-pub const description = core.symbol.description;
-pub const registryKey = core.symbol.registryKey;
+const HostError = exception_ops.HostError;
 pub const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
-pub fn toString(value: bool) []const u8 {
-    return if (value) "true" else "false";
-}
 
 /// `.primitive` native-builtin ids encode `class_tag * 10 + method` (class
 /// tags: 1 number, 2 boolean, 3 bigint, 4 symbol, 5 string; see
@@ -1536,6 +1465,7 @@ pub const shared_entries = [_]core.host_function.InternalEntry{
     primitiveEntry("valueOf", 0, primitiveId(.number, 2)),
     primitiveEntry("toString", 0, primitiveId(.bigint, 1)),
     primitiveEntry("valueOf", 0, primitiveId(.bigint, 2)),
+    primitiveEntry("toLocaleString", 0, primitiveId(.bigint, 8)),
     primitiveEntry("toString", 0, primitiveId(.string, 1)),
     primitiveEntry("valueOf", 0, primitiveId(.string, 2)),
 };
@@ -1572,7 +1502,7 @@ fn primitiveEntry(comptime name: []const u8, comptime arity: u8, comptime id: u3
 /// Shared record handler for the `.primitive` domain. It consumes the atomic
 /// final-call realm view and delegates to `primitivePrototypeMethod`, which stays in
 /// exec because the VM's prototype-method fast path also calls it.
-pub fn primitiveCall(
+fn primitiveCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
     native_args: []const core.JSValue,
@@ -1608,9 +1538,7 @@ fn primitiveStaticEntry(comptime name: []const u8, comptime arity: u8, comptime 
 
 /// Shared record handler for the wrapper-primitive *constructor* statics
 /// (method ids 6+). These are ordinary `JS_CFUNC_*_DEF` entries in qjs, so
-/// they belong on the record path like every other builtin; before this they
-/// were the last `.none`-tagged bigint/symbol tables and fell through to
-/// `call_runtime.callNativeCallableByName`'s name cascade.
+/// they belong on the record path like every other builtin.
 fn primitiveStaticCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,

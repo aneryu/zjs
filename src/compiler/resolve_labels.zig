@@ -3,7 +3,6 @@
 //! Direct spec: quickjs.c resolve_labels (34796). Comment each arm qjs:<line>.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const core = @import("../core/root.zig");
 const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
@@ -16,7 +15,7 @@ const opcode = bytecode.opcode;
 const op = opcode.op;
 const SourceLocSlot = bytecode.pipeline.pc2line.SourceLocSlot;
 
-pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow };
+pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow, Interrupted };
 
 pub const LayoutMode = enum { plain, short };
 
@@ -35,7 +34,7 @@ pub const default_layout: LayoutMode = std.meta.stringToEnum(
 ) orelse @compileError("invalid zjs_compiler_layout build option value");
 
 /// Stage 3/4 still own independent growable outputs. The geometric grow
-/// walk is the already-linked `builder.reserve` / `reserveSlowBytes` body.
+/// walk is the already-linked `builder.reserve` / `reserveSlow` body.
 const FinalReloc = struct {
     next: u32,
     addr: u32,
@@ -47,6 +46,11 @@ const JumpSlot = struct {
     size: u8,
     pos: u32,
     label: u32,
+    /// A wide `if_false` emitted right after a one-byte `lt`/`eq`
+    /// instruction, so shortening it to `if_false8` may fuse that compare.
+    /// Recorded at emission: after layout the byte before the jump may be
+    /// an operand, never safe to read as an opcode.
+    follows_fusable_compare: bool = false,
 };
 
 const BindEntry = struct {
@@ -175,25 +179,6 @@ fn validateProductMetadata(product: *const resolve_variables.ResolvedProduct) Er
     }
 }
 
-fn updateLabel(
-    product: *resolve_variables.ResolvedProduct,
-    label_index: u32,
-    delta: i32,
-) Error!u32 {
-    if (label_index >= product.label_len) return error.InvalidBytecode;
-    const slot = &product.label_slots[label_index];
-    if (delta < 0) {
-        const amount: u32 = @intCast(-@as(i64, delta));
-        if (slot.ref_count < amount) return error.InvalidBytecode;
-        slot.ref_count -= amount;
-    } else if (delta > 0) {
-        const amount: u32 = @intCast(delta);
-        slot.ref_count = std.math.add(u32, slot.ref_count, amount) catch
-            return error.InvalidBytecode;
-    }
-    return slot.ref_count;
-}
-
 const PatternToken = struct {
     options: []const Form,
     idx: ?u16 = null,
@@ -216,12 +201,62 @@ const Fusion = struct { b: u8, fused: u8 };
 /// push_0 re-fuse.
 const max_fusions = 4;
 
+/// An emitted A opcode: its size and the Bs that may fuse onto it.
+const FusionRow = struct { sz: u32, fusions: []const Fusion };
+
+/// The one fusion table. The emit sites filter with `fusion_a` / `fusion_b`,
+/// which are derived from it, so a pair cannot be added to one and not the
+/// other.
+const fusion_rows: [256]?FusionRow = rows: {
+    var rows: [256]?FusionRow = @splat(null);
+    rows[op.get_loc0] = .{ .sz = 1, .fusions = &.{.{ .b = op.get_field, .fused = op.get_loc0_field }} };
+    rows[op.lt] = .{ .sz = 1, .fusions = &.{.{ .b = op.if_false8, .fused = op.cmp_if_false8 }} };
+    rows[op.put_loc8] = .{ .sz = 2, .fusions = &.{.{ .b = op.get_loc8, .fused = op.put_loc8_get_loc8 }} };
+    rows[op.push_this] = .{ .sz = 1, .fusions = &.{.{ .b = op.put_loc0, .fused = op.push_this_put_loc0 }} };
+    // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
+    rows[op.get_field2] = .{ .sz = 6, .fusions = &.{.{ .b = op.call_method, .fused = op.get_field2_call_method }} };
+    rows[op.get_loc2] = .{ .sz = 1, .fusions = &.{ .{ .b = op.get_field, .fused = op.get_loc2_field }, .{ .b = op.get_field2, .fused = op.get_loc2_field2 } } };
+    rows[op.eq] = .{ .sz = 1, .fusions = &.{.{ .b = op.if_false8, .fused = op.eq_if_false8 }} };
+    rows[op.get_field] = .{ .sz = 6, .fusions = &.{.{ .b = op.get_field2, .fused = op.get_field_field2 }} };
+    rows[op.get_var] = .{ .sz = 3, .fusions = &.{.{ .b = op.get_field, .fused = op.get_var_field }} };
+    rows[op.push_0] = .{ .sz = 1, .fusions = &.{ .{ .b = op.@"or", .fused = op.push_0_or }, .{ .b = op.shr, .fused = op.push_0_shr } } };
+    rows[op.sar] = .{ .sz = 1, .fusions = &.{.{ .b = op.get_array_el, .fused = op.sar_get_array_el }} };
+    rows[op.push_2] = .{ .sz = 1, .fusions = &.{.{ .b = op.sar, .fused = op.push_2_sar }} };
+    // Leftover re-fuse get_loc8 → push_0 (later push_0_shr / push_0_or) reuses
+    // get_loc8_push_2: its handler tail-musts the leftover opcode.
+    rows[op.get_loc8] = .{ .sz = 2, .fusions = &.{
+        .{ .b = op.push_2, .fused = op.get_loc8_push_2 },
+        .{ .b = op.push_1, .fused = op.get_loc8_push_1 },
+        .{ .b = op.push_i8, .fused = op.get_loc8_push_i8 },
+        .{ .b = op.push_0, .fused = op.get_loc8_push_2 },
+    } };
+    rows[op.push_i8] = .{ .sz = 2, .fusions = &.{.{ .b = op.add, .fused = op.push_i8_add }} };
+    rows[op.get_var_ref0] = .{ .sz = 1, .fusions = &.{.{ .b = op.get_loc8, .fused = op.get_var_ref0_get_loc8 }} };
+    for (rows) |row| std.debug.assert(row == null or row.?.fusions.len <= max_fusions);
+    break :rows rows;
+};
+
+const OpSet = std.StaticBitSet(256);
+
+/// Opcodes that start a fusion pair.
+const fusion_a: OpSet = set: {
+    var set = OpSet.initEmpty();
+    for (fusion_rows, 0..) |row, id| if (row != null) set.set(id);
+    break :set set;
+};
+
+/// Opcodes that may complete one.
+const fusion_b: OpSet = set: {
+    var set = OpSet.initEmpty();
+    for (fusion_rows) |row| if (row) |r| for (r.fusions) |f| set.set(f.b);
+    break :set set;
+};
+
 const Resolver = struct {
     function: *bytecode.Bytecode,
     fd: ?*const bytecode.function_def.FunctionDef,
     product: *resolve_variables.ResolvedProduct,
     memory: std.mem.Allocator,
-    atoms: *core.atom.AtomTable,
     code: []const u8,
     input_atoms: []const core.atom.Atom,
     input_sources: []const builder.SourceSlot,
@@ -241,11 +276,6 @@ const Resolver = struct {
     output_atoms: []core.atom.Atom = &.{},
     output_atom_capacity: usize = 0,
     output_atom_len: u32 = 0,
-    /// False while the S4 output ledger borrows the S3 owners. It becomes true
-    /// only after a successful walk transfers the retained subsequence out of
-    /// `product`; error paths therefore leave the input ledger owning every
-    /// atom and free only the uncommitted output backing.
-    output_atoms_owned: bool = false,
 
     output_sources: []SourceLocSlot = &.{},
     output_source_capacity: usize = 0,
@@ -293,7 +323,6 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
-        self.output_atoms_owned = false;
         self.output = &.{};
         self.output_capacity = 0;
         self.output_len = 0;
@@ -309,12 +338,10 @@ const Resolver = struct {
     }
 
     fn releaseConsumedProduct(self: *Resolver) Error!void {
-        // QuickJS copies atom ids between its resolve_labels DynBufs without
-        // changing their reference counts: the new buffer inherits the old
-        // buffer's owners. S4 never invents or reorders atom-bearing values;
-        // its output atom ledger is a retained subsequence of S3. Prove that
-        // invariant before changing either owner's state, then move those
-        // references and let releaseConsumedStreams free only discarded ones.
+        // S4 never invents or reorders atom-bearing values: its output atom
+        // ledger is a retained subsequence of S3. Prove that before dropping
+        // the input streams. The ids are borrowed (rooted by the compile's
+        // CompileAtomScope), so nothing moves or is released per atom.
         var input_index: usize = 0;
         var output_index: usize = 0;
         while (output_index < self.output_atom_len) : (output_index += 1) {
@@ -326,16 +353,6 @@ const Resolver = struct {
                 return error.InvalidBytecode;
             input_index += 1;
         }
-
-        input_index = 0;
-        output_index = 0;
-        while (output_index < self.output_atom_len) : (output_index += 1) {
-            const output_atom = self.output_atoms[output_index];
-            while (self.input_atoms[input_index] != output_atom) : (input_index += 1) {}
-            self.product.atom_operands[input_index] = core.atom.null_atom;
-            input_index += 1;
-        }
-        self.output_atoms_owned = true;
         self.code = &.{};
         self.input_atoms = &.{};
         self.input_sources = &.{};
@@ -379,15 +396,13 @@ const Resolver = struct {
                 return error.OutOfMemory;
         }
 
-        // Stage 4's ordinary rewrites copy or shrink the S3 stream; only the
-        // function prologue grows it.  Size that prologue exactly and reserve
-        // the common output once.  Keep the cold growth path below because a
-        // future rewrite is allowed to expand without turning this sizing
-        // observation into a memory-safety contract.
+        // Stage 4's rewrites mostly copy or shrink the S3 stream; the function
+        // prologue and lowered-direct carriers (one byte more each) grow it.
+        // Reserve input plus prologue once; appends still grow on demand.
         const initial_output_capacity = std.math.add(
             u32,
             self.product.code_len,
-            try self.functionPrologueSize(layout),
+            self.functionPrologueSize(layout),
         ) catch return error.BytecodeOverflow;
         if (initial_output_capacity != 0) {
             try builder.reserve(
@@ -487,146 +502,27 @@ const Resolver = struct {
         self.output_len += 1;
     }
 
-    /// Isolation mask for fusion-v4 pairs (v2.1 matrix). Default = remaining four.
-    /// `ZJS_FUSE_V4=none` / `all` / comma list: `push_0_or,sar_get_array_el,
-    /// push_2_sar,get_loc8_push_2`. Diagnostic only. `get_array_el_push_0` dropped
-    /// (cloned `get_array_el` shrank the island by 84B).
-    const v4_push_0_or: u8 = 1 << 0;
-    const v4_sar_get_array_el: u8 = 1 << 2;
-    const v4_push_2_sar: u8 = 1 << 3;
-    const v4_get_loc8_push_2: u8 = 1 << 4;
-    const v4_all: u8 = v4_push_0_or | v4_sar_get_array_el | v4_push_2_sar | v4_get_loc8_push_2;
-
-    var v4_bits_ready: bool = false;
-    var v4_bits: u8 = v4_all;
-
-    fn v4Mask() u8 {
-        if (v4_bits_ready) return v4_bits;
-        v4_bits_ready = true;
-        v4_bits = loadV4Mask();
-        return v4_bits;
-    }
-
-    fn loadV4Mask() u8 {
-        const raw = std.c.getenv("ZJS_FUSE_V4") orelse return v4_all;
-        const s = std.mem.span(raw);
-        if (s.len == 0 or std.mem.eql(u8, s, "all")) return v4_all;
-        if (std.mem.eql(u8, s, "none")) return 0;
-        var bits: u8 = 0;
-        var it = std.mem.splitScalar(u8, s, ',');
-        while (it.next()) |name| {
-            if (std.mem.eql(u8, name, "push_0_or")) bits |= v4_push_0_or;
-            if (std.mem.eql(u8, name, "sar_get_array_el")) bits |= v4_sar_get_array_el;
-            if (std.mem.eql(u8, name, "push_2_sar")) bits |= v4_push_2_sar;
-            if (std.mem.eql(u8, name, "get_loc8_push_2")) bits |= v4_get_loc8_push_2;
-        }
-        return bits;
-    }
-
-    inline fn v4On(bit: u8) bool {
-        return (v4Mask() & bit) != 0;
-    }
-
-    inline fn setFusions(self: *Resolver, comptime list: []const Fusion) void {
-        comptime std.debug.assert(list.len <= max_fusions);
-        inline for (list, 0..) |fusion, i| self.fusions[i] = fusion;
-        self.fusion_count = list.len;
-    }
-
-    inline fn addFusion(self: *Resolver, fusion: Fusion) void {
-        std.debug.assert(self.fusion_count < max_fusions);
-        self.fusions[self.fusion_count] = fusion;
-        self.fusion_count += 1;
-    }
-
+    /// Record the A just emitted at `pc` and its legal Bs. Callers stay a
+    /// single forward walk — maybeFusePrev is O(1) and does not rescan pairs.
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
-        // Record the legal B(s) for this A. Callers stay a single
-        // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
-        switch (opc) {
-            op.get_loc0 => {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.get_field, .fused = op.get_loc0_field }});
-            },
-            op.lt => {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.if_false8, .fused = op.cmp_if_false8 }});
-            },
-            op.put_loc8 => {
-                self.last_sz = 2;
-                self.setFusions(&.{.{ .b = op.get_loc8, .fused = op.put_loc8_get_loc8 }});
-            },
-            op.push_this => {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.put_loc0, .fused = op.push_this_put_loc0 }});
-            },
-            op.get_field2 => {
-                // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
-                self.last_sz = 6;
-                self.setFusions(&.{.{ .b = op.call_method, .fused = op.get_field2_call_method }});
-            },
-            op.get_loc2 => {
-                self.last_sz = 1;
-                self.setFusions(&.{ .{ .b = op.get_field, .fused = op.get_loc2_field }, .{ .b = op.get_field2, .fused = op.get_loc2_field2 } });
-            },
-            op.eq => {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.if_false8, .fused = op.eq_if_false8 }});
-            },
-            op.get_field => {
-                // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
-                self.last_sz = 6;
-                self.setFusions(&.{.{ .b = op.get_field2, .fused = op.get_field_field2 }});
-            },
-            op.get_var => {
-                self.last_sz = 3;
-                self.setFusions(&.{.{ .b = op.get_field, .fused = op.get_var_field }});
-            },
-            op.push_0 => {
-                self.last_sz = 1;
-                if (v4On(v4_push_0_or)) {
-                    self.setFusions(&.{ .{ .b = op.@"or", .fused = op.push_0_or }, .{ .b = op.shr, .fused = op.push_0_shr } });
-                } else {
-                    self.setFusions(&.{.{ .b = op.shr, .fused = op.push_0_shr }});
-                }
-            },
-            op.sar => if (v4On(v4_sar_get_array_el)) {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.get_array_el, .fused = op.sar_get_array_el }});
-            } else {
-                self.fusion_count = 0;
-            },
-            op.push_2 => if (v4On(v4_push_2_sar)) {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.sar, .fused = op.push_2_sar }});
-            } else {
-                self.fusion_count = 0;
-            },
-            op.get_loc8 => {
-                self.last_sz = 2;
-                if (v4On(v4_get_loc8_push_2)) {
-                    self.setFusions(&.{ .{ .b = op.push_2, .fused = op.get_loc8_push_2 }, .{ .b = op.push_1, .fused = op.get_loc8_push_1 } });
-                } else {
-                    self.setFusions(&.{.{ .b = op.push_1, .fused = op.get_loc8_push_1 }});
-                }
-                self.addFusion(.{ .b = op.push_i8, .fused = op.get_loc8_push_i8 });
-                // Leftover re-fuse: get_loc8 → push_0 (later push_0_shr /
-                // push_0_or). Reuse get_loc8_push_2 — handler tail-musts the
-                // leftover opcode, no new slot.
-                self.addFusion(.{ .b = op.push_0, .fused = op.get_loc8_push_2 });
-            },
-            op.push_i8 => {
-                self.last_sz = 2;
-                self.setFusions(&.{.{ .b = op.add, .fused = op.push_i8_add }});
-            },
-            op.get_var_ref0 => {
-                self.last_sz = 1;
-                self.setFusions(&.{.{ .b = op.get_loc8, .fused = op.get_var_ref0_get_loc8 }});
-            },
-            else => {
-                self.fusion_count = 0;
-            },
-        }
+        const row = fusion_rows[opc] orelse {
+            self.fusion_count = 0;
+            return;
+        };
+        self.last_sz = row.sz;
+        @memcpy(self.fusions[0..row.fusions.len], row.fusions);
+        self.fusion_count = @intCast(row.fusions.len);
+    }
+
+    /// Whether the last emitted instruction is an unbound one-byte `lt`/`eq`
+    /// directly before `output_len` (the A of a later compare+branch fold).
+    fn lastIsFusableCompare(self: *const Resolver) bool {
+        if (self.fusion_count == 0 or self.last_sz != 1) return false;
+        if (self.output_len != self.last_pc + self.last_sz) return false;
+        if (self.output_len == self.last_bound_output) return false;
+        const last = self.output[self.last_pc];
+        return last == op.lt or last == op.eq;
     }
 
     inline fn maybeFusePrev(self: *Resolver, b: u8) void {
@@ -702,18 +598,9 @@ const Resolver = struct {
             const instruction = try decodeInstruction(self.code, position);
             const position_next = position + instruction.size;
             if (position_next > end) return error.InvalidBytecode;
-            if (instruction.hasAtom()) {
-                if (self.atom_cursor >= self.input_atoms.len)
-                    return error.InvalidBytecode;
-                const encoded = try readU32At(self.code, position, operand_off.atom);
-                const ledger_atom = self.input_atoms[self.atom_cursor];
-                if (encoded != ledger_atom.raw()) return error.InvalidBytecode;
-                if (keep_atom_position != null and keep_atom_position.? == position) {
-                    try self.appendOutputAtom(ledger_atom);
-                    kept = true;
-                }
-                self.atom_cursor += 1;
-            }
+            const keep = keep_atom_position != null and keep_atom_position.? == position;
+            try self.consumeInstructionAtom(position, instruction, keep);
+            if (keep and instruction.hasAtom()) kept = true;
             position = position_next;
         }
         if (position != end or (keep_atom_position != null and !kept))
@@ -777,6 +664,23 @@ const Resolver = struct {
     /// across a peephole match at the replacement instruction's PC, exactly
     /// like the legacy old-PC relocation table. Consecutive equal coordinates
     /// still dedupe before pc2line encoding.
+    /// Publish input source `index` at output `pc` unless it repeats the last
+    /// published point. The caller reserves the output-source capacity.
+    inline fn publishSource(self: *Resolver, index: u32, pc: u32) void {
+        const source = self.input_sources[index];
+        const point = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
+        if (self.last_attached_source) |last| {
+            if (last.eql(point)) return;
+        }
+        self.output_sources[self.output_source_len] = .{
+            .pc = pc,
+            .line_num = point.line,
+            .col_num = point.col,
+        };
+        self.output_source_len += 1;
+        self.last_attached_source = point;
+    }
+
     inline fn attachSource(self: *Resolver) Error!void {
         if (self.source_attach_cursor == self.source_cursor) return;
         if (self.source_attach_cursor > self.source_cursor)
@@ -787,23 +691,9 @@ const Resolver = struct {
         // peepholes spanning several instructions need the outlined range
         // loop below.
         if (self.source_attach_cursor == self.source_cursor - 1) {
-            const source = self.input_sources[self.source_attach_cursor];
-            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
-            if (self.last_attached_source) |last| {
-                if (last.eql(pending)) {
-                    self.source_attach_cursor += 1;
-                    return;
-                }
-            }
             try self.ensureOutputSources(1);
-            self.output_sources[self.output_source_len] = .{
-                .pc = self.output_len,
-                .line_num = pending.line,
-                .col_num = pending.col,
-            };
-            self.output_source_len += 1;
+            self.publishSource(self.source_attach_cursor, self.output_len);
             self.source_attach_cursor += 1;
-            self.last_attached_source = pending;
             return;
         }
         return self.attachSourceSlow();
@@ -813,29 +703,14 @@ const Resolver = struct {
         const pending_count = self.source_cursor - self.source_attach_cursor;
         std.debug.assert(pending_count != 0);
         try self.ensureOutputSources(pending_count);
-        while (self.source_attach_cursor < self.source_cursor) {
-            const source = self.input_sources[self.source_attach_cursor];
-            self.source_attach_cursor += 1;
-            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
-            if (self.last_attached_source) |last| {
-                if (last.eql(pending)) continue;
-            }
-            self.output_sources[self.output_source_len] = .{
-                .pc = self.output_len,
-                .line_num = pending.line,
-                .col_num = pending.col,
-            };
-            self.output_source_len += 1;
-            self.last_attached_source = pending;
+        while (self.source_attach_cursor < self.source_cursor) : (self.source_attach_cursor += 1) {
+            self.publishSource(self.source_attach_cursor, self.output_len);
         }
     }
 
     /// Publish an already-consumed input-source subrange at a later output
-    /// boundary. Legacy resolve_labels maps the source before the
-    /// push_atom_value consumed by the typeof-string fold to the instruction
-    /// after the replacement test; later consumed compare/branch markers map
-    /// backwards and are consequently not published. Keep that exact ordered
-    /// source contract without materializing old-PC relocation coordinates.
+    /// boundary: the typeof-string fold maps the source of the consumed
+    /// `push_atom_value` to the instruction after its replacement test.
     fn attachInputSourceRangeAt(
         self: *Resolver,
         start: u32,
@@ -848,23 +723,9 @@ const Resolver = struct {
         {
             return error.InvalidBytecode;
         }
-        const pending_count = end - start;
-        try self.ensureOutputSources(pending_count);
+        try self.ensureOutputSources(end - start);
         var index = start;
-        while (index < end) : (index += 1) {
-            const source = self.input_sources[index];
-            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
-            if (self.last_attached_source) |last| {
-                if (last.eql(pending)) continue;
-            }
-            self.output_sources[self.output_source_len] = .{
-                .pc = output_pc,
-                .line_num = pending.line,
-                .col_num = pending.col,
-            };
-            self.output_source_len += 1;
-            self.last_attached_source = pending;
-        }
+        while (index < end) : (index += 1) self.publishSource(index, output_pc);
     }
 
     fn lowerBoundBind(self: *const Resolver, position: u32) usize {
@@ -884,49 +745,39 @@ const Resolver = struct {
         if (start >= end) return false;
         var index = self.lowerBoundBind(start);
         while (index < self.binds.len and self.binds[index].bound_offset < end) : (index += 1) {
-            const label_index = self.binds[index].label_index;
-            std.debug.assert(label_index < self.product.label_len);
+            std.debug.assert(self.binds[index].label_index < self.product.label_len);
             // Absolute-PC patch targets become transparent after losing every
             // input reference. Explicit parser-label binds retain the physical
             // OP_label sequential-match barrier even at ref_count zero. An
             // original phase-2 target also remains a barrier after an earlier
             // fold consumes its live refcount.
-            if (label_index < self.product.label_len and
-                (self.binds[index].initially_referenced or
-                    self.binds[index].match_barrier))
-            {
-                return true;
-            }
+            if (self.binds[index].initially_referenced or self.binds[index].match_barrier) return true;
         }
         return false;
     }
 
     fn readIndex(self: *const Resolver, position: u32) Error!u16 {
-        const instruction = try decodeInstruction(self.code, position);
+        return indexOperand(self.code, position, try decodeInstruction(self.code, position));
+    }
+
+    /// The u8/u16 index operand of an already decoded indexed instruction.
+    fn indexOperand(code: []const u8, position: u32, instruction: Instruction) Error!u16 {
         return switch (instruction.indexWidth()) {
-            1 => self.code[position + operand_off.index],
-            2 => try readU16(self.code, position),
+            1 => code[position + operand_off.index],
+            2 => try readU16(code, position),
             else => error.InvalidBytecode,
         };
     }
 
-    /// qjs `code_match(&cc, pos_next, OP_return, -1)` (34947): skip `line_num`
-    /// then require a `return`. A live label between call and return blocks
-    /// the fold (same as `hasBindInRange` on other S4 peeks).
+    /// A `return` at `start`: its end, or null. A live label on it blocks the
+    /// fold (same as `hasBindInRange` on other S4 peeks).
     fn matchReturnAfter(self: *const Resolver, start: u32) Error!?u32 {
-        var position = start;
-        while (position < self.product.code_len) {
-            const instruction = try decodeInstruction(self.code, position);
-            if (instruction.form == .line_num) {
-                position += instruction.size;
-                continue;
-            }
-            if (instruction.form != .@"return") return null;
-            const end = position + instruction.size;
-            if (self.hasBindInRange(start, end)) return null;
-            return end;
-        }
-        return null;
+        if (start >= self.product.code_len) return null;
+        const instruction = try decodeInstruction(self.code, start);
+        if (instruction.form != .@"return") return null;
+        const end = start + instruction.size;
+        if (self.hasBindInRange(start, end)) return null;
+        return end;
     }
 
     /// Strict-function PTC variant of `matchReturnAfter`: a plain `call`
@@ -944,10 +795,6 @@ const Resolver = struct {
         var hops: u8 = 0;
         while (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
-            if (instruction.form == .line_num) {
-                position += instruction.size;
-                continue;
-            }
             if (instruction.form == .goto) {
                 if (hops >= 8) return null;
                 hops += 1;
@@ -971,6 +818,30 @@ const Resolver = struct {
     /// qjs:33881 code_match, with source markers already out of band. A bind
     /// at any byte boundary in the candidate range rejects the match exactly
     /// as an OP_label byte would have rejected QuickJS's sequential matcher.
+    /// Re-emit the `put_field` at `put_position` that ends a folded sequence
+    /// [`position`, `end`), keeping only its atom and the sources up to `end`.
+    fn emitPutFieldTail(self: *Resolver, position: u32, put_position: u32, end: u32) Error!void {
+        try self.appendByte(op.put_field);
+        try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
+        try self.appendByte(self.nextPropSiteIndex());
+        try self.consumeAtomsRange(position, end, put_position);
+        self.absorbSources(end);
+        try self.attachSource();
+    }
+
+    /// The branch of a folded `strict_neq; if_X` (match.positions[1]),
+    /// emitted inverted after the caller's equality test bytes.
+    fn emitInvertedFoldedBranch(self: *Resolver, comptime layout: LayoutMode, position: u32, match: SeqMatch) Error!u32 {
+        const inverted = if (opcode.decode.matchesFormAt(self.code, match.positions[1], .if_false))
+            op.if_true
+        else
+            op.if_false;
+        const label_index = try self.findFoldedBranchTarget(
+            try readU32At(self.code, match.positions[1], operand_off.jump_label),
+        );
+        return self.emitHasLabel(layout, position, match.end, inverted, label_index);
+    }
+
     fn matchSeq(
         self: *const Resolver,
         start: u32,
@@ -999,11 +870,7 @@ const Resolver = struct {
                 // The instruction was decoded immediately above. Reuse its
                 // header instead of paying a second metadata lookup and a
                 // second bounds proof for every indexed pattern.
-                const actual: u16 = switch (instruction.indexWidth()) {
-                    1 => self.code[position + operand_off.index],
-                    2 => try readU16(self.code, position),
-                    else => return error.InvalidBytecode,
-                };
+                const actual = try indexOperand(self.code, position, instruction);
                 if (actual != expected) return null;
             }
             if (token_index < result.positions.len) {
@@ -1176,10 +1043,7 @@ const Resolver = struct {
     /// the dispatch operand backwards onto the single default label. v2's
     /// label discipline forbids that patch, so the identity-native dispatch
     /// bridge routes the clause fallthrough and the default body through two
-    /// distinct ids that always bind together. The legacy backend, which the
-    /// dual oracle measures against, compares resolved addresses
-    /// (`targetAppearsAtFollowingBoundary`, bytecode.zig) and therefore sees
-    /// the co-bound pair as one boundary.
+    /// distinct ids that always bind together.
     fn labelsShareBindOffset(self: *const Resolver, left: u32, right: u32) Error!bool {
         if (left >= self.product.label_len or right >= self.product.label_len)
             return error.InvalidBytecode;
@@ -1214,8 +1078,7 @@ const Resolver = struct {
     ///
     /// The switch epilogue no longer emits the bridge — it moves the
     /// unmatched-dispatch references onto the default identity
-    /// (`Builder.retargetLabelRefs`), the same thing legacy's `patchJumpTarget`
-    /// does — so this predicate is retained as the narrow fold suppressor it
+    /// (`Builder.retargetLabelRefs`) — so this predicate is retained as the narrow fold suppressor it
     /// always was, not as a description of code the parser still produces.
     /// Removing a fold suppressor can only widen folding, which is the exact
     /// direction that regressed eight benchmarks above.
@@ -1324,7 +1187,7 @@ const Resolver = struct {
         out_op: *Form,
     ) Error!u32 {
         var label_index = label0;
-        _ = try updateLabel(self.product, label_index, -1);
+        _ = try self.product.updateLabel(label_index, -1);
         var target_op: Form = .invalid;
         var iteration: u8 = 0;
         while (iteration < 10) : (iteration += 1) {
@@ -1374,7 +1237,7 @@ const Resolver = struct {
             label_index = label0;
         }
         out_op.* = target_op;
-        _ = try updateLabel(self.product, label_index, 1);
+        _ = try self.product.updateLabel(label_index, 1);
         return label_index;
     }
 
@@ -1422,8 +1285,7 @@ const Resolver = struct {
             // the run turned out to be live, and `processBindsAt` then skipped
             // exactly those identities: one semantic boundary would carry a
             // surviving identity resolved to the output position plus an alias
-            // resolved to nothing. That is the split the boundary-uniqueness
-            // oracle rejects as `alias_liveness_split`. S3 retires transparent
+            // resolved to nothing. S3 retires transparent
             // zero-ref aliases (deadBoundaryAt, qjs label transparency) before
             // this stage ever sees them, so every alias reaching S4 is one S3
             // chose to keep.
@@ -1438,15 +1300,13 @@ const Resolver = struct {
             self.absorbSources(position_next);
             switch (instruction.form) {
                 .if_false, .if_true, .goto, .@"catch", .gosub => {
-                    _ = try updateLabel(
-                        self.product,
+                    _ = try self.product.updateLabel(
                         try readU32At(self.code, position, operand_off.jump_label),
                         -1,
                     );
                 },
                 .dyn_env_probe => {
-                    _ = try updateLabel(
-                        self.product,
+                    _ = try self.product.updateLabel(
                         try readU32At(self.code, position, operand_off.probe_label),
                         -1,
                     );
@@ -1458,11 +1318,6 @@ const Resolver = struct {
         }
     }
 
-    // The hand-written ladder below is now the BASELINE for the decode
-    // layer's declaration-derived selection; this proves the two agree on
-    // every family and across every branch boundary of the idx domain
-    // before the writer switches to the derived one. The probe values
-    // cover both sides of each threshold the ladder tests.
     fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
         // Contract 3: capacity and emission consume the same selector, and
         // the selected form's size comes from its row -- there is no second
@@ -1475,7 +1330,7 @@ const Resolver = struct {
         return opcode.decode.form_row[op_id].size;
     }
 
-    fn specialObjectSize(comptime layout: LayoutMode, slot: u16) Error!u32 {
+    fn specialObjectSize(comptime layout: LayoutMode, slot: u16) u32 {
         return 2 + putShortCodeSize(layout, op.put_loc, slot);
     }
 
@@ -1483,15 +1338,15 @@ const Resolver = struct {
     /// the short-op selector makes the initial output reservation track the
     /// same layout decisions as emission instead of relying on a loose magic
     /// headroom constant.
-    fn functionPrologueSize(self: *const Resolver, comptime layout: LayoutMode) Error!u32 {
+    fn functionPrologueSize(self: *const Resolver, comptime layout: LayoutMode) u32 {
         const fd = self.fd orelse return 0;
         var size: u32 = 0;
         if (fd.home_object_var_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         if (fd.this_active_func_var_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         if (fd.new_target_var_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         if (fd.this_var_idx) |idx| {
             size += if (fd.is_derived_class_constructor)
                 3
@@ -1506,11 +1361,11 @@ const Resolver = struct {
             size += putShortCodeSize(layout, op.put_loc, arguments_slot);
         }
         if (fd.func_var_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         if (fd.var_object_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         if (fd.arg_var_object_idx) |slot|
-            size += try specialObjectSize(layout, slot);
+            size += specialObjectSize(layout, slot);
         return size;
     }
 
@@ -1526,18 +1381,9 @@ const Resolver = struct {
             if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
                 const short_op = opId(short_form);
                 const pc = self.output_len;
-                if (comptime layout == .short) {
-                    if (short_op == op.get_loc8 or short_op == op.put_loc0 or
-                        short_op == op.get_loc0 or short_op == op.get_loc2)
-                        self.maybeFusePrev(short_op);
-                }
+                if (fusion_b.isSet(short_op)) self.maybeFusePrev(short_op);
                 try self.appendByte(short_op);
-                if (comptime layout == .short) {
-                    if (short_op == op.get_loc0 or short_op == op.put_loc8 or
-                        short_op == op.put_loc0 or short_op == op.get_loc2 or
-                        short_op == op.get_loc8 or short_op == op.get_var_ref0)
-                        self.noteFusionA(short_op, pc);
-                }
+                if (fusion_a.isSet(short_op)) self.noteFusionA(short_op, pc);
                 // The byte-payload variants carry the index; whether the
                 // selected form has a payload is the row's fact, not a
                 // second identity list.
@@ -1601,23 +1447,16 @@ const Resolver = struct {
         }
         if (opcode.decode.selectPushIntForm(value)) |short_form| {
             const short_op: u8 = opId(short_form);
-            if (comptime layout == .short) {
-                if (short_op == op.push_0 or short_op == op.push_2 or
-                    short_op == op.push_1)
-                    self.maybeFusePrev(short_op);
-            }
+            if (fusion_b.isSet(short_op)) self.maybeFusePrev(short_op);
             const pc = self.output_len;
             try self.appendByte(short_op);
-            if (comptime layout == .short) {
-                if (short_op == op.push_0 or short_op == op.push_2)
-                    self.noteFusionA(short_op, pc);
-            }
+            if (fusion_a.isSet(short_op)) self.noteFusionA(short_op, pc);
         } else if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) {
-            if (comptime layout == .short) self.maybeFusePrev(op.push_i8);
+            self.maybeFusePrev(op.push_i8);
             const pc = self.output_len;
             try self.appendByte(op.push_i8);
             try self.appendByte(@bitCast(@as(i8, @intCast(value))));
-            if (comptime layout == .short) self.noteFusionA(op.push_i8, pc);
+            self.noteFusionA(op.push_i8, pc);
         } else if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
             try self.appendByte(op.push_i16);
             try self.appendI16(@intCast(value));
@@ -1625,12 +1464,6 @@ const Resolver = struct {
             try self.appendByte(op.push_i32);
             try self.appendI32(value);
         }
-    }
-
-    fn checkedSlotIndex(value: i32) Error!u16 {
-        if (value < 0 or value > std.math.maxInt(u16))
-            return error.InvalidBytecode;
-        return @intCast(value);
     }
 
     fn emitSpecialObject(
@@ -1644,7 +1477,7 @@ const Resolver = struct {
         try self.putShortCode(layout, op.put_loc, slot);
     }
 
-    /// qjs:34833-34896, following legacy emitFunctionPrologue. Argument
+    /// qjs:34833-34896. Argument
     /// capture stays in zjs finalization and is deliberately absent here.
     fn emitFunctionPrologue(self: *Resolver, comptime layout: LayoutMode) Error!void {
         const fd = self.fd orelse return;
@@ -1740,8 +1573,18 @@ const Resolver = struct {
         }
 
         if (layout == .short and self.addr[label_index] == labels.unbound) {
-            const estimated = @as(i64, slot.bound_offset) -
+            const input_distance = @as(i64, slot.bound_offset) -
                 @as(i64, input_position) - 1;
+            // Rewrites only shrink the stream, except that a lowered-direct
+            // byte is written as a two-byte carrier. The output distance is
+            // therefore at most twice the input one; only near a limit the op
+            // can use (8-bit for all three, 16-bit for goto) is the exact
+            // growth worth counting.
+            const estimated = if (input_distance >= 64 and input_distance < 128 or
+                op_id == op.goto and input_distance >= 16384 and input_distance < 32768)
+                input_distance + try self.carrierGrowth(input_position, slot.bound_offset)
+            else
+                input_distance;
             if (estimated < 128 and
                 (op_id == op.if_false or op_id == op.if_true or op_id == op.goto))
             {
@@ -1795,6 +1638,7 @@ const Resolver = struct {
             }
         }
 
+        if (op_id == op.if_false) self.jump_slots[jump_index].follows_fusable_compare = self.lastIsFusableCompare();
         try self.appendByte(op_id);
         const operand_pos = self.output_len;
         self.jump_slots[jump_index].pos = operand_pos;
@@ -1860,13 +1704,7 @@ const Resolver = struct {
         } else {
             const first = self.code[position];
             if (comptime layout == .short) {
-                // B-side only. get_var is never a B — recording it as A
-                // below is enough for get_var → get_field.
-                if (first == op.get_field or first == op.call_method or
-                    first == op.get_field2 or first == op.@"or" or
-                    first == op.get_array_el or first == op.sar or
-                    first == op.shr or first == op.add or first == op.push_i8)
-                    self.maybeFusePrev(first);
+                if (fusion_b.isSet(first)) self.maybeFusePrev(first);
             }
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
@@ -1882,12 +1720,7 @@ const Resolver = struct {
                 self.output[pc + 5] = self.nextPropSiteIndex();
             }
             if (comptime layout == .short) {
-                if (first == op.lt or first == op.push_this or
-                    first == op.get_field2 or first == op.eq or
-                    first == op.get_field or first == op.get_var or
-                    first == op.get_array_el or first == op.sar or
-                    first == op.push_i8)
-                    self.noteFusionA(first, pc);
+                if (fusion_a.isSet(first)) self.noteFusionA(first, pc);
             }
         }
         try self.consumeInstructionAtom(position, instruction, true);
@@ -1902,6 +1735,21 @@ const Resolver = struct {
         const position_next = position + instruction.size;
         try self.appendRaw(self.code[position..position_next]);
         try self.consumeInstructionAtom(position, instruction, true);
+    }
+
+    /// Output bytes the lowered-direct instructions in the S3 range
+    /// [`from`, `to`) add when `emitFinalCarrier` writes them as carrier + tag.
+    fn carrierGrowth(self: *const Resolver, from: u32, to: u64) Error!u32 {
+        var growth: u32 = 0;
+        var position = from;
+        while (position < to) {
+            const instruction = try decodeInstruction(self.code, position);
+            inline for (opcode.logical.lowered_direct) |entry| {
+                if (instruction.form == entry.form) growth += 1;
+            }
+            position += instruction.size;
+        }
+        return growth;
     }
 
     /// C0 (contract 3): the late-encoding arm. The lowered stream carries
@@ -1934,13 +1782,13 @@ const Resolver = struct {
         var target_op: Form = .invalid;
         const label_index = try self.findJumpTarget(initial_label, &target_op);
         if (try self.codeHasLabel(initial_next, label_index)) {
-            _ = try updateLabel(self.product, label_index, -1);
+            _ = try self.product.updateLabel(label_index, -1);
             return initial_next;
         }
         if (target_op == .@"return" or target_op == .return_undef or
             target_op == .throw)
         {
-            _ = try updateLabel(self.product, label_index, -1);
+            _ = try self.product.updateLabel(label_index, -1);
             try self.attachSource();
             try self.appendByte(opId(target_op));
             return self.skipDeadCode(initial_next);
@@ -1949,7 +1797,7 @@ const Resolver = struct {
             const live_next = try self.skipDeadCode(initial_next);
             if (!try self.codeHasLabel(live_next, label_index))
                 return error.InvalidBytecode;
-            _ = try updateLabel(self.product, label_index, -1);
+            _ = try self.product.updateLabel(label_index, -1);
             return live_next;
         }
         return self.emitHasLabel(
@@ -1978,7 +1826,7 @@ const Resolver = struct {
         if (value == (branch_op == op.if_true)) {
             return self.handleGoto(layout, input_position, match.end, label_index);
         }
-        _ = try updateLabel(self.product, label_index, -1);
+        _ = try self.product.updateLabel(label_index, -1);
         return match.end;
     }
 
@@ -1987,8 +1835,8 @@ const Resolver = struct {
         self: *Resolver,
         position: u32,
         position_next: u32,
-        op_id: u8,
     ) Error!void {
+        const op_id = op.dyn_env_probe;
         const atom_id = try readU32At(self.code, position, operand_off.atom);
         var target_op: Form = .invalid;
         const label_index = try self.findJumpTarget(
@@ -2028,8 +1876,10 @@ const Resolver = struct {
     fn walk(self: *Resolver, comptime layout: LayoutMode) Error!void {
         try self.emitFunctionPrologue(layout);
 
+        const interrupt_runtime = self.function.interrupt_runtime;
         var position: u32 = 0;
         while (position < self.product.code_len) {
+            if (interrupt_runtime) |rt| try rt.pollNativeWork();
             try self.processBindsAt(position);
             self.absorbSources(position + 1);
             const instruction = try decodeInstruction(self.code, position);
@@ -2131,7 +1981,7 @@ const Resolver = struct {
                         &target_op,
                     );
                     if (try self.codeHasLabel(position_next, label_index)) {
-                        _ = try updateLabel(self.product, label_index, -1);
+                        _ = try self.product.updateLabel(label_index, -1);
                         try self.attachSource();
                         try self.appendByte(op.drop);
                     } else if (try self.matchSeq(position_next, &.{
@@ -2162,14 +2012,14 @@ const Resolver = struct {
                                 // a trailing `default`, e.g.
                                 // `switch (d) { case c: default: e(); }`.
                                 self.absorbSources(match.end);
-                                _ = try updateLabel(self.product, label_index, -1);
-                                _ = try updateLabel(self.product, goto_label, -1);
+                                _ = try self.product.updateLabel(label_index, -1);
+                                _ = try self.product.updateLabel(goto_label, -1);
                                 try self.attachSource();
                                 try self.appendByte(op.drop);
                                 position_next = match.end;
                             } else {
                                 self.absorbSources(match.end);
-                                _ = try updateLabel(self.product, label_index, -1);
+                                _ = try self.product.updateLabel(label_index, -1);
                                 label_index = goto_label;
                                 const inverted = if (instruction.form == .if_false)
                                     op.if_true
@@ -2204,11 +2054,7 @@ const Resolver = struct {
                 },
 
                 // qjs:35099-35135.
-                .dyn_env_probe => try self.emitDynEnvProbe(
-                    position,
-                    position_next,
-                    opId(instruction.form),
-                ),
+                .dyn_env_probe => try self.emitDynEnvProbe(position, position_next),
 
                 // qjs:35136-35145.
                 .drop => {
@@ -2239,20 +2085,7 @@ const Resolver = struct {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_null);
-                        const inverted = if (opcode.decode.matchesFormAt(self.code, match.positions[1], .if_false))
-                            op.if_true
-                        else
-                            op.if_false;
-                        const label_index = try self.findFoldedBranchTarget(
-                            try readU32At(self.code, match.positions[1], operand_off.jump_label),
-                        );
-                        position_next = try self.emitHasLabel(
-                            layout,
-                            position,
-                            match.end,
-                            inverted,
-                            label_index,
-                        );
+                        position_next = try self.emitInvertedFoldedBranch(layout, position, match);
                     } else if (try self.matchSeq(position_next, &.{
                         .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
@@ -2409,8 +2242,7 @@ const Resolver = struct {
 
                 // qjs:35297-35307 deliberately not ported: legacy zjs has no
                 // to_propkey/store fold. C0: the final encoding is the
-                // carrier tag; the direct id survives only as the D11
-                // executable alias for the migration window.
+                // carrier tag.
                 .to_propkey => try self.emitFinalCarrier(position, instruction, .to_propkey),
 
                 // C1-1: same late-encoding shape as to_propkey; created
@@ -2464,20 +2296,7 @@ const Resolver = struct {
                         try self.attachSource();
                         try self.appendByte(op.ext0);
                         try self.appendByte(opcode.ext0_sub.is_undefined);
-                        const inverted = if (opcode.decode.matchesFormAt(self.code, match.positions[1], .if_false))
-                            op.if_true
-                        else
-                            op.if_false;
-                        const label_index = try self.findFoldedBranchTarget(
-                            try readU32At(self.code, match.positions[1], operand_off.jump_label),
-                        );
-                        position_next = try self.emitHasLabel(
-                            layout,
-                            position,
-                            match.end,
-                            inverted,
-                            label_index,
-                        );
+                        position_next = try self.emitInvertedFoldedBranch(layout, position, match);
                     } else {
                         try self.copyDefault(layout, position, instruction);
                     }
@@ -2525,12 +2344,7 @@ const Resolver = struct {
                     // replacement bytes exist.
                     try self.attachSource();
                     const put_position = match.positions[0];
-                    try self.appendByte(op.put_field);
-                    try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
-                    try self.appendByte(self.nextPropSiteIndex());
-                    try self.consumeAtomsRange(position, match.end, put_position);
-                    self.absorbSources(match.end);
-                    try self.attachSource();
+                    try self.emitPutFieldTail(position, put_position, match.end);
                     position_next.* = match.end;
                 } else {
                     try self.copyDefault(layout, position, instruction);
@@ -2752,12 +2566,7 @@ const Resolver = struct {
                     try self.attachSource();
                     const put_position = match.positions[1];
                     try self.appendByte(update_op);
-                    try self.appendByte(op.put_field);
-                    try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
-                    try self.appendByte(self.nextPropSiteIndex());
-                    try self.consumeAtomsRange(position, match.end, put_position);
-                    self.absorbSources(match.end);
-                    try self.attachSource();
+                    try self.emitPutFieldTail(position, put_position, match.end);
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{.perm4} },
@@ -2868,14 +2677,45 @@ const Resolver = struct {
         }
     }
 
-    /// qjs:35599-35673 bounded jump relaxation. This intentionally retains
-    /// QuickJS's quadratic tail move; replacing it belongs to a measured
-    /// follow-up, not the semantic port.
+    /// qjs:35599-35673 bounded jump relaxation.
+    /// Shrink each wide jump whose displacement fits a narrower form, in
+    /// jump order, each decision seeing the bytes earlier ones removed (so
+    /// the result matches QuickJS's one-jump-at-a-time relaxation). One pass
+    /// decides against addresses adjusted by a prefix sum of the removals,
+    /// then the stream, labels, jumps and sources are compacted once.
     fn relaxJumps(self: *Resolver) Error!void {
-        var patch_offsets: u32 = 0;
-        var index: u32 = 0;
-        while (index < self.jump_count) : (index += 1) {
-            const jump = &self.jump_slots[index];
+        const jumps = self.jump_slots[0..self.jump_count];
+        const shrink_pos = try self.memory.alloc(u32, jumps.len);
+        defer self.memory.free(shrink_pos);
+        // Bytes removed by shrinks[0..k+1].
+        const shrink_removed = try self.memory.alloc(u32, jumps.len);
+        defer self.memory.free(shrink_removed);
+        var label_at = try std.DynamicBitSetUnmanaged.initEmpty(self.memory, @as(usize, self.output_len) + 1);
+        defer label_at.deinit(self.memory);
+        for (self.addr) |label_addr| {
+            if (label_addr != labels.unbound and label_addr <= self.output_len) label_at.set(label_addr);
+        }
+
+        const Removals = struct {
+            pos: []const u32,
+            removed: []const u32,
+
+            /// Bytes removed before `pc` (by shrinks at lower positions).
+            fn before(r: @This(), pc: u32) u32 {
+                var lo: usize = 0;
+                var hi: usize = r.pos.len;
+                while (lo < hi) {
+                    const mid = lo + (hi - lo) / 2;
+                    if (r.pos[mid] < pc) lo = mid + 1 else hi = mid;
+                }
+                return if (lo == 0) 0 else r.removed[lo - 1];
+            }
+        };
+
+        var shrink_count: usize = 0;
+        var removed_total: u32 = 0;
+        var previous_pos: u32 = 0;
+        for (jumps) |*jump| {
             if (jump.label >= self.product.label_len or
                 self.addr[jump.label] == labels.unbound)
             {
@@ -2888,8 +2728,12 @@ const Resolver = struct {
                 op.if_false, op.if_true, op.goto => {},
                 else => continue,
             }
-            if (jump.pos > self.output_len) return error.InvalidBytecode;
-            const diff = @as(i64, self.addr[jump.label]) - @as(i64, jump.pos);
+            // Jumps are recorded in stream order; the prefix sums rely on it.
+            if (jump.pos > self.output_len or jump.pos < previous_pos) return error.InvalidBytecode;
+            previous_pos = jump.pos;
+            const removals: Removals = .{ .pos = shrink_pos[0..shrink_count], .removed = shrink_removed[0..shrink_count] };
+            const label_addr = self.addr[jump.label];
+            const diff = @as(i64, label_addr - removals.before(label_addr)) - @as(i64, jump.pos - removed_total);
 
             var new_size: ?u8 = null;
             var new_op = jump.op;
@@ -2913,69 +2757,58 @@ const Resolver = struct {
 
             const compact_size = new_size orelse continue;
             if (jump.pos == 0) return error.InvalidBytecode;
-            const source_start = std.math.add(
-                u32,
-                jump.pos,
-                @as(u32, compact_size) + delta,
-            ) catch return error.InvalidBytecode;
-            const destination_start = jump.pos + compact_size;
-            if (source_start > self.output_len or destination_start > source_start)
+            const removed_end = std.math.add(u32, jump.pos, @as(u32, compact_size) + delta) catch
                 return error.InvalidBytecode;
+            if (removed_end > self.output_len) return error.InvalidBytecode;
             self.output[jump.pos - 1] = new_op;
             // Jump shortening is when `if_false8` first exists. Fold lt→
             // cmp_if_false8 here instead of rescanning the whole stream.
-            if (new_op == op.if_false8 and jump.pos >= 2) {
+            if (new_op == op.if_false8 and jump.follows_fusable_compare and !label_at.isSet(jump.pos - 1)) {
                 const a_pc = jump.pos - 2;
-                if (!self.isLabelAddress(jump.pos - 1)) {
-                    if (self.output[a_pc] == op.lt)
-                        self.output[a_pc] = op.cmp_if_false8
-                    else if (self.output[a_pc] == op.eq)
-                        self.output[a_pc] = op.eq_if_false8;
-                }
+                if (self.output[a_pc] == op.lt)
+                    self.output[a_pc] = op.cmp_if_false8
+                else if (self.output[a_pc] == op.eq)
+                    self.output[a_pc] = op.eq_if_false8;
             }
-            const tail_len: usize = @intCast(self.output_len - source_start);
-            std.mem.copyForwards(
-                u8,
-                self.output[destination_start..][0..tail_len],
-                self.output[source_start..][0..tail_len],
-            );
-            self.output_len -= delta;
             jump.op = new_op;
             jump.size = compact_size;
-            patch_offsets += 1;
+            removed_total += delta;
+            shrink_pos[shrink_count] = jump.pos;
+            shrink_removed[shrink_count] = removed_total;
+            shrink_count += 1;
+        }
+        if (shrink_count == 0) return;
 
-            for (self.addr) |*label_addr| {
-                if (label_addr.* != labels.unbound and label_addr.* > jump.pos)
-                    label_addr.* -= delta;
-            }
-            var later = index + 1;
-            while (later < self.jump_count) : (later += 1) {
-                if (self.jump_slots[later].pos > jump.pos)
-                    self.jump_slots[later].pos -= delta;
-            }
-            for (self.output_sources[0..self.output_source_len]) |*source| {
-                if (source.pc > jump.pos) source.pc -= delta;
-            }
+        // Close the gaps: each shrunk jump drops the bytes after its new
+        // operand.
+        const removals: Removals = .{ .pos = shrink_pos[0..shrink_count], .removed = shrink_removed[0..shrink_count] };
+        var write: usize = 0;
+        var read: usize = 0;
+        var removed_so_far: u32 = 0;
+        for (removals.pos, removals.removed) |pos, removed| {
+            const delta = removed - removed_so_far;
+            removed_so_far = removed;
+            // The kept operand is one byte, or two for goto → goto16.
+            const gap_start = pos + @as(u32, if (delta == 2) 2 else 1);
+            std.mem.copyForwards(u8, self.output[write..][0 .. gap_start - read], self.output[read..gap_start]);
+            write += gap_start - read;
+            read = gap_start + delta;
+        }
+        std.mem.copyForwards(u8, self.output[write..][0 .. self.output_len - read], self.output[read..self.output_len]);
+        self.output_len -= removed_total;
+
+        for (self.addr) |*label_addr| {
+            if (label_addr.* != labels.unbound) label_addr.* -= removals.before(label_addr.*);
+        }
+        for (jumps) |*jump| jump.pos -= removals.before(jump.pos);
+        for (self.output_sources[0..self.output_source_len]) |*source| {
+            source.pc -= removals.before(source.pc);
         }
 
-        if (patch_offsets != 0) {
-            for (self.jump_slots[0..self.jump_count]) |jump| {
-                if (jump.label >= self.product.label_len or
-                    self.addr[jump.label] == labels.unbound)
-                {
-                    return error.InvalidBytecode;
-                }
-                const diff = @as(i64, self.addr[jump.label]) - @as(i64, jump.pos);
-                try self.writeRelative(jump.pos, jump.size, diff);
-            }
+        for (jumps) |jump| {
+            const diff = @as(i64, self.addr[jump.label]) - @as(i64, jump.pos);
+            try self.writeRelative(jump.pos, jump.size, diff);
         }
-    }
-
-    fn isLabelAddress(self: *const Resolver, pc: u32) bool {
-        for (self.addr) |addr| {
-            if (addr == pc) return true;
-        }
-        return false;
     }
 
     fn validateFinalSources(self: *const Resolver) Error!void {
@@ -2992,16 +2825,15 @@ const Resolver = struct {
 
     fn installSourceLocsNoFail(
         self: *Resolver,
-        function: *bytecode.Bytecode,
         owned: []SourceLocSlot,
         owned_capacity: usize,
     ) void {
         std.debug.assert(owned.len <= owned_capacity);
         std.debug.assert(owned_capacity != 0 or owned.len == 0);
-        const old = function.source_loc_slots;
-        const old_capacity = function.source_loc_capacity;
-        function.source_loc_slots = owned;
-        function.source_loc_capacity = owned_capacity;
+        const old = self.function.source_loc_slots;
+        const old_capacity = self.function.source_loc_capacity;
+        self.function.source_loc_slots = owned;
+        self.function.source_loc_capacity = owned_capacity;
         if (old_capacity != 0)
             self.memory.free(old.ptr[0..old_capacity]);
     }
@@ -3023,7 +2855,6 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
-        self.output_atoms_owned = false;
         self.function.installAtomOperandsWithCapacity(owned_atoms, owned_atom_capacity);
 
         const owned_sources = self.output_sources[0..self.output_source_len];
@@ -3031,7 +2862,7 @@ const Resolver = struct {
         self.output_sources = &.{};
         self.output_source_capacity = 0;
         self.output_source_len = 0;
-        self.installSourceLocsNoFail(self.function, owned_sources, owned_source_capacity);
+        self.installSourceLocsNoFail(owned_sources, owned_source_capacity);
     }
 };
 
@@ -3058,7 +2889,6 @@ pub fn run(
         .fd = fd,
         .product = product,
         .memory = product.memory,
-        .atoms = product.atoms,
         .code = product.code[0..product.code_len],
         .input_atoms = product.atom_operands[0..product.atom_len],
         .input_sources = product.source_slots[0..product.source_len],
@@ -3078,9 +2908,6 @@ pub fn run(
         resolver.output_atom_capacity == 0 and resolver.output_source_capacity == 0);
 }
 
-/// Packed-finalize variant.  Its caller must perform the fused final-code,
-/// atom-owner, and var-ref validation before publishing the FunctionBytecode.
-/// All other callers use `run`, which keeps the self-contained full proof.
 const ResolveLabelsTestHarness = struct {
     rt: *core.JSRuntime,
     name_atom: core.atom.Atom,

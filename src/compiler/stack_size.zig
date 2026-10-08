@@ -49,6 +49,7 @@ pub const Error = error{
     BytecodeOverflow,
     ReachableFalloff,
     OutOfMemory,
+    Interrupted,
 };
 
 /// Extra production-artifact proof fused into the stack-size walk. The
@@ -67,6 +68,9 @@ pub const Options = struct {
     /// stack budget. The default preserves the standalone verifier API;
     /// production finalization supplies the runtime-accounted allocator.
     scratch_allocator: std.mem.Allocator = std.heap.page_allocator,
+
+    /// Runtime whose interrupt handler the walk polls (contract C8).
+    interrupt_runtime: ?*runtime.JSRuntime = null,
 
     /// When non-null, receives the return-balance proof: true iff every
     /// reachable `return` / `return_undef` terminator completes with an
@@ -226,6 +230,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
     var stack_len_max: u16 = 0;
 
     while (pending_len != 0) {
+        if (options.interrupt_runtime) |rt| try rt.pollNativeWork();
         pending_len -= 1;
         const pos = pending_pc[pending_len];
         var stack_len = stack_level_tab[pos];

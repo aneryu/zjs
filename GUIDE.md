@@ -115,19 +115,18 @@ integer widths; mutable shared buffers under concurrency.
 **Runtime thread ownership.** A `JSRuntime` is initialized, mutated, collected,
 and destroyed on one owner thread. Context construction/publication/release,
 class definition growth/unregistration, context-list and prototype-slot
-mutation, plugin install/unload, and GC commits all follow that token. Checked
+mutation, and GC commits all follow that token. Checked
 host boundaries reject a foreign caller with `error.WrongRuntimeThread` before
 allocation or mutation; infallible internal teardown paths assert the same
 precondition. Same-thread callback reentry is supported and must use the normal
 generation/reconciliation rules—thread ownership is not a non-reentrancy
 guard. No broad Runtime structural lock substitutes for this contract.
 
-Process-global class ID allocation is the exception: it has independent atomic
-synchronization so different owner-thread Runtimes can allocate stable IDs
-concurrently. A foreign `Atomics.waitAsync` notifier or test262 broadcast may
+Class IDs are allocated per Runtime (its `ClassTable`), so they need no
+cross-thread synchronization. A foreign `Atomics.waitAsync` notifier or test262 broadcast may
 only publish a mutex-protected, no-allocation completion signal. Promise/Realm
-mutation, settlement, cleanup, GC, JavaScript callbacks, and DSO callbacks run
-later on the Runtime owner thread, with no waiter/structural mutex held. test262
+mutation, settlement, cleanup, GC, and JavaScript callbacks run later on the
+Runtime owner thread, with no waiter/structural mutex held. test262
 workers and agents therefore create, use, and destroy their own Runtime inside
 the worker thread.
 
@@ -242,7 +241,7 @@ its subsets again as prerequisites.
 | --- | --- |
 | `mise run quick-gate` | CLI/runtime smoke beyond the focused test; no test262 runner |
 | `mise run checkpoint-gate` | Debug suite, GC-stress rerun, CLI smoke, sema-only public-root embedding check |
-| `mise run batch-gate` | Debug checkpoint, then ReleaseFast test262; once per merge batch |
+| `mise run batch-gate` | Debug checkpoint and ReleaseFast test262, run concurrently; once per merge batch |
 | `mise run batch-gate-profile` | Batch gate plus ReleaseFast CLI/profile smoke |
 | `mise run production-gate` | ReleaseFast suite, smoke, embedding tests, and test262 for release |
 

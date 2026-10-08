@@ -13,10 +13,7 @@
 //! zero exec/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
 //! The collection native method bodies (`exec/collection_ops.zig`) call these
-//! backend entry points directly; the VM Map-fusion fast paths
-//! (`mapSetLatin1PrefixInt32Range` / `mapGetLatin1PrefixIntValue`, consumed by
-//! `exec/vm_property.zig`) and the WeakMap test-support mutator
-//! (`setWeakMapEntry`, consumed by `exec/call.zig`) live here too.
+//! backend entry points directly.
 
 const std = @import("std");
 
@@ -236,7 +233,7 @@ fn weakEntryHash(key_identity: usize) u64 {
 
 // === Strong-entry append / index growth ===
 
-pub fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
+fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
     var stored = entry;
     stored.hash = hash;
     stored.hash_next = strong_no_entry;
@@ -253,7 +250,11 @@ pub fn appendStrongEntryOwned(rt: *core.JSRuntime, object: *core.Object, entry: 
 }
 
 pub fn ensureStrongIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_active_count: usize) !void {
-    if (next_active_count < strong_index_threshold) return;
+    // Without an index a lookup scans every slot, deleted ones included, and
+    // a live iterator blocks compaction: a small queue churned under
+    // `for...of` would otherwise scan its whole history on every lookup.
+    const next_slot_count = object.collectionEntriesSlot().items.len + 1;
+    if (@max(next_active_count, next_slot_count) < strong_index_threshold) return;
     const heads = object.collectionBucketHeads();
     if (heads.len == 0) {
         try rebuildStrongIndex(rt, object, bucketCountForActiveCount(next_active_count));
@@ -309,24 +310,32 @@ fn refreshStrongIndex(object: *core.Object) void {
 }
 
 fn linkStrongEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().items;
-    const bucket = bucketIndex(entries[index].hash, heads.*.len);
-    entries[index].hash_next = heads.*[bucket];
-    heads.*[bucket] = index;
+    linkBucketEntry(object.collectionBucketHeadsSlot().*, object.collectionEntriesSlot().items, index);
 }
 
 fn unlinkStrongEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().items;
+    unlinkBucketEntry(object.collectionBucketHeadsSlot().*, object.collectionEntriesSlot().items, index);
+}
+
+/// Push entry `index` onto the head of its bucket chain.
+fn linkBucketEntry(heads: []usize, entries: anytype, index: usize) void {
+    if (heads.len == 0) return;
+    const bucket = bucketIndex(entries[index].hash, heads.len);
+    entries[index].hash_next = heads[bucket];
+    heads[bucket] = index;
+}
+
+/// Splice entry `index` out of its bucket chain. Mirrors `map_delete_record`,
+/// which walks the one bucket the record hashes to and re-points the
+/// predecessor link.
+fn unlinkBucketEntry(heads: []usize, entries: anytype, index: usize) void {
+    if (heads.len == 0) return;
     if (index >= entries.len) return;
-    var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
-    while (link.* != strong_no_entry) {
+    var link = &heads[bucketIndex(entries[index].hash, heads.len)];
+    while (link.* != core.object.collection_no_entry) {
         const current = link.*;
         if (current >= entries.len) {
-            link.* = strong_no_entry;
+            link.* = core.object.collection_no_entry;
             return;
         }
         if (current == index) {
@@ -347,7 +356,7 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     errdefer rt.releaseWeakIdentity(stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
     const index = entries_slot.items.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
+    const inserted_holder = !object.isBorrowedReferenceHolder();
     if (inserted_holder) try rt.registerBorrowedReferenceHolder(object);
     errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(object);
     try ensureWeakIndexForInsert(rt, object, index + 1);
@@ -382,7 +391,6 @@ fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usi
 
     for (object.weakCollectionEntriesSlot().items, 0..) |*entry, index| {
         entry.hash = weakEntryHash(entry.key_identity);
-        entry.hash_next = weak_no_entry;
         const bucket = bucketIndex(entry.hash, next.len);
         entry.hash_next = next[bucket];
         next[bucket] = index;
@@ -394,35 +402,11 @@ fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usi
 }
 
 fn linkWeakEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.weakCollectionEntriesSlot().items;
-    const bucket = bucketIndex(entries[index].hash, heads.*.len);
-    entries[index].hash_next = heads.*[bucket];
-    heads.*[bucket] = index;
+    linkBucketEntry(object.collectionBucketHeadsSlot().*, object.weakCollectionEntriesSlot().items, index);
 }
 
-/// Splice entry `index` out of its bucket chain. Mirrors `map_delete_record`
-///, which walks the one bucket the record hashes to and
-/// re-points the predecessor link; the strong twin is `unlinkStrongEntry`.
 fn unlinkWeakEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.weakCollectionEntriesSlot().items;
-    if (index >= entries.len) return;
-    var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
-    while (link.* != weak_no_entry) {
-        const current = link.*;
-        if (current >= entries.len) {
-            link.* = weak_no_entry;
-            return;
-        }
-        if (current == index) {
-            link.* = entries[current].hash_next;
-            return;
-        }
-        link = &entries[current].hash_next;
-    }
+    unlinkBucketEntry(object.collectionBucketHeadsSlot().*, object.weakCollectionEntriesSlot().items, index);
 }
 
 // === Entry removal / rollback / clear ===
@@ -477,17 +461,10 @@ fn compactStrongEntries(object: *core.Object) void {
     }
     entries_slot.items = entries_slot.items.ptr[0..write];
     std.debug.assert(write == object.collectionActiveCount());
-
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    @memset(heads.*, strong_no_entry);
-    for (entries_slot.items, 0..) |*entry, index| {
-        // The stored hash is still valid: compaction moves entries, it never
-        // rewrites keys, so no rehash is needed (unlike `rebuildStrongIndex`).
-        const bucket = bucketIndex(entry.hash, heads.*.len);
-        entry.hash_next = heads.*[bucket];
-        heads.*[bucket] = index;
-    }
+    if (object.collectionPayload()) |payload| payload.leading_tombstones = 0;
+    // No rehash is needed (unlike `rebuildStrongIndex`): compaction moves
+    // entries, it never rewrites keys.
+    relinkStrongIndex(object);
 }
 
 /// Hand surplus entry/bucket capacity back once a collection has shrunk far
@@ -525,26 +502,65 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
     heads.* = next;
 }
 
+/// The entry at an iterator's logical `position` (see `entries_base`), and
+/// advance past it; null once past the end. A position inside a trimmed
+/// prefix resumes at the first remaining entry.
+pub fn nextIteratorEntry(object: *core.Object, position: *usize) ?core.object.CollectionEntry {
+    const base = object.collectionEntriesBase();
+    const index = if (position.* > base) position.* - base else 0;
+    const entries = object.collectionEntriesSlot().items;
+    if (index >= entries.len) return null;
+    position.* = base + index + 1;
+    return entries[index];
+}
+
 pub fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
     _ = takeStrongEntry(object, index) orelse return;
-    if (!shouldCompactStrongEntries(object)) return;
-    compactStrongEntries(object);
-    shrinkStrongStorage(rt, object);
-}
-
-fn rollbackLastStrongEntry(object: *core.Object, index: usize) void {
-    const entries_slot = object.collectionEntriesSlot();
-    std.debug.assert(index + 1 == entries_slot.items.len);
-    _ = takeStrongEntry(object, index) orelse return;
-    entries_slot.items = entries_slot.items.ptr[0..index];
-}
-
-pub fn rollbackStrongEntriesTo(object: *core.Object, len: usize, active_count: usize) void {
-    const entries_slot = object.collectionEntriesSlot();
-    while (entries_slot.items.len > len) {
-        rollbackLastStrongEntry(object, entries_slot.items.len - 1);
+    if (shouldCompactStrongEntries(object)) {
+        compactStrongEntries(object);
+        shrinkStrongStorage(rt, object);
+        return;
     }
-    object.collectionActiveCountSlot().* = active_count;
+    trimLeadingStrongTombstones(object);
+}
+
+/// Minimum leading tombstone run worth a trim.
+const strong_trim_min_tombstones: usize = 32;
+
+/// Drop the run of tombstones at the front of the entry array while only
+/// parked iterators pin it, advancing `entries_base` so their logical
+/// positions keep their meaning. This is what keeps a map used as a FIFO or
+/// LRU cache -- delete the oldest entry while an iterator from
+/// `keys().next()` is still alive -- from rescanning every deleted slot. The
+/// run must be at least half the array, so the memmove is amortized O(1) per
+/// delete.
+fn trimLeadingStrongTombstones(object: *core.Object) void {
+    if (object.collectionScopedCursors() != 0) return;
+    const payload = object.collectionPayload() orelse return;
+    const entries_slot = object.collectionEntriesSlot();
+    const len = entries_slot.items.len;
+    const trim = payload.leading_tombstones;
+    if (trim < strong_trim_min_tombstones or trim * 2 < len) return;
+    std.mem.copyForwards(core.object.CollectionEntry, entries_slot.items[0 .. len - trim], entries_slot.items[trim..len]);
+    entries_slot.items = entries_slot.items.ptr[0 .. len - trim];
+    payload.entries_base += trim;
+    payload.leading_tombstones = 0;
+    relinkStrongIndex(object);
+}
+
+/// Rebuild the bucket chains over the current entry positions. Stored
+/// hashes stay valid: entries move, keys do not change.
+fn relinkStrongIndex(object: *core.Object) void {
+    const heads = object.collectionBucketHeadsSlot();
+    if (heads.*.len == 0) return;
+    @memset(heads.*, strong_no_entry);
+    for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
+        entry.hash_next = strong_no_entry;
+        if (!entry.active) continue;
+        const bucket = bucketIndex(entry.hash, heads.*.len);
+        entry.hash_next = heads.*[bucket];
+        heads.*[bucket] = index;
+    }
 }
 
 /// O(1) weak delete: unchain the victim, then move the tail entry into the hole
@@ -587,7 +603,14 @@ pub fn clearStrongEntries(object: *core.Object) void {
     const entries_slot = object.collectionEntriesSlot();
     const old_len = entries_slot.items.len;
     if (old_len == 0) return;
-    const drop_slots = object.collectionLiveCursors() == 0;
+    // Parked iterators alone do not keep the slots: every slot becomes a
+    // tombstone they would skip, so the whole array is a leading run.
+    const drop_slots = object.collectionScopedCursors() == 0;
+    const payload = object.collectionPayload().?;
+    if (drop_slots) {
+        if (object.collectionLiveCursors() != 0) payload.entries_base += old_len;
+        payload.leading_tombstones = 0;
+    } else payload.leading_tombstones = old_len;
     if (object.collectionActiveCount() == 0) {
         // Nothing to release; only the tombstone slots are left to reclaim.
         if (drop_slots) entries_slot.items = entries_slot.items.ptr[0..0];
@@ -623,6 +646,13 @@ fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEn
     entries_slot.items[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
+    if (object.collectionPayload()) |payload| {
+        if (payload.leading_tombstones == index) {
+            var first = index + 1;
+            while (first < entries_slot.items.len and !entries_slot.items[first].active) first += 1;
+            payload.leading_tombstones = first;
+        }
+    }
     return entry;
 }
 
@@ -656,30 +686,6 @@ pub fn weakKeyIdentityPeek(rt: *core.JSRuntime, value: core.JSValue) ?usize {
     return core.Object.weakIdentityFromValuePeek(rt, value);
 }
 
-// === Weak-collection sweep (GC reachability) ===
-
-/// Drop every weak entry whose key identity is no longer live, as decided by
-/// the `isLive` predicate the GC supplies. Returns the number removed.
-pub fn sweepWeakEntries(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    context: ?*anyopaque,
-    isLive: *const fn (?*anyopaque, usize) bool,
-) !usize {
-    if (object.class_id != core.class.ids.weakmap and object.class_id != core.class.ids.weakset) return error.TypeError;
-    var removed: usize = 0;
-    var i: usize = 0;
-    while (i < object.weakCollectionEntriesSlot().items.len) {
-        if (isLive(context, object.weakCollectionEntriesSlot().items[i].key_identity)) {
-            i += 1;
-            continue;
-        }
-        try removeWeakEntry(rt, object, i);
-        removed += 1;
-    }
-    return removed;
-}
-
 // === WeakMap entry mutation ===
 
 /// Insert-or-update a WeakMap entry by already-resolved key identity. The caller
@@ -687,18 +693,14 @@ pub fn sweepWeakEntries(
 pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (findWeakEntry(object, key_identity)) |index| {
         const entry = &object.weakCollectionEntriesSlot().items[index];
-        const next_value = value;
-        entry.value = next_value;
+        // No barrier: a minor's ephemeron pass visits every marked (so every
+        // old) weak holder.
+        entry.value = value;
         return;
     }
 
     const entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value };
     try appendWeakEntry(rt, object, entry);
-}
-
-pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
-    if (object.class_id != core.class.ids.weakmap) return error.TypeError;
-    try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
 }
 
 /// Insert-or-update a WeakMap entry, resolving (and registering) the weak key
@@ -709,11 +711,11 @@ pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSVa
     try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
 }
 
-// === Map Latin1-prefix-int fusion fast paths (VM loop fusion) ===
+// === Allocation-free Map probe (tests) ===
 
 /// Lookup a Map entry whose key is the latin1 `prefix` concatenated with the
-/// decimal text of `int_value`, returning a duplicated value or null. Drives the
-/// `vm_property_locals` Map-fusion read fast path; no allocation on miss.
+/// decimal text of `int_value`, returning the value or null. It allocates
+/// nothing, so tests can read a Map inside a no-GC or failing-allocator window.
 pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.JSValue {
     if (object.class_id != core.class.ids.map) return null;
     var int_buf: [16]u8 = undefined;
@@ -721,50 +723,4 @@ pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_
     const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, core.string.hashLatin1(prefix, 0));
     const index = findStrongEntryLatin1Concat(object, prefix, digits, hash) orelse return null;
     return object.collectionEntriesSlot().items[index].value;
-}
-
-/// Bulk insert-or-update Map entries keyed by `prefix ++ decimal(i)` for every
-/// `i` in `[start, limit)`, with the integer itself as the value. Drives the
-/// `vm_property_locals` Map-fusion write fast path. Rolls back any inserts on
-/// failure.
-pub fn mapSetLatin1PrefixInt32Range(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    prefix: []const u8,
-    start: i32,
-    limit: i32,
-) !void {
-    if (object.class_id != core.class.ids.map or start < 0 or limit < start) return error.TypeError;
-    const max_new_count: usize = @intCast(limit - start);
-    if (max_new_count == 0) return;
-    try object.ensureCollectionEntryCapacity(rt, object.collectionEntriesSlot().items.len + max_new_count);
-    try ensureStrongIndexForInsert(rt, object, object.collectionActiveCount() + max_new_count);
-
-    const original_len = object.collectionEntriesSlot().items.len;
-    const original_active_count = object.collectionActiveCount();
-    var inserted = false;
-    errdefer if (inserted) rollbackStrongEntriesTo(object, original_len, original_active_count);
-
-    const prefix_seed = core.string.hashLatin1(prefix, 0);
-    var int_buf: [16]u8 = undefined;
-    var int_value = start;
-    while (int_value < limit) : (int_value += 1) {
-        const digits = dtoa.formatInt32(&int_buf, int_value);
-        const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, prefix_seed);
-        if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
-            const entry = &object.collectionEntriesSlot().items[index];
-            entry.value = core.JSValue.int32(int_value);
-            continue;
-        }
-
-        const key = (try core.string.String.createLatin1Concat(rt, prefix, digits)).value();
-        const entry = core.object.CollectionEntry{
-            .key = key,
-            .value = core.JSValue.int32(int_value),
-            .hash = hash,
-            .hash_next = strong_no_entry,
-        };
-        _ = try appendStrongEntryWithHash(rt, object, entry, hash);
-        inserted = true;
-    }
 }

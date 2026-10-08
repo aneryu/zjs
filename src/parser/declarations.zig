@@ -4,26 +4,12 @@
 //! that keeps those lookups linear on large functions.
 
 const std = @import("std");
-const root = @import("../parser.zig");
 const parse_state = @import("parse_state.zig");
 const identifiers = @import("identifiers.zig");
-const emitter = @import("emitter.zig");
-const functions = @import("functions.zig");
-const bytecode = @import("../bytecode.zig");
-const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
-const compiler = @import("../compiler/root.zig");
-const Emitter = emitter.Emitter;
 const State = parse_state.State;
 const Error = parse_state.Error;
 const Atom = parse_state.Atom;
 const function_def_mod = parse_state.function_def_mod;
-const bytecode_function = parse_state.bytecode_function;
-const opcode = parse_state.opcode;
-const atom_this = parse_state.atom_this;
-const atom_new_target = parse_state.atom_new_target;
-const atom_this_active_func = parse_state.atom_this_active_func;
-const atom_home_object = parse_state.atom_home_object;
 
 /// Parser-only accelerator for the two declaration-conflict scans which
 /// otherwise make a flat list of unique lexical declarations quadratic.
@@ -323,10 +309,9 @@ pub fn commitLinkedDeclarationIndexWrite(
             index.dirty = true;
             return;
         };
-        if (!index.scope_names.contains(key)) {
-            index.scope_names.putAssumeCapacity(key, .{});
-        }
-        const value = index.scope_names.getPtr(key).?;
+        const entry = index.scope_names.getOrPutAssumeCapacity(key);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        const value = entry.value_ptr;
         if (vd.is_lexical) value.newest_lexical = @intCast(var_index);
         value.newest_lexical_or_catch = @intCast(var_index);
     }
@@ -401,10 +386,9 @@ pub fn commitFunctionVarOriginIndexWrite(
             index.dirty = true;
             return;
         };
-        if (!index.scope_names.contains(key)) {
-            index.scope_names.putAssumeCapacity(key, .{});
-        }
-        const value = index.scope_names.getPtr(key).?;
+        const entry = index.scope_names.getOrPutAssumeCapacity(key);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        const value = entry.value_ptr;
         if (value.oldest_child_function_var == no_declaration_index) {
             value.oldest_child_function_var = @intCast(var_index);
         }
@@ -472,8 +456,8 @@ pub fn findLexicalDeclaration(
     return findLexicalDeclarationLegacy(s, name, check_catch);
 }
 
-/// Authoritative QuickJS `find_lexical_decl` scan
-///. The parser-only index below is derived from
+/// Authoritative QuickJS `find_lexical_decl` scan.
+/// The parser-only index below is derived from
 /// this exact linked topology and falls back here when unavailable or
 /// dirty. Only global-eval (not module/direct eval) adds the
 /// GLOBAL_VAR_OFFSET lexical fallback.
@@ -540,23 +524,31 @@ pub fn findFunctionVarInChildScopeLegacy(s: *State, name: Atom, scope_level: i32
     return null;
 }
 
-/// qjs find_lexical_global_var: a global_vars entry with
-/// is_lexical set (a top-level let/const declared as JS_CLOSURE_GLOBAL_DECL).
-pub fn findLexicalGlobalVar(s: *State, name: Atom) bool {
-    for (s.curFunc().global_vars) |gv| {
-        if (gv.var_name == name and gv.is_lexical) return true;
+/// A module's top-level `let`/`const`/`class`, function declarations and
+/// imports are all lexical (§16.2.1.1), so no `var` anywhere in the module
+/// body may share their names.
+fn moduleLexicallyDeclares(fd: *function_def_mod.FunctionDef, name: Atom) bool {
+    if (fd.findGlobalVarName(name)) |found| {
+        if (found.has_lexical) return true;
+        for (fd.global_vars[found.first..]) |gv| {
+            if (gv.var_name == name and gv.cpool_idx >= 0) return true;
+        }
+    }
+    for (fd.closure_var) |cv| {
+        if (cv.var_name == name and cv.isLexical()) return true;
     }
     return false;
 }
 
+/// qjs find_lexical_global_var: a global_vars entry with
+/// is_lexical set (a top-level let/const declared as JS_CLOSURE_GLOBAL_DECL).
+pub fn findLexicalGlobalVar(s: *State, name: Atom) bool {
+    const found = s.curFunc().findGlobalVarName(name) orelse return false;
+    return found.has_lexical;
+}
+
 pub fn findFunctionScopeVar(s: *State, name: Atom) ?u16 {
-    const vars = s.curFunc().vars;
-    var i = vars.len;
-    while (i > 0) {
-        i -= 1;
-        if (vars[i].var_name == name and vars[i].scope_level == 0) return @intCast(i);
-    }
-    return null;
+    return s.curFunc().findFunctionVar(name);
 }
 
 pub fn scopeHasVar(s: *State, scope_idx: i32, name: Atom) bool {
@@ -572,7 +564,12 @@ pub fn scopeHasVar(s: *State, scope_idx: i32, name: Atom) bool {
 }
 
 pub fn visibleLexicalScopeVar(s: *State, name: Atom) ?u16 {
-    var scope_idx = s.scope_level;
+    return visibleLexicalScopeVarFrom(s, name, s.scope_level);
+}
+
+/// The nearest lexical var named `name` on the scope chain from `start`.
+pub fn visibleLexicalScopeVarFrom(s: *State, name: Atom, start: i32) ?u16 {
+    var scope_idx = start;
     while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < s.curFunc().scopes.len) {
         var var_idx = s.curFunc().scopes[@intCast(scope_idx)].first;
         while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < s.curFunc().vars.len) {
@@ -586,10 +583,14 @@ pub fn visibleLexicalScopeVar(s: *State, name: Atom) ?u16 {
     return null;
 }
 
-/// Single declaration-semantics owner mirroring QuickJS `define_var`
-///. Syntax-token restrictions stay in the thin
+/// Single declaration-semantics owner mirroring QuickJS `define_var`.
+/// Syntax-token restrictions stay in the thin
 /// producer wrappers; every scope collision and physical row choice
 /// belongs here.
+pub fn failRedeclaration(s: *State, name: Atom) Error {
+    return s.failNamed("redeclaration of '{s}'", "redeclaration", name);
+}
+
 pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!DefinedVar {
     const fd = s.curFunc();
     switch (var_def_type) {
@@ -605,30 +606,37 @@ pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!Defin
                             var_def_type == .function_decl and
                             existing.var_kind == .function_decl;
                         if (!sloppy_function_redefinition)
-                            return s.failExpectedDescription("non-conflicting declaration");
-                    } else if (existing.var_kind == .catch_ and existing.scope_level + 2 == s.scope_level) {
-                        return s.failExpectedDescription("non-conflicting declaration");
+                            return failRedeclaration(s, name);
+                    } else if ((existing.var_kind == .catch_ or existing.is_catch_pattern) and
+                        existing.scope_level + 2 == s.scope_level)
+                    {
+                        return failRedeclaration(s, name);
                     }
                 },
                 .global => if (s.atFunctionBodyScope())
-                    return s.failExpectedDescription("non-conflicting declaration"),
+                    return failRedeclaration(s, name),
             };
 
             if (var_def_type != .function_decl and
                 var_def_type != .new_function_decl and
                 s.atFunctionBodyScope() and
-                fd.findArg(name) >= 0)
+                (fd.findArg(name) >= 0 or fd.isPatternParameterName(name)))
             {
-                return s.failExpectedDescription("non-conflicting declaration");
+                return failRedeclaration(s, name);
             }
             if (try findFunctionVarInChildScope(s, name, s.scope_level) != null) {
-                return s.failExpectedDescription("non-conflicting declaration");
+                return failRedeclaration(s, name);
+            }
+            for (fd.reused_var_origins.items) |reused| {
+                if (reused.name == name and s.isChildScope(reused.scope, s.scope_level))
+                    return failRedeclaration(s, name);
             }
             if (fd.is_global_var) {
-                if (s.firstGlobalVarIndex(name)) |global_idx| {
-                    const gv = fd.global_vars[global_idx];
-                    if (s.isChildScope(gv.scope_level, s.scope_level)) {
-                        return s.failExpectedDescription("non-conflicting declaration");
+                // Every `var` of the name counts, not just the first one.
+                if (s.firstGlobalVarIndex(name)) |first| {
+                    for (fd.global_vars[first..]) |gv| {
+                        if (gv.var_name == name and !gv.is_lexical and s.isChildScope(gv.scope_level, s.scope_level))
+                            return failRedeclaration(s, name);
                     }
                 }
             }
@@ -660,24 +668,24 @@ pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!Defin
         },
         .var_ => {
             if (try findLexicalDeclaration(s, name, false) != null) {
-                return s.failExpectedDescription("non-conflicting declaration");
+                return failRedeclaration(s, name);
             }
             if (fd.is_global_var) {
-                if (s.firstGlobalVarIndex(name)) |global_idx| {
-                    const gv = fd.global_vars[global_idx];
-                    if (gv.is_lexical and
-                        gv.scope_level == s.scope_level and
-                        fd.is_module)
-                    {
-                        return s.failExpectedDescription("non-conflicting declaration");
-                    }
+                if (fd.is_module and moduleLexicallyDeclares(fd, name)) {
+                    return failRedeclaration(s, name);
                 }
                 try addGlobalVar(s, name, .{});
                 return .global;
             }
-            if (findFunctionScopeVar(s, name)) |idx| return .{ .local = idx };
+            if (findFunctionScopeVar(s, name)) |idx| {
+                try fd.reused_var_origins.append(fd.artifacts, .{ .name = name, .scope = s.scope_level });
+                return .{ .local = idx };
+            }
             const arg_idx = fd.findArg(name);
-            if (arg_idx >= 0) return .{ .argument = @intCast(arg_idx) };
+            if (arg_idx >= 0) {
+                try fd.reused_var_origins.append(fd.artifacts, .{ .name = name, .scope = s.scope_level });
+                return .{ .argument = @intCast(arg_idx) };
+            }
 
             const idx = try appendFunctionVarAtOrigin(s, name, s.scope_level);
             if (identifiers.atomNameEquals(s, name, "arguments") and fd.has_arguments_binding) {
@@ -758,10 +766,7 @@ pub fn ensureFunctionScopeVar(s: *State, name: Atom) Error!u16 {
 /// qjs find_global_var: any global_vars entry with this
 /// name — top-level var, hoisted function declaration, or lexical.
 pub fn findGlobalVar(s: *State, name: Atom) bool {
-    for (s.curFunc().global_vars) |gv| {
-        if (gv.var_name == name) return true;
-    }
-    return false;
+    return s.curFunc().findGlobalVarName(name) != null;
 }
 
 pub fn appendFunctionVarAtOrigin(s: *State, name: Atom, origin_scope: i32) Error!u16 {

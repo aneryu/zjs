@@ -39,8 +39,8 @@ pub fn propertyCapacityForNeeded(needed: usize) usize {
     return capacity;
 }
 
-/// 8-byte property record, bit-for-bit faithful to qjs `JSShapeProperty`
-///: `hash_next:26` and `flags:6` share one 32-bit word,
+/// 8-byte property record, bit-for-bit faithful to qjs `JSShapeProperty`:
+/// `hash_next:26` and `flags:6` share one 32-bit word,
 /// followed by the 32-bit atom. `packed struct(u64)` keeps `hash_next`/`flags`/
 /// `atom_id` as direct field accesses (no nested `.hf.` rename) while collapsing
 /// the prior 12-byte layout to 8. `atom_id` lands at bit offset 32 (byte 4) so a
@@ -311,7 +311,7 @@ pub const Shape = extern struct {
 
     pub inline fn firstPropertyIndexAssumeHash(self: *const Shape, atom_id: atom.Atom) u32 {
         std.debug.assert(self.hasPropertyHash());
-        const bucket = propertyBucketIndex(self.hash, atom_id, self.prop_hash_mask);
+        const bucket = propertyBucketIndex(atom_id, self.prop_hash_mask);
         return self.hashBuckets()[bucket];
     }
 
@@ -396,67 +396,43 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.accountedAllocationSize());
     }
 
-    pub inline fn createObjectRoot(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        return createObjectRootMaybeReserved(self, rt, proto, false);
+    pub fn createObjectRoot(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
+        return self.findRootShape(proto, null) orelse self.createShapeImpl(rt, proto, initial_prop_size, true);
     }
 
     /// Reserve/initialize a root shape without publishing it onto the GC list.
     /// Object constructors collect, then `publish`, then register the object.
-    pub inline fn createObjectRootReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        return createObjectRootMaybeReserved(self, rt, proto, true);
+    pub fn createObjectRootReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
+        return self.findRootShape(proto, null) orelse self.createShapeImpl(rt, proto, initial_prop_size, false);
     }
 
-    /// Leftover hashed proto-root lookup. Comptime identity is only whether a
-    /// miss calls `createShape` or `createShapeReserved`; take that at runtime.
-    noinline fn createObjectRootMaybeReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, reserved: bool) !*Shape {
-        // qjs find_hashed_shape_proto rejects bucket
-        // co-residents on the already-loaded `hash` field before touching
-        // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
-        // sh1->prop_count == 0`. Mirror that check order.
+    pub fn createObjectRootWithPropertyCapacity(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRoot(rt, proto);
+        return self.findRootShape(proto, property_capacity) orelse self.createShapeImpl(rt, proto, property_capacity, true);
+    }
+
+    pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRootReserved(rt, proto);
+        return self.findRootShape(proto, property_capacity) orelse self.createShapeImpl(rt, proto, property_capacity, false);
+    }
+
+    /// A shared empty root shape for `proto`, marked shared on a hit. With a
+    /// `property_capacity`, only a root of exactly that capacity: the owning
+    /// Object allocates a value buffer of that size, and a larger root would
+    /// make `prop_size` exceed it, corrupting later appends and teardown.
+    fn findRootShape(self: *Registry, proto: ?*Object, property_capacity: ?usize) ?*Shape {
+        // qjs find_hashed_shape_proto rejects bucket co-residents on the
+        // already-loaded `hash` field before touching proto/prop_count.
         const expected_hash = initialHash(proto);
         var current = self.firstShapeWithHash(expected_hash);
         while (current) |found| : (current = found.registry_hash_next) {
             if (found.hash != expected_hash) continue;
             if (found.proto != proto or found.prop_count != 0) continue;
+            if (property_capacity) |capacity| if (found.prop_size != capacity) continue;
             found.markShared();
             return found;
         }
-        if (reserved) return self.createShapeReserved(rt, proto);
-        return self.createShape(rt, proto);
-    }
-
-    pub fn createObjectRootWithPropertyCapacity(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRoot(rt, proto);
-        const expected_hash = initialHash(proto);
-        var current = self.firstShapeWithHash(expected_hash);
-        while (current) |found| : (current = found.registry_hash_next) {
-            if (found.hash != expected_hash) continue;
-            // The owning Object allocates a value buffer with exactly this
-            // capacity. Reusing a larger root would make shape.prop_size exceed
-            // the real buffer length, corrupting later appends and teardown.
-            // qjs shape transition reuse likewise requires equal prop_size.
-            if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
-            found.markShared();
-            return found;
-        }
-        return self.createShapeWithPropertyCapacity(rt, proto, property_capacity);
-    }
-
-    pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRootReserved(rt, proto);
-        const expected_hash = initialHash(proto);
-        var current = self.firstShapeWithHash(expected_hash);
-        while (current) |found| : (current = found.registry_hash_next) {
-            if (found.hash != expected_hash) continue;
-            // The owning Object allocates a value buffer with exactly this
-            // capacity. Reusing a larger root would make shape.prop_size exceed
-            // the real buffer length, corrupting later appends and teardown.
-            // qjs shape transition reuse likewise requires equal prop_size.
-            if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
-            found.markShared();
-            return found;
-        }
-        return self.createShapeWithPropertyCapacityReserved(rt, proto, property_capacity);
+        return null;
     }
 
     /// Build one context-owned initial shape without ever materializing a
@@ -472,54 +448,13 @@ pub const Registry = struct {
     }
 
     pub fn createShape(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        // Single GC allocation = struct + inline FAM (qjs js_new_shape).
-        // createWithFam initializes metadata once; the constructor initializes
-        // the intrusive links before registration below.
-        const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
-        const shape = try rt.gc.createWithFamComptime(Shape, fam_bytes);
-        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
-        shape.* = .{
-            .header = .{},
-            .proto = proto,
-            .prop_hash_mask = @intCast(initial_hash_size - 1),
-            .prop_size = initial_prop_size,
-            .hash = initialHash(proto),
-        };
-        // qjs js_new_shape_nohash only zeros the hash table.
-        // Unused prop slots are written on append; walking uses prop_count.
-        @memset(shape.hashBuckets(), no_property_index);
-        try self.link(shape, true);
-        errdefer self.unlink(shape);
-        // `fam_bytes` was sized from the same capacity fields just stored, so
-        // `@sizeOf(Shape) + fam_bytes == allocationSize()` bit-for-bit; skip
-        // the recompute (registerObjectWithBytes precedent, runtime.zig).
-        self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        return shape;
+        return self.createShapeImpl(rt, proto, initial_prop_size, true);
     }
 
-    fn createShapeReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
-        const shape = try rt.gc.createWithFamComptime(Shape, fam_bytes);
-        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
-        shape.* = .{
-            .header = .{},
-            .proto = proto,
-            .prop_hash_mask = @intCast(initial_hash_size - 1),
-            .prop_size = initial_prop_size,
-            .hash = initialHash(proto),
-        };
-        @memset(shape.hashBuckets(), no_property_index);
-        try self.link(shape, true);
-        errdefer self.unlink(shape);
-        return shape;
-    }
-
-    fn createShapeWithPropertyCapacity(
-        self: *Registry,
-        rt: *JSRuntime,
-        proto: ?*Object,
-        property_capacity: usize,
-    ) !*Shape {
+    /// One GC allocation: the struct plus its inline FAM (qjs js_new_shape),
+    /// hashed and linked; `publish` also puts it on the GC list, otherwise
+    /// the caller publishes it once its owner exists.
+    fn createShapeImpl(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize, comptime publish_now: bool) !*Shape {
         std.debug.assert(property_capacity != 0);
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
         const fam_bytes = famRegionBytes(property_capacity, bucket_count);
@@ -529,41 +464,15 @@ pub const Registry = struct {
             .header = .{},
             .proto = proto,
             .prop_size = @intCast(property_capacity),
-            .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
+            .prop_hash_mask = @intCast(bucket_count - 1),
             .hash = initialHash(proto),
         };
-        if (shape.hashBuckets().len != 0) {
-            @memset(shape.hashBuckets(), no_property_index);
-        }
+        // qjs js_new_shape_nohash only zeros the hash table. Unused prop
+        // slots are written on append; walking uses prop_count.
+        @memset(shape.hashBuckets(), no_property_index);
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        return shape;
-    }
-
-    fn createShapeWithPropertyCapacityReserved(
-        self: *Registry,
-        rt: *JSRuntime,
-        proto: ?*Object,
-        property_capacity: usize,
-    ) !*Shape {
-        std.debug.assert(property_capacity != 0);
-        const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
-        const fam_bytes = famRegionBytes(property_capacity, bucket_count);
-        const shape = try rt.gc.createWithFam(Shape, fam_bytes);
-        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
-        shape.* = .{
-            .header = .{},
-            .proto = proto,
-            .prop_size = @intCast(property_capacity),
-            .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
-            .hash = initialHash(proto),
-        };
-        if (shape.hashBuckets().len != 0) {
-            @memset(shape.hashBuckets(), no_property_index);
-        }
-        try self.link(shape, true);
-        errdefer self.unlink(shape);
+        if (publish_now) self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
         return shape;
     }
 
@@ -713,8 +622,8 @@ pub const Registry = struct {
     }
 
     /// Grow-by-relocation: the inline FAM cannot grow in place, so a larger
-    /// shape requires a brand-new allocation. Mirrors qjs `resize_properties`
-    ///: allocate a NEW block sized for (new_prop_size,
+    /// shape requires a brand-new allocation. Mirrors qjs `resize_properties`:
+    /// allocate a NEW block sized for (new_prop_size,
     /// new_bucket_count), copy struct fields + proto/atom ownership + the prop
     /// array, splice the new block into the GC object list and (if hashed) the
     /// shape-hash chain in the OLD shape's place, free the old block, and write
@@ -819,7 +728,7 @@ pub const Registry = struct {
         // chain before clearing its atom. Keeping deleted entries linked makes
         // every later `find_own_property` decode and test a deleted flag even
         // though the hash table can never legitimately resolve to a tombstone.
-        const bucket = propertyBucketIndex(shape.hash, removed_atom, shape.prop_hash_mask);
+        const bucket = propertyBucketIndex(removed_atom, shape.prop_hash_mask);
         var current = shape.hashBuckets()[bucket];
         var previous: ?usize = null;
         while (current != no_property_index) {
@@ -1058,6 +967,10 @@ pub const Registry = struct {
     fn reservePropertyAppend(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, requested_property_capacity: usize) !void {
         const shape = shape_ptr.*;
         const post_append_count = @as(usize, shape.prop_count) + 1;
+        // Property indices (tombstones keep theirs) must stay below the
+        // 26-bit hash-chain sentinel: index `no_property_index` would read as
+        // the end of its chain and the property would vanish.
+        if (post_append_count > no_property_index) return error.OutOfMemory;
         const needed_properties = @max(requested_property_capacity, post_append_count);
 
         var property_capacity: usize = if (shape.prop_size == 0) initial_prop_size else shape.prop_size;
@@ -1188,7 +1101,6 @@ pub const Registry = struct {
         try self.reservePropertyAppend(rt, shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
 
         const retained_atom = self.atoms.noteHolderStore(atom_id);
-        var retained_atom_owned = true;
 
         const shape = shape_ptr.*;
         const index = shape.prop_count;
@@ -1197,7 +1109,6 @@ pub const Registry = struct {
             .flags = flags,
             .atom_id = retained_atom,
         };
-        retained_atom_owned = false;
         shape.prop_count += 1;
         // PERF-SHAPE-ID: an in-place append is a new layout. This is the one
         // append choke point (`addProperty` and the unshared leg of
@@ -1223,7 +1134,7 @@ pub const Registry = struct {
         std.debug.assert(index < shape.prop_count);
         const prop = &shape.props()[index];
         std.debug.assert(prop.atom_id != atom.null_atom);
-        const bucket = propertyBucketIndex(shape.hash, prop.atom_id, shape.prop_hash_mask);
+        const bucket = propertyBucketIndex(prop.atom_id, shape.prop_hash_mask);
         prop.hash_next = @intCast(shape.hashBuckets()[bucket]);
         shape.hashBuckets()[bucket] = @intCast(index);
     }
@@ -1340,57 +1251,16 @@ pub const Registry = struct {
         self.insertShapeHash(shape);
     }
 
-    /// Make a condemned shape unfindable without destroying it.
-    ///
-    /// Sliced destruction opens a window between condemnation and the
-    /// destructor, and the transition table kept serving corpses through it: a
-    /// LIVE parent shape whose transition child died with all its objects
-    /// still had that child in the buckets, so a mutator re-performing the
-    /// same transition adopted the corpse, and a later destruction slice
-    /// freed the shape out from under a live object -- crypto and richards
-    /// both rebuild same-shaped objects in loops and both failed exactly
-    /// there. Delisting at condemn time closes the window; the struct stays
-    /// for the destructor, which tolerates an already-empty bucket.
-    ///
-    /// That contract is `unlink`'s, so this IS `unlink` -- it used to be an
-    /// unconditional `removeShapeHashEverywhere`, which is the whole table per
-    /// condemned shape, i.e. quadratic in the number of shapes a major
-    /// condemns. And it paid it twice: leaving `is_hashed` set meant the
-    /// destructor's own `unlink` re-ran, missed the bucket the delist had
-    /// already emptied, and fell back to a SECOND full scan. Routing both
-    /// through `unlink` gives the delist the O(1) single-bucket path (full
-    /// scan still reachable as the stale-hash fallback) and turns the
-    /// destructor's call into the no-op it always meant to be.
-    ///
-    /// Clearing `is_hashed` and debiting `shape_hash_count` here is not a side
-    /// effect to tolerate, it is the point: the shape is out of the table the
-    /// instant this returns, so the flag and the count are simply telling the
-    /// truth earlier than they used to. Nothing between condemnation and
-    /// destruction may consult a condemned shape -- the trace proved it
-    /// unreachable and the morgue gates collections -- and the one engine-wide
-    /// structure the mutator does consult is the table this leaves.
-    pub fn delistCondemnedShape(self: *Registry, header: *gc.Header) void {
-        const shape: *Shape = @alignCast(@fieldParentPtr("header", header));
-        self.unlink(shape);
-        std.debug.assert(!shape.isHashed());
-    }
-
     /// `is_hashed` is exactly "this shape is linked in a bucket", and the
     /// count is exactly how many are.
     ///
-    /// The delist above now trusts the flag: `!isHashed()` is taken as "not in
-    /// the table" and it walks nothing. That is the same class of assumption
-    /// that the arena audit exists for -- an invariant maintained by scattered
-    /// stores in half a dozen link/unlink/relocate paths, with no single owner,
-    /// where a forgotten store is invisible until a corpse gets served out of
-    /// a bucket. So check it rather than assume it: a linked shape with the
-    /// flag clear is precisely the corruption that would make the delist skip
-    /// a shape it must remove.
+    /// The invariant is maintained by stores in several link/unlink/relocate
+    /// paths with no single owner, so it is checked rather than assumed.
     /// Two distinct errors, because the two halves break for different reasons
     /// and an audit that says only "corrupt" sends the reader to the wrong
-    /// half. `LinkedButUnflagged` is the one that makes the delist skip a
-    /// shape; `CountMismatch` is a stale debit, which is how the delist looked
-    /// before it became an unlink.
+    /// half: `ShapeHashLinkedButUnflagged` is a chained shape without its
+    /// hashed flag; `ShapeHashCountMismatch` is a count that disagrees with
+    /// the chains.
     pub const HashIndexError = error{
         ShapeHashLinkedButUnflagged,
         ShapeHashCountMismatch,
@@ -1482,10 +1352,9 @@ pub fn hashIndex(hash: u32, bits: u6) u32 {
     return hash >> shift;
 }
 
-pub inline fn propertyBucketIndex(shape_hash: u32, atom_id: atom.Atom, mask: u32) usize {
+pub inline fn propertyBucketIndex(atom_id: atom.Atom, mask: u32) usize {
     std.debug.assert(mask != no_property_hash);
     std.debug.assert(std.math.isPowerOfTwo(@as(usize, mask) + 1));
-    _ = shape_hash;
     return @intCast(atom_id.raw() & mask);
 }
 

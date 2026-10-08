@@ -4,7 +4,7 @@
 //! namespace/meta/exception values, closure cells, and dependency arrays.
 //! Request edges borrow records from that same registry; retained VarRefs and
 //! JSValues document the edges that keep bindings/results alive and are traced
-//! by core GC. QuickJS source map: `JSModuleDef` at quickjs.c. This is
+//! by core GC. QuickJS source map: `JSModuleDef`. This is
 //! realm-core state used by parser/compiler/exec orchestration; it must not
 //! import exec or binding.
 
@@ -20,14 +20,23 @@ const VarRef = @import("var_ref.zig").VarRef;
 const atom_default = atom.predefinedId("default", .string).?;
 const atom_star = atom.predefinedId("*", .string).?;
 
+/// Cyclic Module Record [[Status]] (§16.2.1.5). `errored` is the spec's
+/// `evaluated` with a non-empty [[EvaluationError]] (`eval_exception`).
 pub const Status = enum {
     unlinked,
     linking,
     linked,
     evaluating,
+    /// Evaluated synchronously up to its async part; waits for itself or a
+    /// dependency to finish (§16.2.1.5.3).
+    evaluating_async,
     evaluated,
     errored,
 };
+
+/// [[AsyncEvaluationOrder]]: unset, an order, or done.
+pub const async_order_unset: u64 = 0;
+pub const async_order_done: u64 = std.math.maxInt(u64);
 
 pub const SyntheticKind = enum {
     none,
@@ -103,13 +112,6 @@ pub const ResolvedBinding = struct {
     module: *ModuleRecord,
     entry: Entry,
 
-    pub fn bindingName(self: ResolvedBinding) atom.Atom {
-        return switch (self.entry) {
-            .local_export => |index| self.module.exports[@intCast(index)].local_name,
-            .namespace_export => atom_star,
-        };
-    }
-
     pub fn sameIdentity(lhs: ResolvedBinding, rhs: ResolvedBinding) bool {
         const lhs_identity = lhs.identity();
         const rhs_identity = rhs.identity();
@@ -163,6 +165,51 @@ pub const ResolvedExport = union(enum) {
 ///
 /// `module_ns` is intentionally absent: a namespace is published only after a
 /// fresh record has been completely installed and linked.
+/// The six definition arrays shared by `PendingDefinition` and
+/// `ModuleRecord`, detached from their owner so they can be released.
+const DefinitionArrays = struct {
+    requests: []RequestEntry,
+    imports: []ImportEntry,
+    exports: []ExportEntry,
+    indirect_exports: []IndirectExportEntry,
+    star_exports: []StarExportEntry,
+    import_attributes: []ImportAttributeEntry,
+
+    /// Move the arrays out of `owner`, leaving it empty.
+    fn take(owner: anytype) DefinitionArrays {
+        defer {
+            owner.requests = &.{};
+            owner.imports = &.{};
+            owner.exports = &.{};
+            owner.indirect_exports = &.{};
+            owner.star_exports = &.{};
+            owner.import_attributes = &.{};
+        }
+        return .{
+            .requests = owner.requests,
+            .imports = owner.imports,
+            .exports = owner.exports,
+            .indirect_exports = owner.indirect_exports,
+            .star_exports = owner.star_exports,
+            .import_attributes = owner.import_attributes,
+        };
+    }
+
+    fn free(self: DefinitionArrays, rt: *@import("../runtime.zig").JSRuntime) void {
+        for (self.exports) |*entry| {
+            if (entry.retained_cell) |cell| {
+                std.debug.assert(VarRef.fromValue(cell) != null);
+            }
+        }
+        if (self.requests.len != 0) rt.freeNative(RequestEntry, self.requests);
+        if (self.imports.len != 0) rt.freeNative(ImportEntry, self.imports);
+        if (self.exports.len != 0) rt.freeNative(ExportEntry, self.exports);
+        if (self.indirect_exports.len != 0) rt.freeNative(IndirectExportEntry, self.indirect_exports);
+        if (self.star_exports.len != 0) rt.freeNative(StarExportEntry, self.star_exports);
+        if (self.import_attributes.len != 0) rt.freeNative(ImportAttributeEntry, self.import_attributes);
+    }
+};
+
 pub const PendingDefinition = struct {
     runtime: *@import("../runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
@@ -183,35 +230,11 @@ pub const PendingDefinition = struct {
     /// Release an unconsumed definition. Every owner is detached first so value
     /// destruction may safely re-enter GC/registry tracing.
     pub fn deinit(self: *PendingDefinition) void {
-        const requests = self.requests;
-        const imports = self.imports;
-        const exports = self.exports;
-        const indirect_exports = self.indirect_exports;
-        const star_exports = self.star_exports;
-        const import_attributes = self.import_attributes;
-
-        self.requests = &.{};
-        self.imports = &.{};
-        self.exports = &.{};
-        self.indirect_exports = &.{};
-        self.star_exports = &.{};
-        self.import_attributes = &.{};
+        const arrays = DefinitionArrays.take(self);
         self.func_obj = value_mod.JSValue.undefinedValue();
         self.synthetic_kind = .none;
         self.has_top_level_await = false;
-
-        for (exports) |*entry| {
-            if (entry.retained_cell) |cell| {
-                std.debug.assert(VarRef.fromValue(cell) != null);
-            }
-        }
-
-        if (requests.len != 0) self.runtime.freeNative(RequestEntry, requests);
-        if (imports.len != 0) self.runtime.freeNative(ImportEntry, imports);
-        if (exports.len != 0) self.runtime.freeNative(ExportEntry, exports);
-        if (indirect_exports.len != 0) self.runtime.freeNative(IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) self.runtime.freeNative(StarExportEntry, star_exports);
-        if (import_attributes.len != 0) self.runtime.freeNative(ImportAttributeEntry, import_attributes);
+        arrays.free(self.runtime);
     }
 
     pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32 {
@@ -327,19 +350,19 @@ pub const ModuleRecord = struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.module);
 
     comptime {
-        // Runtime allocation helpers places the common GC metadata immediately before the
-        // record, so the embedded header must remain at payload offset zero.
+        // The GC finds the record through its embedded header, so the header
+        // must remain at payload offset zero.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        std.debug.assert(@sizeOf(@This()) == 240);
+        std.debug.assert(@sizeOf(@This()) == 288);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "registry_prev") == 128);
+        std.debug.assert(@offsetOf(@This(), "registry_prev") == 16);
         std.debug.assert(@offsetOf(@This(), "registry") == 32);
         std.debug.assert(@offsetOf(@This(), "runtime") == 40);
-        std.debug.assert(@offsetOf(@This(), "module_name") == 212);
-        std.debug.assert(@offsetOf(@This(), "requests") == 96);
-        std.debug.assert(@offsetOf(@This(), "func_obj") == 176);
-        std.debug.assert(@offsetOf(@This(), "module_ns") == 184);
-        std.debug.assert(@offsetOf(@This(), "status") == 224);
+        std.debug.assert(@offsetOf(@This(), "module_name") == 268);
+        std.debug.assert(@offsetOf(@This(), "requests") == 104);
+        std.debug.assert(@offsetOf(@This(), "func_obj") == 88);
+        std.debug.assert(@offsetOf(@This(), "module_ns") == 200);
+        std.debug.assert(@offsetOf(@This(), "status") == 276);
     }
 
     header: gc.Header align(16) = .{},
@@ -383,12 +406,24 @@ pub const ModuleRecord = struct {
     link_dfs_index: u32 = 0,
     link_dfs_ancestor_index: u32 = 0,
     link_stack_prev: ?*ModuleRecord = null,
-    /// Cached evaluation exception: a module whose evaluation threw stays
-    /// `.errored` and every later import rethrows this value instead of
-    /// re-running the body (mirrors qjs `JSModuleDef.eval_has_exception` /
-    /// `eval_exception`, rethrown by js_inner_module_evaluation
-    /// quickjs.c).
+    /// [[EvaluationError]]: a module whose evaluation failed stays `.errored`
+    /// and every later import rethrows this value instead of re-running the
+    /// body.
     eval_exception: ?value_mod.JSValue = null,
+    /// Evaluation state (§16.2.1.5.3). The DFS indices are transient, valid
+    /// while the record is on an InnerModuleEvaluation stack.
+    eval_dfs_index: u32 = 0,
+    eval_dfs_ancestor_index: u32 = 0,
+    /// [[CycleRoot]], set when the record's strongly connected component
+    /// leaves the evaluation stack. Records of one realm registry outlive
+    /// each other's references, so this and `async_parent_modules` are
+    /// borrowed.
+    cycle_root: ?*ModuleRecord = null,
+    async_evaluation_order: u64 = async_order_unset,
+    pending_async_dependencies: u32 = 0,
+    async_parent_modules: std.ArrayListUnmanaged(*ModuleRecord) = .empty,
+    /// [[TopLevelCapability]] exists: an Evaluate() started here.
+    has_top_level_capability: bool = false,
 
     fn prepare(self: *ModuleRecord, account: *@import("../runtime.zig").JSRuntime, atoms: *atom.AtomTable, name: atom.Atom) void {
         self.* = .{
@@ -444,23 +479,11 @@ pub const ModuleRecord = struct {
     /// Detach and release the definition during finalization. Loaded records are
     /// never reset in place for a new generation.
     fn clearForDestroy(self: *ModuleRecord) void {
-        const requests = self.requests;
-        const imports = self.imports;
-        const exports = self.exports;
-        const indirect_exports = self.indirect_exports;
-        const star_exports = self.star_exports;
-        const import_attributes = self.import_attributes;
-
         // Detach every owned payload before releases can re-enter tracing.
+        const arrays = DefinitionArrays.take(self);
         self.definition_installed = false;
         self.requests_resolved = false;
         self.status = .unlinked;
-        self.requests = &.{};
-        self.imports = &.{};
-        self.exports = &.{};
-        self.indirect_exports = &.{};
-        self.star_exports = &.{};
-        self.import_attributes = &.{};
         self.func_obj = value_mod.JSValue.undefinedValue();
         self.module_ns = value_mod.JSValue.undefinedValue();
         self.import_meta = null;
@@ -469,24 +492,16 @@ pub const ModuleRecord = struct {
         self.has_top_level_await = false;
         self.resetLinkTransientNoFail();
         self.eval_exception = null;
-
-        for (exports) |*entry| {
-            if (entry.retained_cell) |cell| {
-                std.debug.assert(VarRef.fromValue(cell) != null);
-            }
-        }
-        if (requests.len != 0) self.runtime.freeNative(RequestEntry, requests);
-        if (imports.len != 0) self.runtime.freeNative(ImportEntry, imports);
-        if (exports.len != 0) self.runtime.freeNative(ExportEntry, exports);
-        if (indirect_exports.len != 0) self.runtime.freeNative(IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) self.runtime.freeNative(StarExportEntry, star_exports);
-        if (import_attributes.len != 0) self.runtime.freeNative(ImportAttributeEntry, import_attributes);
+        self.cycle_root = null;
+        self.async_parent_modules.deinit(self.runtime.nativeAllocator());
+        self.async_parent_modules = .empty;
+        arrays.free(self.runtime);
     }
 
     /// `rt` is unused: the destroy-by-kind dispatch (`gc.zig`,
     /// `gc_trace_stw.zig`) calls every kind's destructor with the same
-    /// (runtime, header) shape, and a module frees only through its own
-    /// `Runtime allocation helpers`.
+    /// (runtime, header) shape, and a module frees through its own
+    /// `runtime` (`gc.destroyCell`).
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         _ = rt;
         const self: *ModuleRecord = @alignCast(@fieldParentPtr("header", header));
@@ -537,10 +552,6 @@ pub const ModuleRecord = struct {
 
     pub inline fn traceChildEdgesNoFail(self: *ModuleRecord, rt: anytype, visitor: anytype) void {
         self.traceChildEdgesFallible(rt, visitor) catch unreachable;
-    }
-
-    pub fn setStatus(self: *ModuleRecord, status: Status) void {
-        self.status = status;
     }
 
     /// Take ownership of `value` as the cached evaluation exception
@@ -671,7 +682,17 @@ pub const Registry = struct {
     gc_registry: *gc.Registry,
     head: ?*ModuleRecord = null,
     tail: ?*ModuleRecord = null,
-    count: usize = 0,
+    /// Name -> record, so `find` is not a list walk: module work looks records
+    /// up by name at nearly every step. Held on the heap so the registry
+    /// keeps its size inside the pinned RealmContext layout.
+    names: ?*Names = null,
+
+    const Names = struct {
+        map: std.AutoHashMapUnmanaged(atom.Atom, *ModuleRecord) = .empty,
+        /// Removals since the last rehash: std hash map removals leave
+        /// tombstones and never regrow.
+        removals: usize = 0,
+    };
 
     pub const Iterator = struct {
         cursor: ?*ModuleRecord,
@@ -716,7 +737,16 @@ pub const Registry = struct {
             self.unlink(record);
         }
         std.debug.assert(self.tail == null);
-        std.debug.assert(self.count == 0);
+        if (self.names) |names| {
+            std.debug.assert(names.map.count() == 0);
+            names.map.deinit(self.runtime.nativeAllocator());
+            self.runtime.nativeAllocator().destroy(names);
+            self.names = null;
+        }
+    }
+
+    pub fn count(self: *const Registry) usize {
+        return if (self.names) |names| names.map.count() else 0;
     }
 
     pub fn iterator(self: *const Registry) Iterator {
@@ -745,7 +775,7 @@ pub const Registry = struct {
             self.head = record;
         }
         self.tail = record;
-        self.count += 1;
+        self.names.?.map.putAssumeCapacityNoClobber(record.module_name, record);
     }
 
     /// Remove list membership only. The caller decides whether the membership
@@ -774,8 +804,14 @@ pub const Registry = struct {
         record.registry_prev = null;
         record.registry_next = null;
         record.registry = null;
-        std.debug.assert(self.count != 0);
-        self.count -= 1;
+        const names = self.names.?;
+        std.debug.assert(names.map.get(record.module_name) == record);
+        _ = names.map.remove(record.module_name);
+        names.removals += 1;
+        if (names.removals * 4 >= names.map.capacity()) {
+            names.removals = 0;
+            names.map.rehash(std.hash_map.AutoContext(atom.Atom){});
+        }
     }
 
     /// Return the already-published record for `name`, or atomically install a
@@ -796,6 +832,14 @@ pub const Registry = struct {
             return .{ .existing = record };
         }
 
+        const allocator = self.runtime.nativeAllocator();
+        const names = self.names orelse blk: {
+            const created = try allocator.create(Names);
+            created.* = .{};
+            self.names = created;
+            break :blk created;
+        };
+        try names.map.ensureUnusedCapacity(allocator, 1);
         const record = try self.runtime.gc.createCell(ModuleRecord);
         record.prepare(self.runtime, self.atoms, name);
         record.replaceDefinitionNoFail(pending);
@@ -809,11 +853,8 @@ pub const Registry = struct {
     }
 
     pub fn find(self: *const Registry, name: atom.Atom) ?*ModuleRecord {
-        var iter = self.iterator();
-        while (iter.next()) |record| {
-            if (record.module_name == name) return record;
-        }
-        return null;
+        const names = self.names orelse return null;
+        return names.map.get(name);
     }
 
     /// Pure indexed export resolution. Host loading first fills every borrowed
@@ -825,80 +866,96 @@ pub const Registry = struct {
         export_name: atom.Atom,
     ) !ResolvedExport {
         if (record.registry != self) return error.ForeignModuleRecord;
-        var visiting = std.ArrayList(ResolutionVisit).empty;
-        defer visiting.deinit(self.runtime.nativeAllocator());
-        return self.resolveExportFromRecord(record, export_name, &visiting);
-    }
+        const allocator = self.runtime.nativeAllocator();
+        // `resolve_set` keeps every pair the whole call visited, as the spec's
+        // resolveSet does, so a diamond of `export *` edges is explored once
+        // rather than once per path.
+        var resolve_set: std.AutoHashMapUnmanaged(ResolutionVisit, void) = .empty;
+        defer resolve_set.deinit(allocator);
+        // Re-export chains are user-controlled in depth, so the recursion of
+        // ResolveExport (§16.2.1.7.2.2) runs on explicit stacks: a single
+        // named re-export continues in place, and each `export *` loop is a
+        // StarScan whose children report back through `result`.
+        var stars: std.ArrayList(StarScan) = .empty;
+        defer stars.deinit(allocator);
 
-    fn resolveExportFromRecord(
-        self: *Registry,
-        record: *ModuleRecord,
-        export_name: atom.Atom,
-        visiting: *std.ArrayList(ResolutionVisit),
-    ) !ResolvedExport {
-        std.debug.assert(record.registry == self);
+        var current = record;
+        var name = export_name;
+        next: while (true) {
+            const terminal: ?ResolvedExport = resolve: {
+                if ((try resolve_set.getOrPut(allocator, .{ .module = current, .export_name = name })).found_existing)
+                    break :resolve .not_found;
 
-        for (visiting.items) |entry| {
-            if (entry.module == record and entry.export_name == export_name) return .not_found;
-        }
-        try visiting.append(self.runtime.nativeAllocator(), .{ .module = record, .export_name = export_name });
-        defer _ = visiting.pop().?;
-
-        for (record.exports, 0..) |entry, index| {
-            if (entry.export_name == export_name) {
-                for (record.imports) |import_entry| {
-                    if (import_entry.local_name != entry.local_name) continue;
-                    const dependency = try requestDependency(record, import_entry.request_index);
-                    if (!import_entry.is_namespace) {
-                        return self.resolveExportFromRecord(
-                            dependency,
-                            import_entry.import_name,
-                            visiting,
-                        );
+                for (current.exports, 0..) |entry, index| {
+                    if (entry.export_name != name) continue;
+                    for (current.imports) |import_entry| {
+                        if (import_entry.local_name != entry.local_name) continue;
+                        if (import_entry.is_namespace) break;
+                        current = try requestDependency(current, import_entry.request_index);
+                        name = import_entry.import_name;
+                        continue :next;
                     }
-                    break;
+                    break :resolve .{ .resolved = .{
+                        .module = current,
+                        .entry = .{ .local_export = @intCast(index) },
+                    } };
                 }
-                return .{ .resolved = .{
-                    .module = record,
-                    .entry = .{ .local_export = @intCast(index) },
-                } };
-            }
-        }
 
-        for (record.indirect_exports, 0..) |entry, index| {
-            if (entry.export_name != export_name) continue;
-            if (entry.is_namespace) {
-                _ = try requestDependency(record, entry.request_index);
-                return .{ .resolved = .{
-                    .module = record,
-                    .entry = .{ .namespace_export = @intCast(index) },
-                } };
-            }
-            const dependency = try requestDependency(record, entry.request_index);
-            return self.resolveExportFromRecord(dependency, entry.import_name, visiting);
-        }
+                for (current.indirect_exports, 0..) |entry, index| {
+                    if (entry.export_name != name) continue;
+                    const dependency = try requestDependency(current, entry.request_index);
+                    if (entry.is_namespace) break :resolve .{ .resolved = .{
+                        .module = current,
+                        .entry = .{ .namespace_export = @intCast(index) },
+                    } };
+                    current = dependency;
+                    name = entry.import_name;
+                    continue :next;
+                }
 
-        if (export_name == atom_default) return .not_found;
+                if (name == atom_default or current.star_exports.len == 0) break :resolve .not_found;
+                try stars.append(allocator, .{ .module = current, .export_name = name });
+                break :resolve null;
+            };
+            var result = terminal orelse {
+                const scan = &stars.items[stars.items.len - 1];
+                current = try requestDependency(scan.module, scan.module.star_exports[0].request_index);
+                scan.next_index = 1;
+                continue :next;
+            };
 
-        var found: ?ResolvedBinding = null;
-        for (record.star_exports) |entry| {
-            const dependency = try requestDependency(record, entry.request_index);
-            const dep_resolution = try self.resolveExportFromRecord(dependency, export_name, visiting);
-            switch (dep_resolution) {
-                .not_found => {},
-                .ambiguous => return .ambiguous,
-                .resolved => |binding| {
-                    if (found) |existing| {
+            while (stars.items.len != 0) {
+                const scan = &stars.items[stars.items.len - 1];
+                switch (result) {
+                    .not_found => {},
+                    // Every enclosing level would return it unchanged.
+                    .ambiguous => return .ambiguous,
+                    .resolved => |binding| if (scan.found) |existing| {
                         if (!existing.sameIdentity(binding)) return .ambiguous;
                     } else {
-                        found = binding;
-                    }
-                },
+                        scan.found = binding;
+                    },
+                }
+                if (scan.next_index < scan.module.star_exports.len) {
+                    current = try requestDependency(scan.module, scan.module.star_exports[scan.next_index].request_index);
+                    name = scan.export_name;
+                    scan.next_index += 1;
+                    continue :next;
+                }
+                result = if (scan.found) |binding| .{ .resolved = binding } else .not_found;
+                _ = stars.pop();
             }
+            return result;
         }
-        if (found) |binding| return .{ .resolved = binding };
-        return .not_found;
     }
+};
+
+/// One pending `export *` loop of ResolveExport.
+const StarScan = struct {
+    module: *ModuleRecord,
+    export_name: atom.Atom,
+    next_index: usize = 0,
+    found: ?ResolvedBinding = null,
 };
 
 const ResolutionVisit = struct {

@@ -12,18 +12,21 @@
 //! | `harness/fixture.zig` | hand-written bytecode and parse-then-run |
 //! | `harness/test_engine.zig` | one-off TestEngine, host probes, scratch dirs |
 //! | `harness/shared.zig` | process-level shared engine and leak gate |
+//! | `harness/memory_modules.zig` | in-memory module source loader |
 
 pub const gc = @import("harness/gc.zig");
 pub const expect = @import("harness/expect.zig");
 pub const fixture = @import("harness/fixture.zig");
 pub const test_engine = @import("harness/test_engine.zig");
 pub const shared = @import("harness/shared.zig");
+pub const memory_modules = @import("harness/memory_modules.zig");
+pub const MemoryModules = memory_modules.MemoryModules;
+pub const MemoryModule = memory_modules.Module;
 
 pub const reclaimNow = gc.reclaimNow;
 pub const objectFromValue = gc.objectFromValue;
 pub const appendWeakCollectionEntry = gc.appendWeakCollectionEntry;
 pub const appendWeakCollectionEntryForValue = gc.appendWeakCollectionEntryForValue;
-pub const finishGcCycles = gc.finishGcCycles;
 
 pub const expectActiveSetStrings = expect.expectActiveSetStrings;
 pub const expectStringValueBytes = expect.expectStringValueBytes;
@@ -44,6 +47,7 @@ pub const LegacyProbeState = test_engine.LegacyProbeState;
 pub const scratchDirForProcess = test_engine.scratchDirForProcess;
 
 pub const expectPrints = shared.expectPrints;
+pub const expectPrintsTs = shared.expectPrintsTs;
 pub const sharedTestEngine = shared.sharedTestEngine;
 pub const deinitSharedTestEngine = shared.deinitSharedTestEngine;
 pub const endSharedTest = shared.endSharedTest;

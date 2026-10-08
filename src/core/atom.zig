@@ -1044,6 +1044,9 @@ pub const DynamicAtom = struct {
     registry_managed_symbol: bool = false,
     weakref_count: usize = 0,
     no_symbol_description: bool = false,
+    /// This slot is in `AtomTable.rooted_symbol_slots`. Belongs to the slot,
+    /// not the tenant, so a recycled slot is never listed twice.
+    rooted_listed: bool = false,
 
     fn name(self: *const DynamicAtom) []const u8 {
         if (self.symbolBody()) |symbol| return symbol.descriptionBytes() orelse "";
@@ -1070,7 +1073,7 @@ pub const DynamicAtom = struct {
     // name it by id (shape keys, bytecode operands) report a `visitAtom` edge
     // that shades the body, holders that hold it as a JSValue mark the body
     // directly, and `sweepDead` retires the entry when neither happened. The
-    // sweep leaves a weak shell (`occupied == false`, `str == null`,
+    // sweep leaves a weak shell (`occupied == false`, `body == null`,
     // `weakref_count != 0`) when a WeakRef still has to observe the death;
     // `onSymbolBodyDead` is the same verdict reached through the body's own
     // sweep, and `releaseSymbolWeakRef` retires the shell when the last
@@ -1081,6 +1084,12 @@ pub const DynamicAtom = struct {
 
     pub fn slotOccupied(self: DynamicAtom) bool {
         return self.occupied or self.weakref_count != 0;
+    }
+
+    /// A registered or host-pinned value symbol: its body is a root.
+    fn rootsSymbolBody(self: *const DynamicAtom) bool {
+        return self.occupied and isValueSymbolKind(self.kind) and
+            (self.host_pins != 0 or self.registry_managed_symbol);
     }
 };
 
@@ -1161,6 +1170,45 @@ const predefined_hash = blk: {
 /// same rule ("next power of two that holds the predefined set") gives 1024.
 const atom_hash_initial_size: u32 = 1024;
 
+/// `bytes` with every high-surrogate/low-surrogate pair of 3-byte WTF-8
+/// sequences replaced by the 4-byte UTF-8 of the code point they encode, or
+/// null when there is no such pair.
+fn joinSplitSurrogatePairs(allocator: std.mem.Allocator, bytes: []const u8) !?[]u8 {
+    const isPairAt = struct {
+        fn f(b: []const u8, i: usize) bool {
+            return i + 6 <= b.len and b[i] == 0xED and b[i + 1] & 0xF0 == 0xA0 and
+                b[i + 3] == 0xED and b[i + 4] & 0xF0 == 0xB0;
+        }
+    }.f;
+    var first: ?usize = null;
+    for (0..bytes.len) |i| {
+        if (isPairAt(bytes, i)) {
+            first = i;
+            break;
+        }
+    }
+    const start = first orelse return null;
+    var out = try std.ArrayList(u8).initCapacity(allocator, bytes.len);
+    errdefer out.deinit(allocator);
+    out.appendSliceAssumeCapacity(bytes[0..start]);
+    var i = start;
+    while (i < bytes.len) {
+        if (isPairAt(bytes, i)) {
+            const high: u21 = (@as(u21, bytes[i + 1] & 0x0F) << 6) | (bytes[i + 2] & 0x3F);
+            const low: u21 = (@as(u21, bytes[i + 4] & 0x0F) << 6) | (bytes[i + 5] & 0x3F);
+            const cp: u21 = 0x10000 + (high << 10) + low;
+            var encoded: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &encoded) catch unreachable; // 0x10000..0x10FFFF
+            out.appendSliceAssumeCapacity(encoded[0..len]);
+            i += 6;
+        } else {
+            out.appendAssumeCapacity(bytes[i]);
+            i += 1;
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 pub const AtomTable = struct {
     /// Extra table state carried only by `-Dzjs_ownership_audit` builds.
     ///
@@ -1222,6 +1270,10 @@ pub const AtomTable = struct {
     /// that are actually chained — qjs also counts its unchained unique
     /// symbols, but only the chained population drives the resize rule.
     atom_hash_count: u32 = 0,
+    /// Atoms interned since the last major sweep, and how many entries that
+    /// sweep kept (`noteGrowth`).
+    interned_since_sweep: u32 = 0,
+    live_after_sweep: u32 = 0,
     /// qjs `JSRuntime.atom_count_resize` = 2 * bucket count.
     atom_count_resize: u32 = 0,
     /// Chain links for the predefined atoms. QuickJS keeps predefined atoms in
@@ -1231,7 +1283,7 @@ pub const AtomTable = struct {
     predefined_hash_next: [predefined_count]Atom = @splat(null_atom),
     /// Head of the dead-slot free list threaded through
     /// `DynamicAtom.next_free`. Slots (and therefore ids) are recycled
-    /// only after their ref count reached zero, so no live holder can be
+    /// only after a sweep proved them unreachable, so no live holder can be
     /// retargeted. Predefined atom ids live below `first_dynamic_atom`
     /// and never enter `entries`, so they are never recycled.
     free_slot_head: EntryIndex = no_free_slot,
@@ -1293,6 +1345,12 @@ pub const AtomTable = struct {
     /// not a major root), and the id keeps the list from ever holding a
     /// dangling pointer -- a retired or unbound entry simply reports nothing.
     young_symbol_atoms: std.ArrayListUnmanaged(Atom) = .empty,
+    /// Slots whose value symbol is, or was, registered or host-pinned: the
+    /// only dynamic entries `traceRoots` roots. Entries that no longer
+    /// qualify are dropped as the trace walks the list. A failed append sets
+    /// `rooted_symbol_overflow`, and `traceRoots` then scans every entry.
+    rooted_symbol_slots: std.ArrayListUnmanaged(EntryIndex) = .empty,
+    rooted_symbol_overflow: bool = false,
 
     /// Predefined bodies and explicitly pinned/registered Symbol identities
     /// are roots. Ordinary dynamic entries are only an index; their string
@@ -1304,14 +1362,41 @@ pub const AtomTable = struct {
             defer slot.* = value.cycleMarkHeader();
             try visitor.value(&value);
         }
-        for (self.entries) |*entry| {
-            if (!entry.occupied or !isValueSymbolKind(entry.kind)) continue;
-            if (entry.host_pins == 0 and !entry.registry_managed_symbol) continue;
-            const body = entry.body orelse continue;
-            var value = JSValue.symbol(body);
-            defer entry.body = value.cycleMarkHeader();
-            try visitor.value(&value);
+        if (self.rooted_symbol_overflow) {
+            for (self.entries) |*entry| {
+                if (entry.rootsSymbolBody()) try traceSymbolBody(entry, visitor);
+            }
+            return;
         }
+        var i: usize = 0;
+        while (i < self.rooted_symbol_slots.items.len) {
+            const entry = &self.entries[self.rooted_symbol_slots.items[i]];
+            if (!entry.rootsSymbolBody()) {
+                entry.rooted_listed = false;
+                _ = self.rooted_symbol_slots.swapRemove(i);
+                continue;
+            }
+            try traceSymbolBody(entry, visitor);
+            i += 1;
+        }
+    }
+
+    fn traceSymbolBody(entry: *DynamicAtom, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        const body = entry.body orelse return;
+        var value = JSValue.symbol(body);
+        defer entry.body = value.cycleMarkHeader();
+        try visitor.value(&value);
+    }
+
+    /// List slot `idx` in `rooted_symbol_slots` (see there).
+    fn noteRootedSymbol(self: *AtomTable, idx: usize) void {
+        const entry = &self.entries[idx];
+        if (entry.rooted_listed) return;
+        self.rooted_symbol_slots.append(self.native_allocator, @intCast(idx)) catch {
+            self.rooted_symbol_overflow = true;
+            return;
+        };
+        entry.rooted_listed = true;
     }
 
     /// The minor's extra root set (see `young_symbol_atoms`). Entries that
@@ -1377,6 +1462,7 @@ pub const AtomTable = struct {
 
     pub fn deinit(self: *AtomTable) void {
         self.young_symbol_atoms.deinit(self.native_allocator);
+        self.rooted_symbol_slots.deinit(self.native_allocator);
         const entries = self.entries;
         const backing: []DynamicAtom = if (self.entries_capacity != 0) self.entries.ptr[0..self.entries_capacity] else self.entries[0..0];
         self.entries = &.{};
@@ -1421,8 +1507,8 @@ pub const AtomTable = struct {
 
     /// Drop any dynamic value-symbol bodies that remain after the GC registry
     /// has destroyed objects, bytecode, VarRefs, and (last) shapes. At this
-    /// point no GC-managed owner can still free a property-key atom, so forcing
-    /// the residual registry/manual references to zero cannot invalidate a
+    /// point no GC-managed owner can still reach a property-key atom, so
+    /// dropping the remaining registered and pinned bodies cannot invalidate a
     /// later shape teardown.
     ///
     /// TGC S2 (tracer-owned strings): `gc.deinit` has already freed every
@@ -1534,21 +1620,25 @@ pub const AtomTable = struct {
         return null_atom;
     }
 
-    /// qjs `__JS_NewAtom` insert: splice the atom at the
-    /// head of its bucket, then double the table once the chained population
-    /// reaches `atom_count_resize`. A failed resize is ignored exactly as qjs
-    /// ignores `JS_ResizeAtomHash`'s return value — the table stays correct,
-    /// only its chains get longer.
+    /// Splice the atom at the head of its bucket. Never allocates: the
+    /// table grew in `growHashForInsert` before the entry existed.
     fn chainInsert(self: *AtomTable, id: Atom, h: u32) void {
         const bucket = &self.atom_hash[h & (self.atom_hash.len - 1)];
         self.hashNextPtr(id).* = bucket.*;
         bucket.* = id;
         self.atom_hash_count += 1;
-        if (self.atom_hash_count >= self.atom_count_resize) {
-            const next_size = self.atom_hash.len * 2;
-            if (next_size <= std.math.maxInt(u32)) {
-                self.resizeAtomHash(@intCast(next_size)) catch {};
-            }
+    }
+
+    /// Double the table once the chained population would reach
+    /// `atom_count_resize`. It runs before the new entry exists because the
+    /// allocation may collect, and an entry nothing holds yet would be swept.
+    /// A failed resize is ignored: the table stays correct, only its chains
+    /// get longer.
+    fn growHashForInsert(self: *AtomTable) void {
+        if (self.atom_hash_count + 1 < self.atom_count_resize) return;
+        const next_size = self.atom_hash.len * 2;
+        if (next_size <= std.math.maxInt(u32)) {
+            self.resizeAtomHash(@intCast(next_size)) catch {};
         }
     }
 
@@ -1585,6 +1675,14 @@ pub const AtomTable = struct {
     }
 
     fn internStringInner(self: *AtomTable, bytes: []const u8) !Atom {
+        // Equal strings must intern to one atom: a surrogate pair spelled as
+        // two WTF-8 halves is re-encoded as the one code point it names.
+        if (std.mem.indexOfScalar(u8, bytes, 0xED) != null) {
+            if (try joinSplitSurrogatePairs(self.native_allocator, bytes)) |joined| {
+                defer self.native_allocator.free(joined);
+                return self.internStringInner(joined);
+            }
+        }
         // Match JS_NewAtomLen's digit gate: integer atoms do not need a
         // string hash at all (quickjs.c `is_digit(*str)`).
         if (parseArrayIndex(bytes)) |n| return Atom.taggedInt(n);
@@ -1650,11 +1748,13 @@ pub const AtomTable = struct {
             const entry = self.findDynamic(found).?;
             std.debug.assert(entry.occupied and entry.kind == .global_symbol);
             entry.registry_managed_symbol = true;
+            self.noteRootedSymbol(dynamicEntryIndex(found).?);
             return found;
         }
         const id = try self.internDynamic(description, .global_symbol, true, false, hash);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
+        self.noteRootedSymbol(dynamicEntryIndex(id).?);
         return id;
     }
 
@@ -1750,18 +1850,14 @@ pub const AtomTable = struct {
         return entry.body;
     }
 
-    noinline fn shadeAtomBarrierSlow(self: *AtomTable, rt: *runtime_mod.JSRuntime, id: Atom) void {
-        const epoch = rt.gc.block_heap.mark_epoch;
-        if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body);
-    }
-
     /// §2.4 companion for `gc_trace_stw.computeFullReachable`.
     ///
     /// Atom liveness is a stamp compared against `Heap.mark_epoch`, and the
     /// verifier's probe advances that epoch to get a mark space of its own.
     /// Every stamp the real cycle laid down therefore reads stale by the time
     /// `sweepAtomTable` runs, and the sweep retires the whole live table --
-    /// with `ZJS_GC_VERIFY_MAJOR_ALL=1` pdfjs loses shape keys mid-lookup and
+    /// with the verifier on every major (the since-retired
+    /// `ZJS_GC_VERIFY_MAJOR_ALL=1`) pdfjs loses shape keys mid-lookup and
     /// dies in `getLineNumber`. The header half of the probe is undone by
     /// re-marking the saved set; this is the table half, and it makes the same
     /// promise: leave the epoch-keyed liveness exactly as it was found.
@@ -1807,6 +1903,7 @@ pub const AtomTable = struct {
         if (id.isConst() or id.isTaggedInt()) return;
         const entry = self.findDynamic(id) orelse return;
         entry.host_pins +|= 1;
+        if (entry.host_pins == 1 and isValueSymbolKind(entry.kind)) self.noteRootedSymbol(dynamicEntryIndex(id).?);
     }
 
     pub fn unpinForHost(self: *AtomTable, id: Atom) void {
@@ -1832,6 +1929,11 @@ pub const AtomTable = struct {
         // everything this sweep retires goes into the now-empty quarantine.
         // Comptime-off, so the default build enters the loop as before.
         if (comptime ownership_audit_enabled) self.releaseQuarantinedSlots();
+        var survivors: u32 = 0;
+        defer {
+            self.live_after_sweep = survivors;
+            self.interned_since_sweep = 0;
+        }
         var idx: EntryIndex = 0;
         while (idx < self.entries.len) : (idx += 1) {
             const entry = &self.entries[idx];
@@ -1847,6 +1949,7 @@ pub const AtomTable = struct {
                 entry.host_pins != 0 or
                 body_marked;
             if (live) {
+                survivors += 1;
                 // Doomed cache on a surviving entry. Marking is over and
                 // condemnation has run, so an unmarked cell here is condemned
                 // by definition; a string atom's `str` is a droppable cache, so
@@ -1873,16 +1976,19 @@ pub const AtomTable = struct {
 
     /// TGC S3 §2.3: a store of `atom` into a GC-VISIBLE HOLDER (a shape's
     /// property key, a module's metadata, a FunctionBytecode's names, a
-    /// backtrace frame, the class table). All that is left of the old
-    /// `dupForHolder` is the Dijkstra insertion barrier, which is what keeps
-    /// an id migrating between holders from hiding behind an already-black
-    /// one. The id is handed back so a holder field can be initialized in
+    /// backtrace frame, the class table): the Dijkstra insertion barrier,
+    /// which keeps an id migrating between holders from hiding behind an
+    /// already-black one. The id is handed back so a holder field can be initialized in
     /// place: `.field = atoms.noteHolderStore(id)`.
     pub fn noteHolderStore(self: *AtomTable, atom: Atom) Atom {
         self.noteCompileScope(atom);
         return atom;
     }
 
+    /// The spelling, borrowed from the table (or a symbol's description).
+    /// A major sweep frees it once nothing holds `atom`, so copy it before
+    /// any GC allocation unless the id is rooted, pinned, or held by a live
+    /// owner.
     pub fn name(self: *const AtomTable, atom: Atom) ?[]const u8 {
         if (atom == null_atom) return null;
         if (atom.isTaggedInt()) return null;
@@ -2044,14 +2150,31 @@ pub const AtomTable = struct {
             return cached.value();
         }
         if (entry.kind != .string) {
-            const created = try string.String.createUtf8(rt, text);
+            const created = try createUtf8Lossy(rt, text);
             return created.value();
         }
         if (entry.body) |cached| return JSValue.string(cached);
-        const created = try string.String.createUtf8(rt, text);
+        const created = string.String.createUtf8(rt, text) catch |err| switch (err) {
+            // A host-supplied name (a file path) need not be UTF-8. Its
+            // replacement-character spelling is a different string, so it is
+            // not bound as this atom's body.
+            error.InvalidUtf8 => return (try createUtf8Lossy(rt, text)).value(),
+            else => |other| return other,
+        };
         entry.body = created.header();
         created.bindAtomId(rt, atom_id);
         return created.value();
+    }
+
+    fn createUtf8Lossy(rt: *runtime_mod.JSRuntime, text: []const u8) !*string.String {
+        return string.String.createUtf8(rt, text) catch |err| switch (err) {
+            error.InvalidUtf8 => {
+                const replaced = try std.fmt.allocPrint(rt.nativeAllocator(), "{f}", .{std.unicode.fmtUtf8(text)});
+                defer rt.nativeAllocator().free(replaced);
+                return string.String.createUtf8(rt, replaced);
+            },
+            else => |other| return other,
+        };
     }
 
     /// Borrowed lookup of the lazily materialized string for a string-kind
@@ -2069,9 +2192,9 @@ pub const AtomTable = struct {
     }
 
     /// Bind `s` as the materialized string for `atom_id`, if the slot is
-    /// free and `s` is not already bound elsewhere. The table takes one
-    /// string reference; `s.atom_id` becomes a weak back-pointer (no atom
-    /// reference) cleared when the atom dies. First binding wins; a
+    /// free and `s` is not already bound elsewhere. The cache is weak: the
+    /// sweep unbinds a body that did not survive, and `s.atom_id` is a
+    /// back-pointer cleared when the atom dies. First binding wins; a
     /// content-equal string interned later simply stays unbound. No-op for
     /// non-string atoms, so a symbol's description never converts back
     /// into the symbol atom.
@@ -2184,11 +2307,6 @@ pub const AtomTable = struct {
     /// description), which either resurrects it or reads a recycled cell one
     /// step later. The mark is the only authority that is correct in both
     /// windows, so consult it exactly in the window where the binding is not.
-    ///
-    /// This mirrors what the object side does with `headerIsHusk` in
-    /// `liveObjectFromWeakIdentity`, one step earlier: the husk bit only
-    /// appears once teardown has actually stripped the object, whereas the
-    /// mark is already false for the whole condemned set.
     fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *Symbol) bool {
         if (rt.gc.hot.phase != .tracer_destroy) return true;
         return rt.gc.headerMarked(body.header());
@@ -2262,12 +2380,34 @@ pub const AtomTable = struct {
     fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
         const id = try self.internDynamicInner(bytes, atom_kind, index_entry, no_symbol_description, lookup_hash);
         self.noteCompileScope(id);
+        self.noteGrowth();
         return id;
+    }
+
+    /// Minimum growth, in atoms, before the table asks for a sweep.
+    pub const sweep_growth_floor: u32 = 1 << 16;
+
+    /// Dynamic atoms live in native memory the heap budget does not see, and
+    /// only a major sweeps them. Ask for one once the table has grown by as
+    /// many atoms as the last sweep kept (at least `sweep_growth_floor`), so
+    /// churn through short-lived keys cannot grow the table without bound.
+    fn noteGrowth(self: *AtomTable) void {
+        self.interned_since_sweep +|= 1;
+        if (self.interned_since_sweep < @max(sweep_growth_floor, self.live_after_sweep)) return;
+        const registry = self.gc_registry orelse return;
+        // Any other request already promises a major. A threshold request
+        // does not: it is level-triggered and dropped once the heap is back
+        // under the bar, so this one replaces it.
+        if (registry.scheduler.pendingMajorRequest()) |pending| {
+            if (pending.reason != .allocation_threshold) return;
+        }
+        registry.requestGC(.atom_growth, .soon);
     }
 
     fn internDynamicInner(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
         std.debug.assert(!index_entry or atom_kind == .string or atom_kind == .global_symbol);
         std.debug.assert(!index_entry or self.atom_hash.len != 0);
+        if (index_entry) self.growHashForInsert();
 
         const owned: []u8 = if (bytes.len == 0) &.{} else try self.storage_allocator.alloc(u8, bytes.len);
         errdefer if (owned.len != 0) self.storage_allocator.free(owned);
@@ -2539,10 +2679,8 @@ pub const CompileAtomScope = struct {
     pub fn activate(self: *CompileAtomScope) !void {
         std.debug.assert(!self.active);
         if (self.rt) |rt| {
-            if (comptime runtime_mod.value_root_frames_enabled) {
-                try rt.registerRootProvider(self.provider());
-                self.registered = true;
-            }
+            try rt.registerRootProvider(self.provider());
+            self.registered = true;
         }
         self.prev = self.table.compile_scope;
         self.table.compile_scope = self;
@@ -2655,7 +2793,9 @@ pub const max_array_index: u32 = 0xffff_fffe;
 /// Matches `array.arrayIndexFromName`, used by `atomIsArrayIndex` for the high
 /// string-atom index window `(max_int_atom, max_array_index]` that stays a
 /// dynamic string atom (never tagged at intern time).
-fn parseHighArrayIndex(bytes: []const u8) ?u32 {
+/// The canonical array index (`0`..`max_array_index`, no leading zeros) a
+/// decimal property name spells, if any.
+pub fn parseHighArrayIndex(bytes: []const u8) ?u32 {
     if (bytes.len == 0) return null;
     if (bytes.len > 1 and bytes[0] == '0') return null;
     var n: u64 = 0;
@@ -2667,34 +2807,62 @@ fn parseHighArrayIndex(bytes: []const u8) ?u32 {
     return @intCast(n);
 }
 
-// Atom-list helpers shared by the VM operation clusters (moved from the
-// dissolved exec/vm_utils.zig).
+/// Builds an owned `[]Atom` in amortized O(1) appends. `items` is the
+/// filled prefix of `buffer`; root it with `rootAtomList(&builder.items)`
+/// while user code can run. `toOwnedSlice` returns an exact-length list,
+/// the shape `freeAtomList` / `Object.freeKeys` expect.
+pub const AtomListBuilder = struct {
+    buffer: []Atom = &.{},
+    items: []Atom = &.{},
 
-pub fn atomListContains(list: []const Atom, needle: Atom) bool {
-    for (list) |atom_id| {
-        if (atom_id == needle) return true;
+    pub fn initCapacity(rt: *JSRuntime, capacity: usize) !AtomListBuilder {
+        var builder: AtomListBuilder = .{};
+        try builder.ensureTotalCapacity(rt, capacity);
+        return builder;
     }
-    return false;
-}
 
-pub fn appendAtom(rt: *JSRuntime, list: *[]Atom, atom_id: Atom) !void {
-    const next = try rt.allocNative(Atom, list.len + 1);
-    errdefer rt.freeNative(Atom, next);
-    @memcpy(next[0..list.len], list.*);
-    next[list.len] = atom_id;
-    const old = list.*;
-    list.* = next;
-    if (old.len != 0) rt.freeNative(Atom, old);
-}
+    pub fn deinit(self: *AtomListBuilder, rt: *JSRuntime) void {
+        freeAtomList(rt, self.buffer);
+        self.* = .{};
+    }
+
+    pub fn ensureTotalCapacity(self: *AtomListBuilder, rt: *JSRuntime, capacity: usize) !void {
+        if (capacity <= self.buffer.len) return;
+        const next = try rt.allocNative(Atom, capacity);
+        @memcpy(next[0..self.items.len], self.items);
+        const old = self.buffer;
+        self.buffer = next;
+        self.items = next[0..self.items.len];
+        freeAtomList(rt, old);
+    }
+
+    pub fn append(self: *AtomListBuilder, rt: *JSRuntime, atom_id: Atom) !void {
+        if (self.items.len == self.buffer.len) {
+            try self.ensureTotalCapacity(rt, @max(8, self.buffer.len * 2));
+        }
+        self.buffer[self.items.len] = atom_id;
+        self.items = self.buffer[0 .. self.items.len + 1];
+    }
+
+    /// Transfers ownership of the filled atoms; the builder is empty after.
+    pub fn toOwnedSlice(self: *AtomListBuilder, rt: *JSRuntime) ![]Atom {
+        if (self.items.len != self.buffer.len) {
+            const exact: []Atom = if (self.items.len == 0) &.{} else try rt.allocNative(Atom, self.items.len);
+            @memcpy(exact, self.items);
+            freeAtomList(rt, self.buffer);
+            self.* = .{};
+            return exact;
+        }
+        const owned = self.buffer;
+        self.* = .{};
+        return owned;
+    }
+};
 
 pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
     if (list.len != 0) rt.freeNative(Atom, list);
 }
 
-/// Alias for the call sites that still name the "owned" form. Atoms carry no
-/// per-reference count under the tracing collector, so appending an owned atom
-/// and appending a borrowed one were already the same byte-for-byte routine.
-pub const appendOwnedAtom = appendAtom;
 test "atom replace handles self-assignment without releasing dynamic atom" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -2886,10 +3054,10 @@ test "atom table retains its cached string until the atom dies" {
     defer rt.destroy();
 
     const predefined = try rt.atoms.toStringValueForPush(rt, ids.name);
-    const predefined_allocations = rt.diagnostics.allocations.allocation_count;
+    const predefined_allocations = rt.allocation_diagnostics.allocation_count;
     const predefined_again = try rt.atoms.toStringValueForPush(rt, ids.name);
     try std.testing.expect(predefined_again.asStringBodyRaw() == predefined.asStringBodyRaw());
-    try std.testing.expectEqual(predefined_allocations, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(predefined_allocations, rt.allocation_diagnostics.allocation_count);
 
     var atom_id = try rt.internAtom("ownedAtomName");
     var atom_roots = @import("../runtime.zig").rootAtoms(.{&atom_id});
@@ -2901,10 +3069,10 @@ test "atom table retains its cached string until the atom dies" {
     try std.testing.expect(again == atom_string);
     // OP_push_atom_value's QJS-like direct entry path returns the same cached
     // body and performs no allocation after the first materialization.
-    const allocations = rt.diagnostics.allocations.allocation_count;
+    const allocations = rt.allocation_diagnostics.allocation_count;
     const pushed = try rt.atoms.toStringValueForPush(rt, atom_id);
     try std.testing.expect(pushed.asStringBodyRaw() == atom_string);
-    try std.testing.expectEqual(allocations, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(allocations, rt.allocation_diagnostics.allocation_count);
     // Releasing the string does not release the atom: `atom_id` is a weak
     // back-pointer, and the table keeps its own string reference.
     try std.testing.expect(rt.atoms.name(atom_id) != null);
@@ -2914,4 +3082,15 @@ test "atom table retains its cached string until the atom dies" {
     _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(atom_id) == null);
     atom_roots.activate(rt);
+}
+
+test "interning a surrogate pair spelled as WTF-8 halves yields the canonical atom" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const canonical = try rt.internAtom("x\u{1D49C}y");
+    const halves = try rt.internAtom("x\xED\xA0\xB5\xED\xB2\x9Cy");
+    try std.testing.expectEqual(canonical, halves);
+    // A lone half stays as it is.
+    const lone = try rt.internAtom("\xED\xA0\xB5");
+    try std.testing.expect(lone != canonical);
 }

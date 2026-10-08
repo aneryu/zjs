@@ -349,6 +349,7 @@ pub const LogicalOpcode = enum(u16) {
     /// C1-1 end state: same shape as to_propkey (lowered-direct byte 75,
     /// produced by the builder's trailing set_name rewrite).
     set_name_computed = 420,
+    using_iterator_step = 421,
     // compiler-only (temp) forms; physical ids 178..196 overlap the short opcodes
     enter_scope = 300,
     leave_scope = 301,
@@ -621,6 +622,7 @@ pub fn familyOf(form: LogicalOpcode) SemanticFamily {
         .using_set_proto => .ext0_sub,
         .using_put_super_value => .ext0_sub,
         .using_to_object => .ext0_sub,
+        .using_iterator_step => .ext0_sub,
         .invalid => .invalid,
         .push_i32 => .push_i32,
         .push_const => .push_const,
@@ -1115,7 +1117,7 @@ pub fn operandsOf(form: LogicalOpcode, fmt: Format) []const Operand {
 // ---------------------------------------------------------------------------
 
 /// Forms whose fall-through stack effect is not a constant. Verified
-/// complete against the engine: these are the only shapes `computeStackSize`
+/// complete against the engine: these are the only shapes `stack_size.compute`
 /// treats specially.
 ///
 /// The `operand_table` rows are NOT listed here during migration. `using`'s
@@ -1887,6 +1889,7 @@ pub fn asyncSuspension(form: LogicalOpcode) AsyncSuspension {
         .using_set_proto,
         .using_put_super_value,
         .using_to_object,
+        .using_iterator_step,
         .to_propkey,
         .set_name_computed,
         .enter_scope,

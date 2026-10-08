@@ -113,13 +113,13 @@ pub const override_manifest = [_]Test262Override{
         .path = "test/built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js",
         .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
         .upstream_sha256 = "2136a50c608ac2dd74815ca4cb4ec6e0eb7bd54d1fc102bec5fe53b322563a6b",
-        .reason = "Exclude immutable ArrayBuffer path until upstream covers the proposal interaction.",
+        .reason = "Exclude the immutable ArrayBuffer path: zjs does not implement the proposal (QuickJS parity).",
     },
     .{
         .path = "test/built-ins/TypedArrayConstructors/internals/Set/BigInt/string-nan-tobigint.js",
         .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
         .upstream_sha256 = "20bc0c56378a3c12e7fa38d920648d8f5b57c8e3ab2ea31737b7794ccce8dbfb",
-        .reason = "Exclude immutable ArrayBuffer path until upstream covers the proposal interaction.",
+        .reason = "Exclude the immutable ArrayBuffer path: zjs does not implement the proposal (QuickJS parity).",
     },
     .{
         .path = "test/staging/sm/Error/constructor-proto.js",
@@ -214,7 +214,7 @@ pub const PathError = error{Test262PathOutsideRoot};
 ///   * `/home/user/zjs/test262/test/x.js` (absolute, or any path that walks
 ///                                         through a `test262` component)
 ///   * `test/x.js`                       (already root-relative)
-/// Returns null when no interpretation is possible; use `requireRelativePath`
+/// Returns null when no interpretation is possible; use `requireTest262RelativePath`
 /// where a missing normalization is a hard error.
 pub fn test262RelativePath(test_path: []const u8) ?[]const u8 {
     var rest = test_path;

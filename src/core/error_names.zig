@@ -13,12 +13,6 @@ pub fn isErrorConstructorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Error") or isNativeErrorSubclassName(name);
 }
 
-pub fn isConstructErrorObjectName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Error") or
-        std.mem.eql(u8, name, "AggregateError") or
-        isSimpleNativeErrorConstructorName(name);
-}
-
 pub fn isNativeErrorSubclassName(name: []const u8) bool {
     return std.mem.eql(u8, name, "AggregateError") or
         std.mem.eql(u8, name, "SuppressedError") or
@@ -43,11 +37,6 @@ test "error constructor name groups stay aligned" {
     try testing.expect(isErrorConstructorName("SuppressedError"));
     try testing.expect(isErrorConstructorName("TypeError"));
     try testing.expect(!isErrorConstructorName("DOMException"));
-
-    try testing.expect(isConstructErrorObjectName("Error"));
-    try testing.expect(isConstructErrorObjectName("AggregateError"));
-    try testing.expect(isConstructErrorObjectName("TypeError"));
-    try testing.expect(!isConstructErrorObjectName("SuppressedError"));
 
     try testing.expect(isNativeErrorSubclassName("AggregateError"));
     try testing.expect(isNativeErrorSubclassName("SuppressedError"));

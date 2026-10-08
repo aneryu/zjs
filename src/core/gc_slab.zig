@@ -1,5 +1,27 @@
 //! GC-only size-class arenas. Native allocations never enter this storage.
 const std = @import("std");
+
+/// Issue the next slab pop's block-header fetch one allocation early.
+///
+/// The free chain qjs threads through the free blocks themselves
+/// (`JSMallocBlockHeader.u.next_block`, quickjs.c) costs one load per pop,
+/// and that load's result is what names the *following* pop's block -- so
+/// without this it cannot start until the caller has finished initializing the
+/// previous object.
+///
+/// Under refcounting that load is free and this would be pure cost: the alloc
+/// side cycles a handful of arenas that never leave L1/L2 (measured on splay:
+/// 4.8 free arenas per class, 16.6% of arena switches return to one of the
+/// last 8 that class used). Under tracing the identical code walks a set two
+/// orders of magnitude larger -- 2,733 free arenas per class, 0.04% revisits
+/// -- because a sweep leaves thousands of arenas partially free at once and
+/// the alloc side then drains each exactly once. Every arena visit lands on a
+/// cold page and the chain becomes a serial run of cold dependent loads:
+/// 80.4% of `allocAlignedBytesNoTrigger`'s self cycles and sixty times rc's
+/// L2D refill count.
+///
+/// Measurements, and the two heavier designs this was chosen over, live
+/// in git history (2026-08-29 slab-reuse account).
 const slab_alloc_prefetch = true;
 
 pub const Slab = struct {
@@ -103,7 +125,7 @@ pub const Slab = struct {
     arenas: [block_sizes.len]?*Arena = @splat(null),
     free_arenas: [block_sizes.len]?*Arena = @splat(null),
     /// Trace-only physical backing for the 4 KiB arenas. Logical payload
-    /// accounting and limits still belong to Runtime allocation helpers; this only keeps
+    /// accounting and limits still belong to the runtime's allocation account; this only keeps
     /// arena refills off glibc's high-alignment malloc path.
     arena_backing: ?std.mem.Allocator = null,
     /// Told when an arena is created or released, so the collector can keep a
@@ -121,30 +143,13 @@ pub const Slab = struct {
         self.arena_backing = allocator;
     }
 
-    /// Eligibility-only variant of `classIndex`: true iff that would return an
-    /// index, without materializing the class arithmetic. Free paths pair this
-    /// with `headerClassIndex` (qjs `__js_free` reads `b->block_size_idx`,
-    /// quickjs.c, instead of re-deriving the class from the size).
-    pub inline fn eligibleSize(byte_count: usize, alignment: std.mem.Alignment) bool {
-        if (alignment.compare(.gt, slab_alignment)) return false;
-        return totalBlockSize(byte_count) != null;
-    }
-
-    /// Class index carried by the block header of a slab-backed allocation.
-    /// Only valid for blocks that are free or occupied by non-GC payloads
-    /// (live GC blocks carry the class in the low 5 bits plus GC accounting
-    /// bits above; their frees read it through `gcAllocInfoByte` instead).
-    pub inline fn headerClassIndex(ptr: [*]u8) usize {
-        return blockHeaderFromUser(ptr).block_size_idx;
-    }
-
     /// qjs `__js_malloc_usable_size` small-block formula.
     pub inline fn usablePayloadFromClass(class: usize) usize {
         return block_sizes[class] - block_header_size;
     }
 
     /// `stamp_class` = the block will hold a raw (non-GC) payload, so record
-    /// its class index in the header for `headerClassIndex` on the free side.
+    /// its class index in the header for the free side to read.
     /// GC objects skip the pop-time stamp only because initGcPrefix immediately
     /// rewrites the same byte with the identical class index (plus clear GC
     /// accounting bits) as part of its combined class+kind u16 store.
@@ -153,8 +158,8 @@ pub const Slab = struct {
         return self.popFreeBlock(arena, index, stamp_class);
     }
 
-    /// Hot small-block pop, mirroring the qjs `__js_malloc` small arm
-    ///: unlink the first free block, stamp its live
+    /// Hot small-block pop, mirroring the qjs `__js_malloc` small arm:
+    /// unlink the first free block, stamp its live
     /// block index, and retire the arena from the free list when it fills.
     pub inline fn popFreeBlock(self: *Slab, arena: *Arena, index: usize, comptime stamp_class: bool) [*]u8 {
         const block_size = block_sizes[index];
@@ -221,8 +226,8 @@ pub const Slab = struct {
         }
     }
 
-    /// QuickJS `js_free` returns an empty 4 KiB arena immediately
-    ///, but its re-acquisition is a tcache pop; ours
+    /// QuickJS `js_free` returns an empty 4 KiB arena immediately,
+    /// but its re-acquisition is a tcache pop; ours
     /// is a page-aligned backing allocation, a stamp of every block header
     /// and an address-registry insert, plus the matching removal here. A
     /// builtin that allocates a handful of small blocks per call and frees
@@ -312,8 +317,8 @@ pub const Slab = struct {
 
     /// Map a required block size (<= `max_size`) to its `block_sizes` index by
     /// piecewise arithmetic instead of walking a fully-unrolled 31-rung linear
-    /// `cmp` ladder. Faithful port of qjs `get_block_size_index`
-    ///: the `block_sizes` table is byte-identical to qjs
+    /// `cmp` ladder. Faithful port of qjs `get_block_size_index`:
+    /// the `block_sizes` table is byte-identical to qjs
     /// `js_malloc_block_sizes`, so the three arithmetic segments (step-8 up to
     /// 128, step-16 up to 256, step-32 up to 512) reproduce the exact same
     /// index the linear scan returned (verified by the comptime cross-check

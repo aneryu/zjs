@@ -18,10 +18,8 @@ const closure = @import("closure.zig");
 const identifiers = @import("identifiers.zig");
 const lookahead = @import("lookahead.zig");
 const emitter = @import("emitter.zig");
-const statements = @import("statements.zig");
 const functions = @import("functions.zig");
 const classes = @import("classes.zig");
-const modules = @import("modules.zig");
 const typescript = @import("typescript.zig");
 const atom_this = parse_state.atom_this;
 const atom_new_target = parse_state.atom_new_target;
@@ -29,7 +27,6 @@ const atom_this_active_func = parse_state.atom_this_active_func;
 const atom_home_object = parse_state.atom_home_object;
 const atom_class_fields_init = parse_state.atom_class_fields_init;
 const OptionalChainLabel = parse_state.OptionalChainLabel;
-const ParseState = parse_state.ParseState;
 const FunctionSourceStart = parse_state.FunctionSourceStart;
 const Error = parse_state.Error;
 const ParseFlags = parse_state.ParseFlags;
@@ -64,12 +61,14 @@ fn parseArrowAssignment(s: *State, flags: ParseFlags) Error!bool {
     }
 
     if (s.isAsyncIdentifier()) {
-        if (!(try lookahead.checkAsyncArrowHeadAfterAsync(s, flags.arrow_return_type_forbidden))) return false;
-        const source_start = s.currentFunctionSourceStart();
-        try s.advance(); // consume contextual `async`
-        if (typescript.tsAtLess(s)) try typescript.tsParseTypeParameters(s);
-        try functions.parseArrowFunction(s, .async, source_start, flags);
-        return true;
+        if (try lookahead.checkAsyncArrowHeadAfterAsync(s, flags.arrow_return_type_forbidden)) {
+            const source_start = s.currentFunctionSourceStart();
+            try s.advance(); // consume contextual `async`
+            if (typescript.tsAtLess(s)) try typescript.tsParseTypeParameters(s);
+            try functions.parseArrowFunction(s, .async, source_start, flags);
+            return true;
+        }
+        // Otherwise `async` may itself be the parameter of `async => ...`.
     }
 
     // QuickJS handles generator `yield` before arrow cover grammar, and
@@ -126,13 +125,19 @@ pub fn parseAssignExpr(s: *State) Error!void {
 /// and compound-assignment lowering for identifiers, member targets,
 /// destructuring, and arrow cover forms.
 pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
-    // std.debug.print("parseAssignExpr2: s.token.val={d} ('{c}')\n", .{ s.token.val, @as(u8, @intCast(if (s.token.val >= 0 and s.token.val <= 255) s.token.val else ' ' )) });
     s.assign_expr_depth += 1;
     const current_assign_depth = s.assign_expr_depth;
     if (s.last_coalesce_expr_depth == current_assign_depth) {
         s.last_coalesce_expr_depth = null;
     }
     defer s.assign_expr_depth -= 1;
+
+    // A YieldExpression is a whole AssignmentExpression: nothing continues
+    // it, so a line break before `+`, `?` or `/` ends the statement (ASI)
+    // instead of applying the operator to the yield (qjs js_parse_assign_expr2).
+    if (s.ctx.in_generator and !s.ctx.in_class_static_block and s.peekKind() == .kw_yield) {
+        return parseYieldExpression(s, flags);
+    }
 
     if (try parseArrowAssignment(s, flags)) return;
     if (try parseDestructuringAssignment(s, flags)) return;
@@ -159,7 +164,6 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
 
     try s.advance(); // consume the assignment operator
     var lvalue = try getLValue(s, !is_plain_assign);
-    defer lvalue.deinit(s);
 
     if (lvalue.invalid_call and logical_assign != null) {
         // Annex B does not extend runtime errors to logical assignment
@@ -174,7 +178,7 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
         // state remain identical to an ordinary assignment.
         const invalid_target_label = try Emitter.newLabel(s);
         try Emitter.jump(s, opcode.op.goto, invalid_target_label);
-        const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
+        const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden };
         try parseAssignExpr2(s, rhs_flags);
         try Emitter.opNoSource(s, opcode.op.drop);
         try Emitter.bind(s, invalid_target_label);
@@ -187,7 +191,7 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
         return;
     }
 
-    const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
+    const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden };
     try parseAssignExpr2(s, rhs_flags);
     if (assign_opcode) |op_byte| {
         // qjs js_parse_assign_expr2: the
@@ -198,8 +202,8 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
     if (is_plain_assign and direct_lhs_atom != null and lvalue.owns_name and
         lvalue.name == direct_lhs_atom.?)
     {
-        // qjs js_parse_assign_expr2 / set_object_name
-        //: patch only a directly
+        // qjs js_parse_assign_expr2 / set_object_name:
+        // patch only a directly
         // trailing anonymous placeholder.
         try functions.setObjectName(s, lvalue.name);
     }
@@ -213,9 +217,16 @@ fn parseDestructuringAssignment(s: *State, flags: ParseFlags) Error!bool {
     {
         return false;
     }
-    const topology = try functions.scanPatternTopology(s);
-    if (topology.following != .assign) return false;
-    _ = try functions.parseDestructuringElement(s, .assignment, .{ .allow_outer_initializer = true }, ParseFlags{ .in_accepted = flags.in_accepted });
+    // Only `[...] =` / `{...} =` is a destructuring assignment. An unclosed
+    // scan (including nesting deeper than the lookahead tracks) is not one,
+    // nor is a scan that misread a token (`f<A<T>> / 2` lexed as a regex);
+    // the expression parser reports any real error.
+    const balanced = lookahead.scanBalancedToken(s, false) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return false;
+    };
+    if (!balanced.closed or balanced.following != .assign) return false;
+    _ = try functions.parseDestructuringElement(s, .assignment, .{ .allow_outer_initializer = true }, ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden });
     return true;
 }
 
@@ -244,7 +255,7 @@ fn parseLogicalAssignment(
     );
     try Emitter.opNoSource(s, opcode.op.drop);
 
-    const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
+    const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden };
     try parseAssignExpr2(s, rhs_flags);
     if (direct_lhs_atom != null and lvalue.owns_name and
         lvalue.name == direct_lhs_atom.?)
@@ -280,26 +291,18 @@ const LValueOpcode = enum {
     ref_value,
 };
 
-/// Compile-time ownership descriptor returned by QuickJS-style
-/// get_lvalue. `name` owns the retained atom removed from the getter's
-/// atom-operand stream until putLValue transfers or releases it.
+/// The assignment target get_lvalue describes. `owns_name` marks a `name`
+/// taken from the getter's atom operands that putLValue has not consumed.
 pub const LValue = struct {
     opcode: LValueOpcode,
     scope: u16 = 0,
     name: Atom = atom_module.null_atom,
     owns_name: bool = false,
-    label_offset: ?usize = null,
     /// scope_make_ref aux label as a LabelId; put binds it
     /// (qjs put_lvalue emit_label).
     ref_label: ?compiler.LabelId = null,
     depth: u8,
     invalid_call: bool = false,
-
-    pub fn deinit(self: *LValue, _: *State) void {
-        if (self.owns_name) {
-            self.owns_name = false;
-        }
-    }
 };
 
 fn isRuntimeInvalidCallOpcode(op_id: u8) bool {
@@ -337,24 +340,16 @@ const PutLValueMode = enum {
     no_keep_bottom,
 };
 
+/// Whether a `with` object may sit between this reference and its binding:
+/// a `with` body scope in this or an enclosing function, or, for direct-eval
+/// code, a `with` in the caller's environment.
 fn hasWithScopeFrom(fd_start: *const function_def_mod.FunctionDef, scope_start: i32) bool {
     var fd: ?*const function_def_mod.FunctionDef = fd_start;
     var scope = scope_start;
     while (fd) |current| {
-        if (!current.is_strict_mode) {
-            if (scope >= 0 and @as(usize, @intCast(scope)) < current.scopes.len) {
-                // `appendScope` inherits the parent's visible head and
-                // `addScopeVar` links the new declaration in front, so a
-                // single scope_next walk is the complete visible chain.
-                // This is the exact loop used by QuickJS has_with_scope.
-                var var_idx = current.scopes[@intCast(scope)].first;
-                while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < current.vars.len) {
-                    const vd = current.vars[@intCast(var_idx)];
-                    if (vd.var_name == atom_module.ids.with_object) return true;
-                    var_idx = vd.scope_next;
-                }
-            }
-        }
+        if (scope >= 0 and @as(usize, @intCast(scope)) < current.scopes.len and
+            current.scopes[@intCast(scope)].inside_with) return true;
+        if (current.parent == null) return current.eval_inside_with;
         scope = current.parent_scope_level;
         fd = current.parent;
     }
@@ -412,6 +407,9 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
     // Annex-B runtime-error CallExpression target: the call opcode must
     // be the whole tail. The temp stream uses the phase-1 encodings, so
     // the size table applies unchanged.
+    // The concat call of a template literal is no CallExpression:
+    // `\`${a}\` = 1` is an early error, not the Annex B runtime one.
+    if (s.template_concat_call_pos == pos) return Error.InvalidAssignmentTarget;
     if (!s.is_strict and !fd.is_strict_mode and isRuntimeInvalidCallOpcode(op_id)) {
         const call_size = opcode.sizeOfPhase1(op_id);
         if (call_size == 0 or pos + call_size != v2b.code_len) return Error.InvalidAssignmentTarget;
@@ -423,8 +421,6 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
     }
 
     var lvalue: LValue = undefined;
-    var lvalue_initialized = false;
-    errdefer if (lvalue_initialized) lvalue.deinit(s);
     switch (op_id) {
         opcode.op.scope_get_var => {
             // qjs get_lvalue: decode the phase-1
@@ -450,20 +446,15 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             // must be decided when the LHS is evaluated, before the RHS
             // can create the global property.
             const strict_unresolved = identifiers.strictUnresolvedAssignmentNeedsReference(s, name, keep);
-            var has_current_binding = closure.hasVisibleCurrentBinding(fd, name, @intCast(scope));
-            if (!has_current_binding) {
-                for (fd.global_vars) |global_var| {
-                    if (global_var.var_name == name) {
-                        has_current_binding = true;
-                        break;
-                    }
-                }
-            }
             const with_scope = hasWithScopeFrom(fd, scope);
+            // The binding scan is linear in the function's locals, so it runs
+            // only for the sloppy case that reads it.
             const needs_reference = with_scope or
                 strict_unresolved or
                 (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
-                    !has_current_binding and State.rhsContainsDirectEval(s));
+                    !closure.hasVisibleCurrentBinding(fd, name, @intCast(scope)) and
+                    fd.findGlobalVarName(name) == null and
+                    State.rhsContainsDirectEval(s));
             const owned_name = try v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name);
             lvalue = .{
                 .opcode = .scope_var,
@@ -472,14 +463,11 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
                 .owns_name = true,
                 .depth = 0,
             };
-            lvalue_initialized = true;
             if (needs_reference) {
                 lvalue.opcode = .ref_value;
                 lvalue.depth = 2;
-                // qjs get_lvalue: scope_make_ref carries the label
-                // as an aux operand; update_label(fd, label, 1) is the emitter's ref_count
-                // bump. The operand receives a borrowed duplicate; the descriptor keeps the
-                // retained atom (legacy emitScopeMakeRefForLValueAssumeCapacity contract).
+                // qjs get_lvalue: scope_make_ref carries the label as an aux
+                // operand; putLValue binds it.
                 const ref_label = try Emitter.newLabel(s);
                 try Emitter.scopeRefOp(s, opcode.op.scope_make_ref, owned_name, ref_label, scope);
                 lvalue.ref_label = ref_label;
@@ -493,7 +481,6 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
             const owned_name = try v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name);
             lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
-            lvalue_initialized = true;
         },
         opcode.op.scope_get_private_field => {
             // qjs get_lvalue: retain
@@ -509,7 +496,6 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
                 .owns_name = true,
                 .depth = 1,
             };
-            lvalue_initialized = true;
         },
         opcode.op.get_array_el => {
             // qjs get_lvalue: remove
@@ -517,7 +503,6 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
             try v2b.truncateLastOpcodePreserveSources(pos);
             lvalue = .{ .opcode = .array_element, .depth = 2 };
-            lvalue_initialized = true;
         },
         opcode.op.get_super_value => {
             // qjs get_lvalue: remove
@@ -525,7 +510,6 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
             try v2b.truncateLastOpcodePreserveSources(pos);
             lvalue = .{ .opcode = .super_value, .depth = 3 };
-            lvalue_initialized = true;
         },
         else => return Error.InvalidAssignmentTarget,
     }
@@ -718,21 +702,19 @@ pub fn parseLogicalAndOr(s: *State, op_kind: tok.Kind, flags: ParseFlags) Error!
     }
 }
 
-/// `js_parse_expr_binary`. Pratt-style with hand
-/// rolled level table. Levels 1..8 covered, including private-name `in`.
+/// `js_parse_expr_binary`: binary expression up to precedence `level` (1 binds tightest; 0 is a
+/// unary operand). Precedence climbing: one unary operand, then each level's
+/// operators from tightest to loosest. Every right operand is parsed at the
+/// next tighter level and so consumes all tighter operators, so once a
+/// level's loop stops no tighter operator can follow. One native frame per
+/// nesting (not one per level) keeps deep parenthesization within the
+/// parser's native stack budget.
 pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
-    if (level == 0) {
-        return parseUnary(s, ParseFlags{
-            .in_accepted = flags.in_accepted,
-            .pow_allowed = true,
-            .result_needed = flags.result_needed,
-            .yield_forbidden = flags.yield_forbidden,
-        });
-    }
-    if (level == 4 and flags.in_accepted and s.peekKind() == .private_name and s.peekNextKind() == .kw_in) {
+    if (level >= 4 and flags.in_accepted and s.peekKind() == .private_name and s.peekNextKind() == .kw_in) {
+        // `#x in o` is itself a RelationalExpression (level 4): further
+        // relational operators take it as their left operand.
         s.features.insert(.private_name);
         const private_atom = classes.findClassPrivateBoundName(s, s.token.payload.ident.atom, 0) orelse return s.failUnexpectedToken();
-        const retained_private_atom = private_atom;
         try s.advance();
         try s.expectToken(.kw_in);
         if ((try lookahead.checkArrowHead(s, false)) or
@@ -740,32 +722,54 @@ pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
         {
             return s.failUnexpectedToken();
         }
-        try parseExprBinary(s, level - 1, flags);
-        try Emitter.opAtomU16(s, opcode.op.scope_in_private_field, retained_private_atom, @intCast(s.scope_level));
-        return;
+        try parseExprBinary(s, 3, flags);
+        try Emitter.opAtomU16(s, opcode.op.scope_in_private_field, private_atom, @intCast(s.scope_level));
+        return parseBinaryOperators(s, 4, level, flags);
     }
-    try parseExprBinary(s, level - 1, flags);
-    while (true) {
-        if (level == 4 and typescript.tsAtAsOrSatisfies(s)) {
-            // TypeScript `x as T` / `x as const` / `x satisfies T` bind at
-            // relational precedence and erase to their operand.
-            try s.advance();
-            if (s.peekKind() == .kw_const) {
+    try parseUnary(s, ParseFlags{
+        .in_accepted = flags.in_accepted,
+        .pow_allowed = true,
+        .result_needed = flags.result_needed,
+        .yield_forbidden = flags.yield_forbidden,
+    });
+    return parseBinaryOperators(s, 1, level, flags);
+}
+
+/// The operator loops of binary levels `min_level..max_level`, tightest
+/// first, with the left operand already on the stack.
+fn parseBinaryOperators(s: *State, min_level: u32, max_level: u32, flags: ParseFlags) Error!void {
+    var level = min_level;
+    while (level <= max_level) : (level += 1) {
+        while (true) {
+            if (level == 4 and typescript.tsAtAsOrSatisfies(s)) {
+                // TypeScript `x as T` / `x as const` / `x satisfies T` bind at
+                // relational precedence and erase to their operand.
                 try s.advance();
-            } else {
-                try typescript.tsParseTypeAllowConditional(s);
+                if (s.peekKind() == .kw_const) {
+                    try s.advance();
+                } else {
+                    try typescript.tsParseTypeAllowConditional(s);
+                }
+                // `x as T!`: a non-null assertion on the assertion erases too.
+                while (s.peekKind() == .bang and !s.gotLineTerminator()) try s.advance();
+                // `x as T ** 2`: exponentiation is tighter still, and right
+                // associative like the unary-level `**` it mirrors.
+                try parsePowTail(s, .{ .in_accepted = flags.in_accepted, .pow_allowed = true });
+                // tsc keeps consuming tighter operators with the asserted value
+                // as their left operand: `y as number + 1` is `(y as number) + 1`.
+                try parseBinaryOperators(s, 1, 3, flags);
+                continue;
             }
-            continue;
+            const op_byte = matchBinaryOp(s.peekKind(), level, flags);
+            if (op_byte == opcode.op.invalid) break;
+            const operator_source = s.currentSourcePosition();
+            try s.advance();
+            if (s.ctx.in_generator and s.peekKind() == .kw_yield) return s.failUnexpectedToken();
+            try parseExprBinary(s, level - 1, flags);
+            // qjs js_parse_expr_binary pins the selected operator to its token
+            // after parsing the RHS.
+            try Emitter.opAt(s, op_byte, operator_source.line_num, operator_source.col_num);
         }
-        const op_byte = matchBinaryOp(s.peekKind(), level, flags);
-        if (op_byte == opcode.op.invalid) return;
-        const operator_source = s.currentSourcePosition();
-        try s.advance();
-        if (s.ctx.in_generator and s.peekKind() == .kw_yield) return s.failUnexpectedToken();
-        try parseExprBinary(s, level - 1, flags);
-        // qjs js_parse_expr_binary pins the selected operator to its token
-        // after parsing the RHS.
-        try Emitter.opAt(s, op_byte, operator_source.line_num, operator_source.col_num);
     }
 }
 
@@ -853,8 +857,12 @@ pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
     // Handle await expressions in async functions.
     if (k == .kw_await) return parseAwaitExpression(s, flags);
     try parsePostfixExpr(s, flags);
-    // PF_POW_ALLOWED: `a ** b` is right-associative and only allowed
-    // when no unary prefix was consumed.
+    try parsePowTail(s, flags);
+}
+
+/// PF_POW_ALLOWED: `a ** b` is right-associative and only allowed after an
+/// UpdateExpression, never after a unary prefix (`-a ** b`, `await a ** b`).
+fn parsePowTail(s: *State, flags: ParseFlags) Error!void {
     if (flags.pow_allowed and s.peekKind() == .pow) {
         const operator_source = s.currentSourcePosition();
         try s.advance();
@@ -870,7 +878,6 @@ fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.Kind) Error!void {
     try s.advance();
     try parseUnary(s, .{ .in_accepted = flags.in_accepted });
     var lvalue = try getLValue(s, true);
-    defer lvalue.deinit(s);
     if (lvalue.invalid_call) {
         try emitInvalidAssignmentTarget(s);
         return;
@@ -892,8 +899,6 @@ fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.Kind) Error!void {
 
 /// YieldExpression, or `yield` as an identifier outside generators.
 fn parseYieldExpression(s: *State, flags: ParseFlags) Error!void {
-    if (flags.yield_forbidden) return s.failUnexpectedToken();
-    if (s.ctx.in_parameter_initializer and s.ctx.in_generator) return s.failUnexpectedToken();
     if (!s.ctx.in_generator) {
         if (s.is_strict or s.curFunc().is_strict_mode) return Error.YieldOutsideGenerator;
         const next_kind_peek = s.peekNext();
@@ -907,8 +912,13 @@ fn parseYieldExpression(s: *State, flags: ParseFlags) Error!void {
         {
             return Error.YieldOutsideGenerator;
         }
-        return parsePostfixExpr(s, flags);
+        // Sloppy non-generator code: `yield` is a plain identifier.
+        try parsePostfixExpr(s, flags);
+        return parsePowTail(s, flags);
     }
+    // A YieldExpression is not a UnaryExpression operand.
+    if (flags.yield_forbidden) return s.failUnexpectedToken();
+    if (s.ctx.in_parameter_initializer) return s.failUnexpectedToken();
     try s.advance();
     // Check for yield*. A line terminator after `yield` ends the
     // YieldExpression before any following operand.
@@ -917,7 +927,7 @@ fn parseYieldExpression(s: *State, flags: ParseFlags) Error!void {
     const is_yield_star = !has_line_terminator and s.peekKind() == .star;
     if (is_yield_star) {
         try s.advance();
-        try parseAssignExpr2(s, ParseFlags{ .in_accepted = flags.in_accepted });
+        try parseAssignExpr2(s, ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden });
         try emitYieldStarDelegation(s, s.ctx.in_async);
     } else {
         // Check if there's an expression after yield
@@ -935,7 +945,7 @@ fn parseYieldExpression(s: *State, flags: ParseFlags) Error!void {
             try Emitter.op(s, opcode.op.undefined);
         } else {
             // yield with expression
-            try parseAssignExpr2(s, ParseFlags{ .in_accepted = flags.in_accepted });
+            try parseAssignExpr2(s, ParseFlags{ .in_accepted = flags.in_accepted, .arrow_return_type_forbidden = flags.arrow_return_type_forbidden });
         }
         try Emitter.op(s, opcode.op.yield);
         const normal_resume = try Emitter.newLabel(s);
@@ -957,9 +967,13 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
     }
     const top_level_module_await = s.lex.is_module and s.cur_func_stack.len == 0;
     if (!s.ctx.in_async and !top_level_module_await) {
-        const next_kind = s.peekNextKind();
+        const next = s.peekNext();
+        const next_kind = next.kind;
+        // Outside async code `await` is an identifier; one followed by a
+        // line break is an identifier statement that ASI terminates.
         if (identifiers.canUseAwaitAsIdentifier(s) and
-            (!identifiers.tokenCanStartExpression(next_kind) or
+            (next.line_terminator or
+                !identifiers.tokenCanStartExpression(next_kind) or
                 next_kind == .lparen or
                 next_kind == .dot or
                 next_kind == .lbracket or
@@ -967,7 +981,7 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
                 next_kind == .dec))
         {
             try parsePostfixExpr(s, flags);
-            return;
+            return parsePowTail(s, flags);
         }
         return Error.AwaitOutsideAsyncFunction;
     }
@@ -977,8 +991,11 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
     // `await UnaryExpression`; qjs js_parse_unary TOK_AWAIT parses a
     // unary operand), NOT an AssignmentExpression — so
     // `await Promise.resolve(2) * x` is `(await …) * x`, not
-    // `await (… * x)`.
-    try parseUnary(s, flags);
+    // `await (… * x)`; as a unary prefix it also bars `**`.
+    var operand_flags = flags;
+    operand_flags.pow_allowed = false;
+    operand_flags.yield_forbidden = true;
+    try parseUnary(s, operand_flags);
     try Emitter.op(s, opcode.op.await);
     return;
 }
@@ -1023,7 +1040,18 @@ fn emitYieldStarDelegation(s: *State, is_async: bool) Error!void {
     const label_throw = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.if_true, label_throw);
 
-    if (is_async) try Emitter.op(s, opcode.op.await);
+    if (is_async) {
+        // AsyncGeneratorUnwrapYieldResumption awaits a return value; a
+        // rejection resumes yield* as a throw (step 7.b). The await runs
+        // under a handler whose catch slot takes the value's place, so the
+        // reason lands on the throw path exactly where a thrown value would.
+        const received = try functions.appendAnonymousTempLocal(s);
+        try Emitter.opU16(s, opcode.op.put_loc, received);
+        try Emitter.jump(s, opcode.op.@"catch", label_throw);
+        try Emitter.opU16(s, opcode.op.get_loc, received);
+        try Emitter.op(s, opcode.op.await);
+        try Emitter.op(s, opcode.op.nip_catch);
+    }
     try Emitter.opU8(s, opcode.op.iterator_call, 0);
     const label_return1 = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.if_true, label_return1);
@@ -1033,12 +1061,22 @@ fn emitYieldStarDelegation(s: *State, is_async: bool) Error!void {
     try Emitter.jump(s, opcode.op.if_false, yield_label);
 
     try Emitter.opAtom(s, opcode.op.get_field, value_atom);
+    // The inner return()'s value is returned as is (yield* step 7.c.viii);
+    // only a missing inner return method awaits the received value (7.c.iii).
+    const label_return_value = try Emitter.newLabel(s);
+    if (is_async) {
+        try Emitter.op(s, opcode.op.nip);
+        try Emitter.op(s, opcode.op.nip);
+        try Emitter.op(s, opcode.op.nip);
+        try Emitter.jump(s, opcode.op.goto, label_return_value);
+    }
 
     try Emitter.bind(s, label_return1);
     try Emitter.op(s, opcode.op.nip);
     try Emitter.op(s, opcode.op.nip);
     try Emitter.op(s, opcode.op.nip);
     if (is_async) try Emitter.op(s, opcode.op.await);
+    try Emitter.bind(s, label_return_value);
     try emitter.emitReturnValue(s, false);
 
     try Emitter.bind(s, label_throw);
@@ -1109,7 +1147,7 @@ fn discardTrailingGetSuper(s: *State) Error!void {
 /// access. Optional-chain and `super` references have dedicated trailing
 /// opcode rewrites; private references are rejected.
 fn parseDelete(s: *State, flags: ParseFlags, delete_position: diagnostics.Position) Error!void {
-    try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
+    try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
     return finishDelete(s, delete_position);
 }
 
@@ -1255,7 +1293,11 @@ fn emitDeleteNonReference(s: *State) Error!void {
 /// compacting only after every allocation succeeds.
 fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
     const v2b = s.activeBuilder();
-    const pos = v2b.last_opcode_pos orelse return emitDeleteNonReference(s);
+    const pos = v2b.last_opcode_pos orelse {
+        if (s.private_opt_chain_end == v2b.code_len)
+            return s.failWithMessage(delete_position, "private fields cannot be deleted");
+        return emitDeleteNonReference(s);
+    };
     if (pos >= v2b.code_len) return Error.ParserInvariant;
 
     switch (v2b.code[pos]) {
@@ -1331,14 +1373,6 @@ fn rewriteOptionalChainDeleteBuilder(s: *State, pos: u32) Error!void {
         if (v2b.atom_len == 0) return Error.ParserInvariant;
         const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
         if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
-        if (identifiers.atomNameIsPrivate(s, atom_id)) {
-            const snapshot = v2b.snapshot();
-            errdefer v2b.rollback(snapshot);
-            try Emitter.opNoSource(s, opcode.op.drop);
-            try Emitter.opNoSource(s, opcode.op.push_true);
-            v2b.code[pos] = opcode.op.get_field;
-            return;
-        }
     }
 
     const snapshot = v2b.snapshot();
@@ -1397,6 +1431,27 @@ const PreparedCallReference = struct {
     optional_drop_count: u8,
 };
 
+/// qjs js_parse_postfix_expr: a call on a closed optional-chain reference
+/// preserves the receiver (the getter at `pos` becomes `method_op`),
+/// bypasses the undefined pad on the live path, and moves the shared chain
+/// exit to that pad. v2 carries both targets as LabelIds instead of raw
+/// OP_label bytes.
+fn closedOptionalChainCall(s: *State, pos: usize, method_op: u8) Error!PreparedCallReference {
+    const v2b = s.activeBuilder();
+    const optional_label = try optionalChainExitAtEnd(s);
+    const snapshot = v2b.snapshot();
+    errdefer v2b.rollback(snapshot);
+    const next_label = try Emitter.newLabel(s);
+    try Emitter.jumpNoSource(s, opcode.op.goto, next_label);
+    const cleanup_offset = v2b.code_len;
+    try Emitter.opNoSource(s, opcode.op.undefined);
+    try Emitter.bindParser(s, next_label);
+
+    v2b.code[pos] = method_op;
+    v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
+    return .{ .kind = .method, .optional_drop_count = 2 };
+}
+
 /// QuickJS call-site consumer (`js_parse_postfix_expr`): classify and
 /// rewrite only the actual last opcode. Producers never choose a receiver
 /// form by peeking at the following token.
@@ -1406,7 +1461,16 @@ fn prepareCallReference(
     has_optional_site: bool,
 ) Error!PreparedCallReference {
     const v2b = s.activeBuilder();
-    const pos = v2b.last_opcode_pos orelse return .{ .kind = .plain, .optional_drop_count = 1 };
+    const pos = v2b.last_opcode_pos orelse {
+        // A chain closed on `?.#m` leaves no last opcode; the getter is the
+        // private field read just before the chain exit.
+        if (s.private_opt_chain_end == v2b.code_len and v2b.code_len >= 7 and
+            v2b.code[v2b.code_len - 7] == opcode.op.scope_get_private_field)
+        {
+            return closedOptionalChainCall(s, v2b.code_len - 7, opcode.op.scope_get_private_field2);
+        }
+        return .{ .kind = .plain, .optional_drop_count = 1 };
+    };
     if (pos >= v2b.code_len) return Error.ParserInvariant;
 
     switch (v2b.code[pos]) {
@@ -1417,29 +1481,12 @@ fn prepareCallReference(
             // W1: `get_field_opt_chain` is `atom_cache_u8` (6 bytes).
             const getter_size: u32 = if (field_form) 6 else 1;
             if (pos + getter_size != v2b.code_len) return Error.ParserInvariant;
-            const optional_label = try optionalChainExitAtEnd(s);
             if (field_form) {
                 if (v2b.atom_len == 0) return Error.ParserInvariant;
                 const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
             }
-
-            // qjs js_parse_postfix_expr: a
-            // call on a closed optional-chain reference preserves the
-            // receiver, bypasses the undefined pad on the live path,
-            // and moves the shared chain exit to that pad. v2 carries
-            // both targets as LabelIds instead of raw OP_label bytes.
-            const snapshot = v2b.snapshot();
-            errdefer v2b.rollback(snapshot);
-            const next_label = try Emitter.newLabel(s);
-            try Emitter.jumpNoSource(s, opcode.op.goto, next_label);
-            const cleanup_offset = v2b.code_len;
-            try Emitter.opNoSource(s, opcode.op.undefined);
-            try Emitter.bindParser(s, next_label);
-
-            v2b.code[pos] = if (field_form) opcode.op.get_field2 else opcode.op.get_array_el2;
-            v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
-            return .{ .kind = .method, .optional_drop_count = 2 };
+            return closedOptionalChainCall(s, pos, if (field_form) opcode.op.get_field2 else opcode.op.get_array_el2);
         },
         opcode.op.get_field => {
             if (pos + 6 != v2b.code_len)
@@ -1463,7 +1510,14 @@ fn prepareCallReference(
         opcode.op.get_super_value => {
             if (pos + 1 != v2b.code_len)
                 return .{ .kind = .plain, .optional_drop_count = 1 };
-            v2b.code[pos] = opcode.op.get_array_el;
+            // [this home key] -> [this this home key] -> [this value]: the
+            // super reference's thisValue is also the Get receiver (§13.3.7.3),
+            // not the home object (QuickJS's `get_array_el` rewrite).
+            try v2b.truncateLastOpcodePreserveSources(pos);
+            try Emitter.opNoSource(s, opcode.op.rot3l);
+            try Emitter.opNoSource(s, opcode.op.insert3);
+            try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.rot3r);
+            try Emitter.op(s, opcode.op.get_super_value);
             return .{ .kind = .method, .optional_drop_count = 2 };
         },
         opcode.op.scope_get_var => {
@@ -1474,8 +1528,10 @@ fn prepareCallReference(
                 return .{ .kind = .direct_eval, .optional_drop_count = 1 };
             }
             if (hasWithScopeFrom(s.curFunc(), scope)) {
+                // scope_get_ref pushes [this, func]: an optional-call
+                // short-circuit drops both.
                 v2b.code[pos] = opcode.op.scope_get_ref;
-                return .{ .kind = .method, .optional_drop_count = 1 };
+                return .{ .kind = .method, .optional_drop_count = 2 };
             }
         },
         else => {},
@@ -1535,7 +1591,6 @@ pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
     if (s.lex.got_lf) return;
 
     var lvalue = try getLValue(s, true);
-    defer lvalue.deinit(s);
     const operator_source = s.currentSourcePosition();
     const update_op: u8 = if (k == .inc) opcode.op.post_inc else opcode.op.post_dec;
     try s.advance(); // consume `++` or `--`
@@ -1559,14 +1614,18 @@ pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
 /// marker, so call/delete consume its identity from the real last getter;
 /// no per-exit buffer or byte-signature recovery is involved.
 pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
+    const starts_with_template = s.peekKind() == .template;
     if (s.peekKind() == .kw_new) {
         try parseNewExpr(s, flags);
     } else {
-        try parsePrimary(s, flags);
+        try parsePrimary(s);
     }
+    const primary_end = s.activeBuilder().last_opcode_pos;
     const was_super = s.last_was_super;
     var optional_chain_label: ?OptionalChainLabel = null;
-    try parseMemberChain(s, flags, &optional_chain_label);
+    try parseMemberChain(s, &optional_chain_label);
+    const bare_template = starts_with_template and s.activeBuilder().last_opcode_pos == primary_end;
+    s.template_concat_call_pos = if (bare_template) primary_end else null;
     if (optional_chain_label) |label| {
         // v2 chain close: no in-stream raw label marker — the bind slot
         // carries the position; the pseudo getter rewrite is identical.
@@ -1581,6 +1640,7 @@ pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
             } else if (pos + 1 == getter_end and v2b.code[pos] == opcode.op.get_array_el) {
                 v2b.code[pos] = opcode.op.get_array_el_opt_chain;
             } else {
+                if (v2b.code[pos] == opcode.op.scope_get_private_field) s.private_opt_chain_end = getter_end;
                 v2b.invalidateLastOpcode();
             }
         }
@@ -1590,7 +1650,7 @@ pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
         if (!s.ctx.allow_super_call) return s.failUnexpectedToken();
         const call_source = SourceLoc{ .line = s.token.line_num, .col = s.token.col_num };
         const super_locals = superCallLocals(s) orelse {
-            try parseCapturedSuperConstructorCall(s, flags, call_source);
+            try parseCapturedSuperConstructorCall(s, call_source);
             s.last_was_super = false;
             return;
         };
@@ -1598,7 +1658,7 @@ pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
         try Emitter.opU16(s, opcode.op.get_loc, super_locals.active_func);
         try Emitter.op(s, opcode.op.get_super);
         try Emitter.opU16(s, opcode.op.get_loc, super_locals.new_target);
-        const shape = try parseCallArgs(s, flags);
+        const shape = try parseCallArgs(s);
         switch (shape) {
             .direct => |argc| try Emitter.opU16At(s, opcode.op.call_constructor, argc, call_source.line, call_source.col),
             .applied => try Emitter.opU16At(s, opcode.op.apply, 1, call_source.line, call_source.col),
@@ -1617,6 +1677,15 @@ pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
         }
         s.last_was_super = false;
     }
+}
+
+/// The name after `.` or `?.`: an identifier, a private name or any
+/// keyword (`a.delete`, `a.#x`).
+fn memberNameAtom(s: *State) ?Atom {
+    const kind = s.peekKind();
+    if (kind == .ident or kind == .private_name) return s.token.payload.ident.atom;
+    if (kind.isKeyword()) return kind.keywordAtom();
+    return null;
 }
 
 const SourceLoc = struct {
@@ -1638,13 +1707,13 @@ fn superCallLocals(s: *State) ?SuperCallLocals {
     };
 }
 
-fn parseCapturedSuperConstructorCall(s: *State, flags: ParseFlags, loc: ?SourceLoc) Error!void {
+fn parseCapturedSuperConstructorCall(s: *State, loc: ?SourceLoc) Error!void {
     try discardTrailingGetSuper(s);
 
     try s.emitScopeGetVar(atom_this_active_func);
     try Emitter.op(s, opcode.op.get_super);
     try s.emitScopeGetVar(atom_new_target);
-    const shape = try parseCallArgs(s, flags);
+    const shape = try parseCallArgs(s);
     switch (shape) {
         .direct => |argc| {
             if (loc) |source_loc| {
@@ -1680,7 +1749,7 @@ fn parseCapturedSuperConstructorCall(s: *State, flags: ParseFlags, loc: ?SourceL
 /// operands so a direct constructor uses locals while an arrow containing
 /// `super()` receives the ordinary threaded captures.
 pub fn emitClassFieldInitCall(s: *State) Error!void {
-    try s.emitScopeGetVar(atom_class_fields_init);
+    try s.emitScopeGetVar(s.ctx.super_fields_init);
     // qjs emit_class_field_init: the skip
     // target is born as a label bound at the shared drop.
     try Emitter.op(s, opcode.op.dup);
@@ -1721,19 +1790,21 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
         if (following.kind != .dot) {
             return s.failExpectedDescriptionAt("'.'", following.kind, following.position);
         }
-        try parsePrimary(s, flags);
+        try parsePrimary(s);
         try parseNewCalleeMemberAccess(s);
     } else {
-        try parsePrimary(s, flags);
+        try parsePrimary(s);
         try parseNewCalleeMemberAccess(s);
     }
     // TypeScript `new C<T>(...)`.
-    if (typescript.tsAtLess(s)) _ = try typescript.tsTryParseTypeArgumentsInExpression(s);
+    if (s.typescript and typescript.tsAtLess(s)) _ = try typescript.tsTryParseTypeArgumentsInExpression(s);
+    // An OptionalChain cannot follow an argument-less NewExpression.
+    if (s.peekKind() == .question_mark_dot) return s.failWithMessage(null, "optional chain is not allowed after 'new' without arguments");
     if (s.peekKind() == .lparen) {
         const call_line = s.token.line_num;
         const call_col = s.token.col_num;
         try Emitter.op(s, opcode.op.dup);
-        const shape = try parseCallArgs(s, flags);
+        const shape = try parseCallArgs(s);
         switch (shape) {
             .direct => |argc| try Emitter.opU16At(s, opcode.op.call_constructor, argc, call_line, call_col),
             .applied => {
@@ -1761,20 +1832,22 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
 fn parseNewCalleeMemberAccess(s: *State) Error!void {
     while (true) {
         const k = s.peekKind();
+        // `new super.x()` / `new super[k]()`: a SuperProperty callee. A bare
+        // `super` cannot be constructed.
+        const was_super = s.last_was_super;
+        if (was_super) {
+            if (k != .dot and k != .lbracket) return s.failUnexpectedToken();
+            s.last_was_super = false;
+            try discardTrailingGetSuper(s);
+            try emitSuperThisAndHomeObject(s);
+            try Emitter.op(s, opcode.op.get_super);
+        }
         if (k == .dot) {
             const access_source = s.currentSourcePosition();
             try s.advance();
             const private_name = s.peekKind() == .private_name;
-            const raw_name = if (s.peekKind() == .ident or private_name)
-                s.token.payload.ident.atom
-            else if (s.peekKind().isKeyword())
-                s.peekKind().keywordAtom()
-            else if (s.peekKind() == .kw_delete)
-                Atom.fromRaw(9)
-            else if (s.peekKind() == .kw_catch)
-                Atom.fromRaw(25)
-            else
-                return s.failUnexpectedToken();
+            if (was_super and private_name) return s.failUnexpectedToken();
+            const raw_name = memberNameAtom(s) orelse return s.failUnexpectedToken();
             if (private_name and !s.class.in_body) return s.failUnexpectedToken();
             const private_atom = if (private_name) try classes.privateNameAtom(s, raw_name) else null;
             if (private_atom) |atom_id| {
@@ -1786,7 +1859,10 @@ fn parseNewCalleeMemberAccess(s: *State) Error!void {
             // its atom, then next_token releases that token. Keep the
             // same one-retain path instead of pinning a second temporary
             // atom across advance.
-            if (private_name) {
+            if (was_super) {
+                try Emitter.opAtom(s, opcode.op.push_atom_value, name);
+                try Emitter.op(s, opcode.op.get_super_value);
+            } else if (private_name) {
                 try Emitter.opAtomU16(s, opcode.op.scope_get_private_field, name, @intCast(s.scope_level));
             } else {
                 try Emitter.opAtom(s, opcode.op.get_field, name);
@@ -1798,32 +1874,26 @@ fn parseNewCalleeMemberAccess(s: *State) Error!void {
             try parseExpr(s);
             try s.expectToken(.rbracket);
             try emitter.emitGrammarSource(s, access_source);
-            try Emitter.op(s, opcode.op.get_array_el);
+            try Emitter.op(s, if (was_super) opcode.op.get_super_value else opcode.op.get_array_el);
         } else if (k == .template) {
             try parseTaggedTemplateInvocation(s);
+        } else if (k == .bang and s.typescript and !was_super and !s.gotLineTerminator()) {
+            // TypeScript non-null assertion `new K!<T>()` erases to `new K<T>()`.
+            try s.advance();
         } else {
             return;
         }
     }
 }
 
-fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?OptionalChainLabel) Error!void {
+fn parseMemberChain(s: *State, optional_chain_label: *?OptionalChainLabel) Error!void {
     while (true) {
         const k = s.peekKind();
         if (k == .dot) {
             const access_source = s.currentSourcePosition();
             try s.advance();
             const private_name = s.peekKind() == .private_name;
-            const raw_name = if (s.peekKind() == .ident or private_name)
-                s.token.payload.ident.atom
-            else if (s.peekKind().isKeyword())
-                s.peekKind().keywordAtom()
-            else if (s.peekKind() == .kw_delete)
-                Atom.fromRaw(9)
-            else if (s.peekKind() == .kw_catch)
-                Atom.fromRaw(25)
-            else
-                return s.failUnexpectedToken();
+            const raw_name = memberNameAtom(s) orelse return s.failUnexpectedToken();
             if (private_name and !s.class.in_body) return s.failUnexpectedToken();
             const private_atom = if (private_name) try classes.privateNameAtom(s, raw_name) else null;
             if (private_atom) |atom_id| {
@@ -1863,7 +1933,7 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
                 const call_col = s.token.col_num;
                 const prepared = try prepareCallReference(s, .normal, true);
                 try emitOptionalChainTest(s, optional_chain_label, prepared.optional_drop_count);
-                const shape = try parseCallArgs(s, flags);
+                const shape = try parseCallArgs(s);
                 try emitPreparedCall(s, prepared, shape, call_line, call_col);
             } else if (next == .lbracket) {
                 try emitOptionalChainTest(s, optional_chain_label, 1);
@@ -1872,22 +1942,12 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
                 try s.expectToken(.rbracket);
                 try emitter.emitGrammarSource(s, optional_source);
                 try Emitter.op(s, opcode.op.get_array_el);
-            } else if (next == .ident or next == .private_name or next.isKeyword() or next == .kw_delete or next == .kw_catch) {
+            } else if (memberNameAtom(s)) |raw_name| {
                 // qjs parse_property emits the `?.` source before the
                 // optional-chain test and the selected getter.
                 try emitter.emitGrammarSource(s, optional_source);
                 try emitOptionalChainTest(s, optional_chain_label, 1);
                 const private_name = next == .private_name;
-                const raw_name = if (next == .ident or private_name)
-                    s.token.payload.ident.atom
-                else if (next.isKeyword())
-                    next.keywordAtom()
-                else if (next == .kw_delete)
-                    Atom.fromRaw(9)
-                else if (next == .kw_catch)
-                    Atom.fromRaw(25)
-                else
-                    unreachable;
                 if (private_name and !s.class.in_body) return s.failUnexpectedToken();
                 const private_atom = if (private_name) try classes.privateNameAtom(s, raw_name) else null;
                 if (private_atom) |atom_id| {
@@ -1929,14 +1989,14 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
             if (was_super and !s.ctx.allow_super_call) return s.failUnexpectedToken();
             if (was_super) {
                 const super_locals = superCallLocals(s) orelse {
-                    try parseCapturedSuperConstructorCall(s, flags, .{ .line = callee_line, .col = callee_col });
+                    try parseCapturedSuperConstructorCall(s, .{ .line = callee_line, .col = callee_col });
                     continue;
                 };
                 try discardTrailingGetSuper(s);
                 try Emitter.opU16(s, opcode.op.get_loc, super_locals.active_func);
                 try Emitter.op(s, opcode.op.get_super);
                 try Emitter.opU16(s, opcode.op.get_loc, super_locals.new_target);
-                const shape = try parseCallArgs(s, flags);
+                const shape = try parseCallArgs(s);
                 switch (shape) {
                     .direct => |argc| try Emitter.opU16At(s, opcode.op.call_constructor, argc, callee_line, callee_col),
                     .applied => try Emitter.opU16At(s, opcode.op.apply, 1, callee_line, callee_col),
@@ -1947,16 +2007,16 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
                 continue;
             }
             const prepared = try prepareCallReference(s, .normal, false);
-            const shape = try parseCallArgs(s, flags);
+            const shape = try parseCallArgs(s);
             try emitPreparedCall(s, prepared, shape, callee_line, callee_col);
         } else if (k == .template) {
             if (optional_chain_label.* != null) return s.failUnexpectedToken();
             try parseTaggedTemplateInvocation(s);
-        } else if (k == .bang and !s.gotLineTerminator()) {
+        } else if (k == .bang and s.typescript and !s.gotLineTerminator()) {
             // TypeScript non-null assertion `x!` erases to `x`.
             if (s.last_was_super) return s.failUnexpectedToken();
             try s.advance();
-        } else if ((k == .lt or k == .shl) and !s.last_was_super) {
+        } else if ((k == .lt or k == .shl) and s.typescript and !s.last_was_super) {
             // TypeScript `f<T>(...)`, `f<T>\`...\``, or `f<T>`.
             if (!(try typescript.tsTryParseTypeArgumentsInExpression(s))) break;
         } else {
@@ -1973,7 +2033,7 @@ fn parseTaggedTemplateInvocation(s: *State) Error!void {
     const first_part = s.token.payload.str.template orelse return s.failUnexpectedToken();
     if (first_part == .no_substitution) {
         if (s.runtime) |rt| {
-            var builder = try TaggedTemplateObjectBuilder.init(rt);
+            var builder = try TaggedTemplateObjectBuilder.init(rt, templateArrayPrototype(s, rt));
             try builder.addPart(s.token.payload.str.bytes, s.token.payload.str.raw_bytes, s.token.payload.str.cooked_invalid);
             try builder.finish();
             try Emitter.pushConst(s, builder.template_value);
@@ -1990,7 +2050,7 @@ fn parseTaggedTemplateInvocation(s: *State) Error!void {
         return;
     }
 
-    var template_builder = if (s.runtime) |rt| try TaggedTemplateObjectBuilder.init(rt) else null;
+    var template_builder = if (s.runtime) |rt| try TaggedTemplateObjectBuilder.init(rt, templateArrayPrototype(s, rt)) else null;
     if (template_builder) |*builder| {
         try Emitter.pushConst(s, builder.template_value);
     } else {
@@ -2080,8 +2140,7 @@ fn emitOptionalChainTest(
 /// Parse a `(arg0, arg1, ...)` argument list and return the call shape.
 /// Caller consumed nothing yet — this consumes the leading `(` and the
 /// matching `)`.
-fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
-    _ = flags;
+fn parseCallArgs(s: *State) Error!CallArgsShape {
     try s.expectToken(.lparen);
     // Call arguments always parse with `PF_IN_ACCEPTED`
     // (`js_parse_assign_expr`, quickjs.c) — argument
@@ -2095,7 +2154,7 @@ fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
             break;
         }
         try parseAssignExpr2(s, arg_flags);
-        argc += 1;
+        argc = std.math.add(u16, argc, 1) catch return s.failWithMessage(null, "Too many call arguments");
         if (s.peekKind() == .comma) {
             try s.advance();
             continue;
@@ -2161,7 +2220,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
     defer compiled.deinit(s.scratch);
     // qjs compiles a literal once while parsing, stores the lre bytecode as
     // an 8-bit JSString constant, and lets OP_regexp share that immutable
-    // string with each fresh RegExp instance (quickjs.c,
+    // string with each fresh RegExp instance (quickjs.c).
     // ZJS used to discard this validation result and emit the
     // flags string, forcing the runtime constructor to compile on every
     // literal evaluation.
@@ -2175,9 +2234,29 @@ fn parseRegExpLiteral(s: *State) Error!void {
 
 /// Parse a primary expression. `js_parse_primary_expr` lives inside
 /// `js_parse_postfix_expr` in QuickJS.
-fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
-    const k = s.peekKind();
-    switch (k) {
+fn parsePrimary(s: *State) Error!void {
+    // The nesting arms stay in this small frame; the leaf arms live in
+    // `parsePrimaryLeaf`, whose inlined helpers would otherwise widen every
+    // level of a deeply nested literal or parenthesization.
+    switch (s.peekKind()) {
+        .lparen => {
+            try s.advance();
+            // Parenthesized group: mirrors `js_parse_expr_paren`
+            // -> `js_parse_expr` which parses
+            // with `PF_IN_ACCEPTED` set — grouping resets the
+            // for-init no-`in` restriction (and unary-context
+            // restrictions like the yield guard).
+            try parseExpr2(s, ParseFlags.default);
+            try s.expectToken(.rparen);
+        },
+        .lbracket => return parseArrayLiteral(s),
+        .lbrace => return parseObjectLiteral(s),
+        else => return parsePrimaryLeaf(s),
+    }
+}
+
+noinline fn parsePrimaryLeaf(s: *State) Error!void {
+    switch (s.peekKind()) {
         .number => {
             const value = s.token.payload.num.value;
             // Encode small integers with push_i32 to match QuickJS.
@@ -2198,7 +2277,7 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
             try s.advance();
         },
         .slash, .div_assign => try parseRegExpLiteral(s),
-        .template => return parseTemplate(s, flags),
+        .template => return parseTemplate(s),
         .kw_true => {
             try Emitter.op(s, opcode.op.push_true);
             try s.advance();
@@ -2221,6 +2300,11 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
             // Emit get_super; runtime semantics depend on constructor context.
             try Emitter.op(s, opcode.op.get_super);
             try s.advance();
+            // `super` exists only as SuperCall / SuperProperty (§13.3).
+            switch (s.peekKind()) {
+                .lparen, .dot, .lbracket => {},
+                else => return s.failUnexpectedToken(),
+            }
             s.last_was_super = true;
         },
         .kw_import => {
@@ -2241,7 +2325,7 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
                 s.last_was_super = false;
                 return;
             }
-            try parseDynamicImportCall(s, flags);
+            try parseDynamicImportCall(s);
             s.last_was_super = false;
         },
         .kw_class => {
@@ -2302,13 +2386,13 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
             }
             const ident = identifiers.identifierLikeAtom(s);
             if (ident == atom_module.ids.arguments and identifiers.argumentsIdentifierIsForbidden(s)) {
-                return s.failUnexpectedToken();
+                return s.failWithMessage(null, "'arguments' is not allowed in class field initializer or static initialization block");
             }
             // Identifier production is independent of its consumer.
             // Assignment and call sites rewrite this exact last opcode
             // after the complete operand has been parsed.
             try emitter.emitGrammarSource(s, s.currentSourcePosition());
-            try s.emitScopeGetVar(ident);
+            try typescript.emitIdentifierReference(s, ident);
             try s.advance();
             s.last_was_super = false;
         },
@@ -2319,31 +2403,11 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
             try s.advance();
             s.last_was_super = false;
         },
-        else => {
-            if (k == .lparen) {
-                try s.advance();
-                // Parenthesized group: mirrors `js_parse_expr_paren`
-                // -> `js_parse_expr` which parses
-                // with `PF_IN_ACCEPTED` set — grouping resets the
-                // for-init no-`in` restriction (and unary-context
-                // restrictions like the yield guard).
-                try parseExpr2(s, ParseFlags.default);
-                try s.expectToken(.rparen);
-                return;
-            }
-            if (k == .lbracket) {
-                return parseArrayLiteral(s, flags);
-            }
-            if (k == .lbrace) {
-                return parseObjectLiteral(s, flags);
-            }
-            return s.failUnexpectedToken();
-        },
+        else => return s.failUnexpectedToken(),
     }
 }
 
-fn parseDynamicImportCall(s: *State, flags: ParseFlags) Error!void {
-    _ = flags;
+fn parseDynamicImportCall(s: *State) Error!void {
     s.features.insert(.dynamic_import);
     try s.advance();
     try s.expectToken(.lparen);
@@ -2380,8 +2444,7 @@ fn parseDynamicImportCall(s: *State, flags: ParseFlags) Error!void {
 /// only content, where depth==0 forces an emit). Tagged templates
 /// (`tag\`...\``) and lazy raw-string evaluation follow the `call=1`
 /// branch in `js_parse_template`.
-fn parseTemplate(s: *State, flags: ParseFlags) Error!void {
-    _ = flags;
+fn parseTemplate(s: *State) Error!void {
     var depth: u16 = 0;
     while (s.peekKind() == .template) {
         const part_payload = s.token.payload.str;
@@ -2401,7 +2464,7 @@ fn parseTemplate(s: *State, flags: ParseFlags) Error!void {
                 const concat_atom = try s.atoms.internString("concat");
                 try Emitter.opAtom(s, opcode.op.get_field2, concat_atom);
             }
-            depth += 1;
+            depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, "too many template substitutions");
         }
 
         if (part == .tail) {
@@ -2413,7 +2476,7 @@ fn parseTemplate(s: *State, flags: ParseFlags) Error!void {
         // resume template lexing after the closing `}`.
         try s.advance(); // consume head/middle TOK_TEMPLATE
         try parseExpr(s);
-        depth += 1;
+        depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, "too many template substitutions");
         if (s.peekKind() != .rbrace) return s.failExpectedToken(.rbrace);
         // The lookahead `}` has already moved lex.pos one byte past it;
         // free the token and ask the lexer for the next template part
@@ -2437,11 +2500,24 @@ fn emitTaggedTemplateSingletonObject(s: *State, bytes: []const u8, raw_bytes: []
     try Emitter.opAtom(s, opcode.op.define_field, raw_name);
 }
 
-fn realmArrayPrototype(rt: *core.JSRuntime) ?*core.Object {
-    if (rt.context_head) |ctx| {
+/// GetTemplateObject: the template arrays inherit from the current realm's
+/// %Array.prototype%. The site object is a constant of code compiled for one
+/// realm, so that realm is the compile realm -- not whichever context happens
+/// to head the runtime's list.
+fn templateArrayPrototype(s: *State, rt: *core.JSRuntime) ?*core.Object {
+    if (s.realm) |realm| {
+        if (realm.array_shape) |initial| return initial.proto;
+        return realm.classPrototypeObject(core.class.ids.array);
+    }
+    return harnessArrayPrototype(rt);
+}
+
+/// Realm-less parser harnesses: any live realm's prototype.
+fn harnessArrayPrototype(rt: *core.JSRuntime) ?*core.Object {
+    if (rt.contexts.live_head) |ctx| {
         if (ctx.array_shape) |initial| return initial.proto;
     }
-    if (rt.constructing_context_head) |ctx| {
+    if (rt.contexts.constructing_head) |ctx| {
         if (ctx.array_shape) |initial| return initial.proto;
     }
     return null;
@@ -2463,12 +2539,7 @@ const TaggedTemplateObjectBuilder = struct {
     /// still produces the right answer.
     pub var force_gc_in_window_for_test: bool = false;
 
-    pub fn init(rt: *core.JSRuntime) Error!TaggedTemplateObjectBuilder {
-        // qjs js_parse_template builds the cooked/raw arrays with
-        // JS_NewArray — realm Array.prototype.
-        // After deleting the Get miss fallback, a null proto makes
-        // `strings.map` in assert.deepEqual.format a TypeError.
-        const prototype = realmArrayPrototype(rt);
+    pub fn init(rt: *core.JSRuntime, prototype: ?*core.Object) Error!TaggedTemplateObjectBuilder {
         // A fresh array with the realm's Array prototype cannot fail with
         // anything but OutOfMemory; the other arms are runtime invariants.
         const template_object = core.Object.createArray(rt, prototype) catch |err| return runtimeInvariantToParser(err);
@@ -2478,7 +2549,7 @@ const TaggedTemplateObjectBuilder = struct {
 
         const raw_value = raw_array.value();
         const raw_atom = atom_module.ids.raw;
-        template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, .none)) catch return Error.ParserInvariant;
+        template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, .none)) catch |err| return runtimeInvariantToParser(err);
         return .{
             .rt = rt,
             .template_value = template_object.value(),
@@ -2495,27 +2566,27 @@ const TaggedTemplateObjectBuilder = struct {
         cooked_invalid: bool,
     ) Error!void {
         const cooked_value = if (cooked_invalid) core.JSValue.undefinedValue() else blk: {
-            const cooked = core.string.String.createUtf8(self.rt, cooked_bytes) catch return Error.InvalidUtf8;
+            const cooked = core.string.String.createUtf8(self.rt, cooked_bytes) catch |err| return templateStringError(err);
             break :blk cooked.value();
         };
         self.template_object.defineOwnProperty(
             self.rt,
             core.Atom.taggedInt(self.depth),
             core.Descriptor.data(cooked_value, .all),
-        ) catch return Error.ParserInvariant;
+        ) catch |err| return runtimeInvariantToParser(err);
 
         if (comptime @import("builtin").is_test) {
             if (force_gc_in_window_for_test) {
                 _ = self.rt.forceGC(null) catch {};
             }
         }
-        const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch return Error.InvalidUtf8;
+        const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch |err| return templateStringError(err);
         const raw_value = raw.value();
         self.raw_array.defineOwnProperty(
             self.rt,
             core.Atom.taggedInt(self.depth),
             core.Descriptor.data(raw_value, .all),
-        ) catch return Error.ParserInvariant;
+        ) catch |err| return runtimeInvariantToParser(err);
         self.depth += 1;
     }
 
@@ -2525,15 +2596,25 @@ const TaggedTemplateObjectBuilder = struct {
     }
 };
 
+/// Leading elements an array literal collects on the operand stack before
+/// switching to running-index mode.
+const max_stacked_array_elements = 16384;
+
+/// Switch from collect-then-array_from to running-index mode: build the
+/// array from the `count` stacked elements and push `count` as the index.
+fn beginRunningArrayLiteral(s: *State, count: u16) Error!void {
+    try Emitter.opU16(s, opcode.op.array_from, count);
+    try Emitter.opI32(s, opcode.op.push_i32, count);
+}
+
 /// `js_parse_array_literal`. The QuickJS strategy
 /// switches dynamically: leading
 /// non-spread elements collect into an `array_from <count>`; on the
 /// first spread, the parser pushes `<count>` as the running index,
 /// then alternates between `define_array_el; inc` (for plain entries)
-/// and `append` (for spread entries). The trailing `drop` removes
-/// the index, leaving the constructed array on the stack.
-fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
-    _ = flags;
+/// and `append` (for spread entries); a long literal switches the same way.
+/// The final index is stored as `length`, leaving the array on the stack.
+fn parseArrayLiteral(s: *State) Error!void {
     try s.advance(); // consume '['
     var count: u16 = 0;
     var sparse_active = false;
@@ -2560,11 +2641,14 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
         if (s.peekKind() == .ellipsis) {
             s.features.insert(.spread_rest);
             if (!spread_active) {
-                // Switch from collect-then-array_from to running-array
-                // mode. Emit array_from on the leading elements and push
-                // <count> as the initial index.
-                try Emitter.opU16(s, opcode.op.array_from, count);
-                try Emitter.opI32(s, opcode.op.push_i32, @intCast(count));
+                if (sparse_active) {
+                    // The sparse array is already on the stack; continue it
+                    // as a running literal from the next index.
+                    try Emitter.opI32(s, opcode.op.push_i32, @intCast(sparse_index));
+                    sparse_active = false;
+                } else {
+                    try beginRunningArrayLiteral(s, count);
+                }
                 spread_active = true;
             }
             try s.advance();
@@ -2574,6 +2658,12 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
             try parseAssignExpr2(s, ParseFlags.default);
             try Emitter.op(s, opcode.op.append);
         } else {
+            // A long literal stops collecting on the operand stack, whose
+            // depth and element count are both bounded.
+            if (!spread_active and !sparse_active and count == max_stacked_array_elements) {
+                try beginRunningArrayLiteral(s, count);
+                spread_active = true;
+            }
             try parseAssignExpr2(s, ParseFlags.default);
             if (spread_active) {
                 try Emitter.op(s, opcode.op.define_array_el);
@@ -2609,7 +2699,7 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
 
 /// `js_parse_object_literal`. Supports ordinary,
 /// shorthand, computed, method, accessor, spread, and `__proto__` forms.
-fn parseObjectLiteral(s: *State, flags: ParseFlags) Error!void {
+fn parseObjectLiteral(s: *State) Error!void {
     try s.advance(); // consume '{'
     // qjs js_parse_object_literal starts with OP_object
     const object_opcode_pos = s.activeBuilder().code_len;
@@ -2618,7 +2708,7 @@ fn parseObjectLiteral(s: *State, flags: ParseFlags) Error!void {
     var capacity_hint = ObjectLiteralCapacityHint{};
     if (s.peekKind() != .rbrace) {
         while (true) {
-            try parseObjectProperty(s, flags, &proto_field_seen, &capacity_hint);
+            try parseObjectProperty(s, &proto_field_seen, &capacity_hint);
             if (s.peekKind() == .comma) {
                 try s.advance();
                 if (s.peekKind() == .rbrace) break;
@@ -2656,13 +2746,37 @@ const ObjectLiteralCapacityHint = struct {
     }
 };
 
+/// The name and function of an object-literal method after its `*`,
+/// `async` or `async *` prefix.
+fn parsePrefixedObjectMethod(
+    s: *State,
+    func_kind: ParseFunctionKind,
+    capacity_hint: *ObjectLiteralCapacityHint,
+    property_source_start: FunctionSourceStart,
+) Error!void {
+    if (s.peekKind() == .lbracket) {
+        capacity_hint.invalidate();
+        try s.advance();
+        try parseAssignExpr2(s, ParseFlags.default);
+        try s.expectToken(.rbracket);
+        if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
+        try parseObjectMethodFunction(s, null, func_kind, property_source_start);
+        try Emitter.opU8(s, opcode.op.define_method_computed, 4);
+        return;
+    }
+    const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
+    const name = name_info.atom;
+    capacity_hint.noteStaticProperty(name);
+    if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
+    try parseObjectMethodFunction(s, null, func_kind, property_source_start);
+    try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
+}
+
 fn parseObjectProperty(
     s: *State,
-    flags: ParseFlags,
     proto_field_seen: *bool,
     capacity_hint: *ObjectLiteralCapacityHint,
 ) Error!void {
-    _ = flags;
     const k = s.peekKind();
     const property_source_start = s.currentFunctionSourceStart();
     // Property keys/values always parse with `PF_IN_ACCEPTED`
@@ -2685,23 +2799,7 @@ fn parseObjectProperty(
 
     if (k == .star) {
         try s.advance();
-        if (s.peekKind() == .lbracket) {
-            capacity_hint.invalidate();
-            try s.advance();
-            try parseAssignExpr2(s, computed_flags);
-            try s.expectToken(.rbracket);
-            if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-            try parseObjectMethodFunction(s, null, .generator, property_source_start);
-            try Emitter.opU8(s, opcode.op.define_method_computed, 4);
-            return;
-        }
-        const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
-        const name = name_info.atom;
-        capacity_hint.noteStaticProperty(name);
-        if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-        try parseObjectMethodFunction(s, null, .generator, property_source_start);
-        try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
-        return;
+        return parsePrefixedObjectMethod(s, .generator, capacity_hint, property_source_start);
     }
 
     if (k == .ident and s.isIdent("async") and
@@ -2717,23 +2815,7 @@ fn parseObjectProperty(
             try s.advance();
             break :blk .async_generator;
         } else .async;
-        if (s.peekKind() == .lbracket) {
-            capacity_hint.invalidate();
-            try s.advance();
-            try parseAssignExpr2(s, computed_flags);
-            try s.expectToken(.rbracket);
-            if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-            try parseObjectMethodFunction(s, null, func_kind, property_source_start);
-            try Emitter.opU8(s, opcode.op.define_method_computed, 4);
-            return;
-        }
-        const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
-        const name = name_info.atom;
-        capacity_hint.noteStaticProperty(name);
-        if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-        try parseObjectMethodFunction(s, null, func_kind, property_source_start);
-        try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
-        return;
+        return parsePrefixedObjectMethod(s, func_kind, capacity_hint, property_source_start);
     }
 
     // Computed property name: [expr]: value
@@ -2762,10 +2844,12 @@ fn parseObjectProperty(
         const is_getter = !name_info.has_escape and identifiers.atomNameEquals(s, name, "get");
         const is_setter = !name_info.has_escape and identifiers.atomNameEquals(s, name, "set");
         // qjs js_parse_property_name retreats to a shorthand ident when
-        // the next token is `:`, `,`, `}`, `(`, or `=`.
+        // the next token is `:`, `,`, `}`, `(`, or `=`; a TypeScript type
+        // parameter list (`get<T>() {}`) also names a plain method.
         if ((is_getter or is_setter) and
             s.peekKind() != .colon and
             s.peekKind() != .lparen and
+            s.peekKind() != .lt and
             s.peekKind() != .comma and
             s.peekKind() != .rbrace)
         {
@@ -2781,7 +2865,7 @@ fn parseObjectProperty(
             try s.advance();
             try parseAssignExpr2(s, ParseFlags.default);
             if (name_info.is_proto) {
-                if (proto_field_seen.*) return s.failUnexpectedToken();
+                if (proto_field_seen.*) return s.failWithMessage(null, "duplicate __proto__ property in object literal");
                 proto_field_seen.* = true;
                 try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.set_proto);
             } else {
@@ -2798,7 +2882,10 @@ fn parseObjectProperty(
             // Shorthand `{ x }` is an ordinary identifier read. Keep the
             // producer uniform and let scope resolution decide whether a
             // surrounding with-object supplies the value.
-            try s.emitScopeGetVar(name);
+            if (name == atom_module.ids.arguments and identifiers.argumentsIdentifierIsForbidden(s)) {
+                return s.failWithMessage(null, "'arguments' is not allowed in class field initializer or static initialization block");
+            }
+            try typescript.emitIdentifierReference(s, name);
             try Emitter.opAtom(s, opcode.op.define_field, name);
         } else {
             return s.failUnexpectedToken();
@@ -2858,8 +2945,10 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
         try s.advance();
     } else if (k.isKeyword()) {
         atom_id = k.keywordAtom();
-        allow_shorthand = (k == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
-            (k == .kw_let and !(s.is_strict or s.curFunc().is_strict_mode));
+        const strict = s.is_strict or s.curFunc().is_strict_mode;
+        // Sloppy code may use the strict-reserved words as shorthand names.
+        allow_shorthand = (k == .kw_yield and !s.ctx.in_generator and !strict) or
+            (!strict and (k == .kw_let or k == .kw_static or identifiers.isSloppyFutureReservedToken(k)));
         try s.advance();
     } else if (k == .string) {
         atom_id = try s.atoms.internString(s.token.payload.str.bytes);
@@ -2888,6 +2977,10 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
 /// Runtime object operations on parser-owned fresh objects can only run
 /// out of memory; any other error is a broken invariant, not a verdict on
 /// the source program.
+fn templateStringError(err: anyerror) Error {
+    return if (err == error.OutOfMemory) Error.OutOfMemory else Error.InvalidUtf8;
+}
+
 fn runtimeInvariantToParser(err: anyerror) Error {
     return switch (err) {
         error.OutOfMemory => Error.OutOfMemory,

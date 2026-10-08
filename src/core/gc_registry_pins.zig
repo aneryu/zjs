@@ -15,7 +15,7 @@
 //! what freed `BlockFlags` bit 6 for `needs_finalizer`.
 //!
 //! The ledger does not own an allocator. Every fallible mutator takes the
-//! runtime's `Runtime allocation helpers` as a parameter: a second copy of that pointer
+//! runtime's allocation account as a parameter: a second copy of that pointer
 //! inside every `JSRuntime` would buy nothing, and the Registry is the thing
 //! that has one. One insertion-ordered hash map holds both the membership
 //! index and the counts, so the sweep's "is this pinned?" is a single lookup

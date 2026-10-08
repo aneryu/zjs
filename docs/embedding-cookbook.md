@@ -65,7 +65,7 @@ const object = try ctx.eval("({ answer: 42 })", .{});
 var scope = rt.enterHandleScope();
 defer scope.deinit();
 
-const local = try scope.localDup(object);
+const local = try scope.local(object);
 
 var persistent = try rt.createPersistentValue(local.get());
 defer persistent.deinit();
@@ -132,11 +132,13 @@ What the example relies on:
   invocation.
 - Returning a Zig error becomes a catchable JS exception: `TypeError`,
   `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`
-  map to that class; `error.JSException` means the function already threw
-  (`c.throwTypeError("...")` / `c.throwError(name, message)` install the
-  exception and return it); `OutOfMemory`, `Interrupted`, `Timeout`,
-  `StackOverflow` are engine sentinels; any other error name becomes
-  `Error: <name>`. A function that returns plain `Value` cannot fail.
+  map to that class (`EvalError` with an empty message); `error.JSException`
+  means the function already threw (`c.throwTypeError("...")` /
+  `c.throwError(name, message)` install the exception and return it);
+  `OutOfMemory`, `Interrupted`, `Timeout`, `StackOverflow`, `ProcessExit`
+  and `UnhandledPromiseRejection` are engine sentinels; any other error name
+  becomes `Error: <name>` (see the
+  [public API contract](public-api-contract.md) for the full mapping). A function that returns plain `Value` cannot fail.
 - `defineFunction` installs the function on the global as a writable,
   non-enumerable, configurable property and returns it. `createFunction`
   builds the same function object without installing it -- attach it
@@ -189,13 +191,16 @@ holding `Value`s are:
   host must not keep the object alive) and is released with `deinit` before
   the runtime is destroyed. A persistent handle pins a value for
   you until `deinit`.
-- A handle scope (`rt.enterHandleScope()` / `scope.localDup`) is the bounded
+- A handle scope (`rt.enterHandleScope()` / `scope.local`) is the bounded
   form for a batch of values inside one host operation.
 
 ## Strings And Bytes
 
-`asString()` is a tag check. It does not run JavaScript conversion. Use
-`ctx.toOwnedUtf8` for ECMAScript `ToString` semantics.
+`asString()` does not run JavaScript conversion, but it is not a pure tag
+check: a rope is materialized, which may allocate and collect, so keep the
+value rooted while you use the view. `String.fromFlatValue` is the pure
+projection (null for a rope). Use `ctx.toOwnedUtf8` for ECMAScript
+`ToString` semantics.
 
 ```zig
 const value = try ctx.eval("({ toString() { return 'path'; } })", .{});
@@ -274,9 +279,17 @@ defer rt.setInterruptHandler(null, null);
 ```
 
 The interrupt hook is cooperative. It is a progress guard for trusted code, not
-a security boundary for untrusted JavaScript. JS loops and function entries
-poll it; a native function call itself does not, and `callFunction` polls
-once on entry.
+a security boundary for untrusted JavaScript. JS loops, function entries,
+and the engine's long native work (builtins over large inputs, parsing and
+compiling, `Atomics.wait`) poll it; `callFunction` polls once on entry. Your
+own native functions are not polled while they run.
+
+JavaScript cannot catch an interruption, but one raised inside an async
+function body or a promise job settles that promise as rejected with
+`InternalError: interrupted` (as in QuickJS) instead of returning
+`error.Interrupted` to the host: `eval("(async () => { for(;;){} })(); 1")`
+returns `1`, and `runJobs` continues with the next job. To stop everything,
+use `terminateExecution`, which discards the remaining jobs.
 
 ## Module Eval
 
@@ -288,3 +301,14 @@ const result = try ctx.eval(
     .{ .mode = .module },
 );
 ```
+
+`ctx.eval` runs top-level `await` to completion before returning. Without a
+loader it evaluates one self-contained module, and a static `import` fails
+with `error.JSException`; the pending exception names the missing module. Install a `zjs.ModuleSourceLoader` with
+`ctx.setModuleSourceLoader(&loader)` (QuickJS `JS_SetModuleLoaderFunc`) and
+`eval(.module)` links the whole graph: the loader resolves and reads every
+static `import` and every `import()`, and `options.filename` names the root
+module for relative specifiers. A filename names one module per Context: a
+second `eval(.module)` under a loaded filename throws a `TypeError`, so give
+new module source a new filename. The loader and its `ptr` must outlive the
+Context; `tests/embedding_examples.zig` has an in-memory loader.

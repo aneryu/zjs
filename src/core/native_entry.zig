@@ -9,9 +9,8 @@
 //!
 //! Lifetime: an entry is never freed before its runtime dies. Builtin
 //! entries are comptime rodata; host entries live in the runtime's entry
-//! arena. Retiring an entry rewrites `kind = .retired` in place (tombstone),
-//! so a call-site cache that compares `func_obj.entry == cached` on a live
-//! object can never reach freed memory.
+//! arena, so a call-site cache that compares `func_obj.entry == cached` on a
+//! live object can never reach freed memory. `.retired` marks table gaps.
 
 const std = @import("std");
 const atom = @import("atom.zig");
@@ -71,7 +70,11 @@ pub const Flags = packed struct(u8) {
     /// dispatcher must pad the operand window with `undefined`.
     /// Legacy bodies take an exact slice and leave this clear.
     pad_args: bool = false,
-    _pad: u5 = 0,
+    /// An embedder function created constructible (`with_prototype` or
+    /// `constructor`): IsConstructor is fixed when the function is created
+    /// (§10.3), not read from a later `prototype` property.
+    host_constructor: bool = false,
+    _pad: u4 = 0,
 };
 
 /// JIT scheduling annotation; same meaning as the engine plan's

@@ -220,7 +220,7 @@ v2 的 retain→publish→release Slot 序随 rc 一起退役。现行协议:
      reserve 之前。
    - **bulk 写记忆 owner**。
 4. 绕过这些入口直写堆引用字段(无屏障)= 契约违规;检出机制是
-   `ZJS_MINOR_AUDIT`(`UNBARRIERED-STORE` 报告,`gc.zig`)与
+   `ZJS_GC_AUDIT`(`UNBARRIERED-STORE` 报告,`gc.zig`)与
    `ZJS_GC_VERIFY_MINOR`。
 
 ## 3. 屏障形状
@@ -314,7 +314,7 @@ values, objects, headers, atoms }`;**生产只链接 container/window 帧**
   **每个裸 atom id 的持有者必须由拥有它的权威 trace 报告 `visitAtom`**
   (shape 属性 atom、FunctionBytecode 名与 var-ref 名经
   `atomOperandIterator`、module 记录、`CompileAtomScope`)。
-- 成员列表不是根(`context_head` 等回答「谁拥有」不是「是否存活」);
+- 成员列表不是根(`contexts.live_head` 等回答「谁拥有」不是「是否存活」);
   realm 只在 host create-ref 未消费时是根。
 
 ## 5. 对 engine plan 各阶段的约束落点

@@ -13,10 +13,8 @@ const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
-const error_stack_ops = @import("exception_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const module_mod = @import("module.zig");
-const module_graph = @import("module.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const property_ops = @import("property_ops.zig");
@@ -45,12 +43,15 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
 /// it lands in. That frame must not be the one the interpreter runs under.
 noinline fn resolveModuleName(ctx: *core.JSContext, options: core.context.ContextEvalOptions) !core.Atom {
     if (options.mode != .module) return core.atom.null_atom;
+    if (!std.mem.eql(u8, options.filename, "<eval>")) return ctx.runtime.internAtom(options.filename);
+    // An unnamed module gets the first free `<eval>#N`, so it never meets a
+    // record an embedder named that way.
     var module_name_buf: [64]u8 = undefined;
-    const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
-        std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count}) catch unreachable
-    else
-        options.filename;
-    return ctx.runtime.internAtom(module_name_bytes);
+    var index = ctx.modules.count();
+    while (true) : (index += 1) {
+        const name = try ctx.runtime.internAtom(std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{index}) catch unreachable);
+        if (ctx.modules.find(name) == null) return name;
+    }
 }
 
 /// Everything `eval` needs from the compile phase, and nothing that phase
@@ -87,6 +88,23 @@ noinline fn prepareRootFunction(
     const rt = ctx.runtime;
     var prepared: PreparedRoot = .{};
 
+    // Parse-time constants take realm intrinsics (template objects inherit
+    // %Array.prototype%), so a lazily created global must exist first.
+    const global = try zjs_vm.contextGlobal(ctx);
+    // A module record is its filename: evaluating another source under a
+    // name already loaded (by eval or import) would silently reuse the old
+    // record instead.
+    if (module_name != core.atom.null_atom and ctx.modules.find(module_name) != null) {
+        const message = try std.fmt.allocPrint(rt.nativeAllocator(), "module '{s}' is already loaded; evaluate new module source under a new filename", .{options.filename});
+        defer rt.nativeAllocator().free(message);
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, message);
+        return error.TypeError;
+    }
+    // A module's parsed record names are rooted here from the compile until
+    // the install has copied them into the module record.
+    var record_atoms = core.atom.CompileAtomScope.init(rt.atoms, rt);
+    defer record_atoms.deinit();
+    if (options.mode == .module) try record_atoms.activate();
     var compile_timing: bytecode.CompileTiming = .{};
     const compile_start = if (options.timing != null) ctx.runtime.diagnosticNanos() else 0;
     var compiled = try parser.compile(.{
@@ -114,7 +132,6 @@ noinline fn prepareRootFunction(
     // See the doc comment: safe to release before the VM runs.
     defer compiled.deinit();
     if (compiled.syntax_error) |*err| {
-        const global = try zjs_vm.contextGlobal(ctx);
         // Compile-error surface: message is the bare parse diagnostic and the
         // error carries own fileName/lineNumber/columnNumber plus the leading
         // `at file:line:col` stack line (qjs JS_ThrowSyntaxError +
@@ -122,7 +139,7 @@ noinline fn prepareRootFunction(
         const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
         // Always an error return; the `!JSValue` signature is for the other
         // call sites.
-        _ = try error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
+        _ = try exception_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
         return error.SyntaxError;
     }
     prepared.first_execute_start = if (options.mode != .module and options.timing != null)
@@ -144,14 +161,14 @@ noinline fn prepareRootFunction(
             .unlinked => {
                 var diagnostic: module_mod.LinkDiagnostic = .{};
                 module_mod.linkModule(ctx, record, &diagnostic) catch |err| {
-                    try module_graph.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
-                    return module_graph.moduleResolutionError(err);
+                    try module_mod.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
+                    return module_mod.moduleResolutionError(err);
                 };
                 if (record.status != .linked) return error.InvalidBytecode;
                 prepared.should_evaluate_module = true;
             },
             .linked => prepared.should_evaluate_module = true,
-            .evaluating, .evaluated => {},
+            .evaluating, .evaluating_async, .evaluated => {},
             .errored => {
                 const exception = record.eval_exception orelse return error.InvalidBytecode;
                 _ = ctx.throwValue(exception);
@@ -200,7 +217,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // outermost base. Doing it here — on the thread that will run the parser and
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
-    if (ctx.runtime.call_depth == 0) rt.updateNativeStackTop();
+    if (ctx.runtime.stack.call_depth == 0) rt.updateNativeStackTop();
     // R1-b: the compile and diagnostic phase runs in ITS OWN native frames.
     //
     // R3 ranked this function's frame first in the whole engine (158,240
@@ -239,7 +256,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         record.status = .evaluating;
         errdefer if (record.status == .evaluating) {
             record.status = .errored;
-            if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception);
+            if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.exception.value);
         };
         const value = try runEvalModule(ctx, record, options.output, options.timing);
         if (record.status == .evaluating) record.status = .evaluated;
@@ -323,10 +340,6 @@ noinline fn drainAndFinish(
     result: core.JSValue,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    // The completion value is owned here while the post-run steps below can
-    // still fail (e.g. OOM while draining promise jobs); release it on every
-    // error exit (found by test-oom injection).
-
     // The VM invocation has been torn down, but the owned completion remains
     // live across context/global lookup and the post-run Job drain. Publish
     // that one native handoff value as a window: scalar ValueRootScopes are
@@ -373,11 +386,9 @@ fn runEvalModule(
             output,
             module_state,
             resume_value,
-        ) catch |err| return module_graph.moduleResolutionError(err);
+        ) catch |err| return module_mod.moduleResolutionError(err);
         if (timing) |item| item.vm_run_ns += ctx.runtime.diagnosticElapsedSince(vm_start);
-        if (resume_value) |_| {
-            resume_value = null;
-        }
+        resume_value = null;
 
         if (module_state.generatorJustYielded() and !module_state.generatorDone()) {
             const await_resume = try waitForModuleAwaitReaction(
@@ -411,7 +422,7 @@ fn waitForModuleAwaitReaction(
 ) !ModuleAwaitResume {
     const rt = ctx.runtime;
     const global = try zjs_vm.contextGlobal(ctx);
-    const reaction_value = try module_graph.createModuleAwaitReactionPromise(
+    const reaction_value = try module_mod.createModuleAwaitReactionPromise(
         rt,
         ctx,
         output,
@@ -445,10 +456,7 @@ fn waitForModuleAwaitReaction(
 
     const rejected = reaction.promiseIsRejected();
     if (rejected) core.promise.markHandled(ctx, reaction);
-    const settled = reaction.promiseResult() orelse {
-        _ = try exception_ops.throwModuleHostStall(ctx, global);
-        unreachable;
-    };
+    const settled = reaction.promiseResult().?; // the loop above exits only once settled
     return .{
         .value = settled,
         .rejected = rejected,
@@ -473,16 +481,13 @@ fn parserMode(mode: core.context.EvalMode) parser.Mode {
     };
 }
 
-// Eval compile wrappers (moved from the dissolved exec/eval.zig).
-
-// ----- merged from eval_ops.zig -----
-// Direct/indirect eval execution, compiler seed construction and indexed cell setup.
+// ----- Direct/indirect eval execution, compiler seed construction and indexed cell setup -----
 const frame_mod = @import("frame.zig");
 const inline_calls = @import("inline_calls.zig");
 const op = bytecode.opcode.op;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const array_ops = @import("array_ops.zig");
-const HostError = @import("exception_ops.zig").HostError;
+const HostError = exception_ops.HostError;
 const InlineCallRequest = call_runtime.InlineCallRequest;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const appendSourceStringUtf8 = string_ops.appendSourceStringUtf8;
@@ -533,13 +538,10 @@ const DirectEvalClosureSeed = struct {
 };
 fn createDirectEvalClosureSeed(
     rt: *core.JSRuntime,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
     eval_scope_head: i32,
 ) !DirectEvalClosureSeed {
-    const function = caller_function orelse return .{};
-    const frame = caller_frame orelse return .{};
-
     var seeds = std.ArrayList(parser.EvalClosureSeed).empty;
     errdefer seeds.deinit(rt.nativeAllocator());
 
@@ -566,8 +568,14 @@ fn createDirectEvalClosureSeed(
     const is_arg_scope = chain_index == bytecode.function_bytecode.arg_scope_end;
 
     if (!is_arg_scope) {
+        // Last first: of duplicate parameter names the last one is the
+        // binding (FunctionDeclarationInstantiation), and lookup takes the
+        // first matching seed.
         const arg_count = @min(function.argVarDefs().len, frame.args.len);
-        for (function.argVarDefs()[0..arg_count], 0..) |arg, arg_index| {
+        var arg_index = arg_count;
+        while (arg_index > 0) {
+            arg_index -= 1;
+            const arg = function.argVarDefs()[arg_index];
             try appendEvalClosureSeed(rt, &seeds, arg.var_name, .arg, @intCast(arg_index), false, false, .normal);
         }
         for (locals, 0..) |vd, local_index| {
@@ -609,41 +617,29 @@ fn createDirectEvalClosureSeed(
     return .{ .values = owned, .is_arg_scope = is_arg_scope };
 }
 
-/// The direct-eval frame's view of an outer var_ref slot. Normally the slot
-/// cell itself (rc++). For a read-only closure var whose shared cell
-/// carries no const flag — a module import slot directly aliases the
-/// EXPORTING module's live cell (qjs js_inner_module_linking form,
-/// quickjs.c) and must not have importer-side const-ness stamped
-/// Direct eval shares the exact outer cell. Read-only semantics belong to the
-/// eval bytecode's ClosureVar descriptor (checked by execPutVarRef), not to a
+/// The direct-eval frame's view of an outer var_ref slot: the exact outer
+/// cell, even for a read-only closure var whose shared cell carries no const
+/// flag (a module import slot aliases the EXPORTING module's live cell, qjs
+/// js_inner_module_linking form). Read-only semantics belong to the eval
+/// bytecode's ClosureVar descriptor (checked by execPutVarRef), not to a
 /// wrapper cell that would give one binding two runtime identities.
 fn directEvalOuterVarRefView(
-    ctx: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     idx: usize,
 ) !*core.VarRef {
-    _ = ctx;
     if (idx >= function.closureVar().len or idx >= frame.var_refs.len) return error.InvalidBytecode;
     return frame.var_refs[idx];
-}
-
-fn ownedCellFromValue(_: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
-    return core.VarRef.fromValue(owned) orelse {
-        return error.InvalidBytecode;
-    };
 }
 
 fn directEvalSeedFrameVarRef(
     ctx: *core.JSContext,
     global: *core.Object,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    outer_function: *const bytecode.FunctionBytecode,
+    outer_frame: *frame_mod.Frame,
     eval_global_var_bindings: bool,
     cv: bytecode.function_bytecode.BytecodeClosureVar,
 ) !*core.VarRef {
-    const outer_function = caller_function orelse return error.InvalidBytecode;
-    const outer_frame = caller_frame orelse return error.InvalidBytecode;
     return switch (cv.closureType()) {
         .local => blk: {
             const local_idx: usize = cv.var_idx;
@@ -655,10 +651,7 @@ fn directEvalSeedFrameVarRef(
                 call_runtime.globalLexicalHasForGlobal(ctx, global, vd.var_name) and
                 directEvalVisibleLocalNameCount(ctx.runtime, outer_vardefs[0..@min(outer_vardefs.len, outer_frame.locals.len)], vd.var_name) == 1)
             {
-                break :blk try ownedCellFromValue(
-                    ctx.runtime,
-                    try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, vd.var_name),
-                );
+                break :blk try object_ops.closureCellFromValue(try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, vd.var_name));
             }
             break :blk try outer_frame.captureLocal(ctx.runtime, local_idx);
         },
@@ -667,10 +660,7 @@ fn directEvalSeedFrameVarRef(
             if (arg_idx >= outer_frame.args.len) return error.InvalidBytecode;
             break :blk try outer_frame.captureArg(ctx.runtime, arg_idx);
         },
-        .ref => blk: {
-            if (cv.var_idx >= outer_function.varRefNamesLen() or cv.var_idx >= outer_frame.var_refs.len) return error.InvalidBytecode;
-            break :blk try directEvalOuterVarRefView(ctx, outer_function, outer_frame, cv.var_idx);
-        },
+        .ref => try directEvalOuterVarRefView(outer_function, outer_frame, cv.var_idx),
         // Direct-eval seed construction lowers outer module rows to `.ref` and
         // omits global rows entirely. Seeing either family here means the final
         // closure table no longer matches the seed topology.
@@ -679,8 +669,8 @@ fn directEvalSeedFrameVarRef(
 }
 
 const DirectEvalClosureResolverContext = struct {
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    caller_function: *const bytecode.FunctionBytecode,
+    caller_frame: *frame_mod.Frame,
     eval_global_var_bindings: bool,
 };
 fn resolveDirectEvalClosureCell(
@@ -788,7 +778,7 @@ pub fn execDirectEval(
     return .done;
 }
 
-pub fn isContextIntrinsicEval(ctx: *core.JSContext, func: core.JSValue) bool {
+fn isContextIntrinsicEval(ctx: *core.JSContext, func: core.JSValue) bool {
     return func.is(.object) and func.same(ctx.eval_function);
 }
 
@@ -802,7 +792,7 @@ pub fn execApplyEval(
     global: *core.Object,
     eval_scope_head: i32,
     caller_eval_global_var_bindings: bool,
-) !ExecEvalResult {
+) !void {
     var arg_array = try stack.pop();
     var func = try stack.pop();
     var value_roots = [_]*core.JSValue{
@@ -824,28 +814,27 @@ pub fn execApplyEval(
         directEval(ctx, output, global, args, function, frame, eval_scope_head, caller_eval_global_var_bindings) catch |err| {
             const eval_err = normalizeEvalRuntimeError(err);
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, eval_err)) {
-                return .continue_loop;
+                return;
             }
             return eval_err;
         }
     else
         callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
-                return .continue_loop;
+                return;
             }
             return err;
         };
     try stack.push(result);
-    return .done;
 }
 
-pub fn directEval(
+fn directEval(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    caller_function: *const bytecode.FunctionBytecode,
+    caller_frame: *frame_mod.Frame,
     eval_scope_head: i32,
     caller_eval_global_var_bindings: bool,
 ) !core.JSValue {
@@ -854,39 +843,24 @@ pub fn directEval(
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.nativeAllocator());
     try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
-    const caller_strict = if (caller_function) |outer_function| outer_function.isStrictMode() else false;
-    const caller_entry = if (caller_function) |outer_function|
-        outer_function.entryContract()
-    else
-        bytecode.EntryContract{
-            .arguments_allowed = true,
-        };
-    // Whether a sloppy eval declaration reaches the global variable
-    // environment is an invocation fact. It belongs to the executing root
-    // frame (and is false for every nested ordinary function), not to every
-    // finalized FunctionBytecode compiled beneath that root.
-    const requested_eval_global_var_bindings = caller_eval_global_var_bindings;
-    const eval_allows_new_target = caller_entry.new_target_allowed;
-    const eval_allows_super_call = caller_entry.super_call_allowed;
-    const eval_allows_super_property = caller_entry.super_allowed;
-    const eval_arguments_allowed = caller_entry.arguments_allowed;
+    const caller_entry = caller_function.entryContract();
     const eval_seed = try createDirectEvalClosureSeed(ctx.runtime, caller_function, caller_frame, eval_scope_head);
     defer if (eval_seed.values.len != 0) ctx.runtime.nativeAllocator().free(eval_seed.values);
-    const eval_script_or_module = if (caller_function) |outer_function|
-        outer_function.scriptOrModule()
-    else
-        null;
     var compiled = try parser.compile(.{ .realm = ctx }, source.items, .{
         .mode = .eval_direct,
         .filename = "<eval>",
-        .script_or_module = eval_script_or_module,
-        .strict = caller_strict,
-        .eval_global_var_bindings = requested_eval_global_var_bindings,
+        .script_or_module = caller_function.scriptOrModule(),
+        .strict = caller_function.isStrictMode(),
+        // Whether a sloppy eval declaration reaches the global variable
+        // environment is an invocation fact. It belongs to the executing root
+        // frame (and is false for every nested ordinary function), not to every
+        // finalized FunctionBytecode compiled beneath that root.
+        .eval_global_var_bindings = caller_eval_global_var_bindings,
         .eval_in_parameter_initializer = eval_seed.is_arg_scope,
-        .eval_allows_new_target = eval_allows_new_target,
-        .eval_allows_super_call = eval_allows_super_call,
-        .eval_allows_super_property = eval_allows_super_property,
-        .eval_arguments_allowed = eval_arguments_allowed,
+        .eval_allows_new_target = caller_entry.new_target_allowed,
+        .eval_allows_super_call = caller_entry.super_call_allowed,
+        .eval_allows_super_property = caller_entry.super_allowed,
+        .eval_arguments_allowed = caller_entry.arguments_allowed,
         .eval_closure_seed = eval_seed.values,
     });
     defer compiled.deinit();
@@ -895,13 +869,13 @@ pub fn directEval(
         // fileName/lineNumber/columnNumber and a leading `at file:line:col`
         // stack line (build_backtrace filename branch, quickjs.c).
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
-        return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+        return exception_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }
     const compiled_function = compiled.functionBytecode() orelse return error.InvalidBytecode;
     const eval_strict = compiled_function.isStrictMode();
-    const eval_global_var_bindings = requested_eval_global_var_bindings and !eval_strict;
+    const eval_global_var_bindings = caller_eval_global_var_bindings and !eval_strict;
     const eval_this = try directEvalThisValue(ctx, global, caller_function, caller_frame);
-    const eval_new_target = if (eval_allows_new_target)
+    const eval_new_target = if (caller_entry.new_target_allowed)
         directEvalNewTargetValue(caller_function, caller_frame)
     else
         core.JSValue.undefinedValue();
@@ -949,33 +923,29 @@ pub fn directEval(
     return result;
 }
 
-pub fn directEvalThisValue(
+fn directEvalThisValue(
     ctx: *core.JSContext,
     global: *core.Object,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    function: *const bytecode.FunctionBytecode,
+    outer_frame: *frame_mod.Frame,
 ) !core.JSValue {
-    const outer_frame = caller_frame orelse return core.JSValue.undefinedValue();
-    if (capturedSpecialValue(caller_function, outer_frame, core.atom.ids.this_)) |value| return value;
-    if (caller_function) |function| {
-        if (function.isDerivedClassConstructor()) {
-            const local_count = @min(function.varDefs().len, outer_frame.locals.len);
-            for (function.varDefs()[0..local_count], 0..) |vd, idx| {
-                if (vd.var_name == core.atom.ids.this_) return outer_frame.locals[idx];
-            }
-            return error.InvalidBytecode;
+    if (capturedSpecialValue(function, outer_frame, core.atom.ids.this_)) |value| return value;
+    if (function.isDerivedClassConstructor()) {
+        const local_count = @min(function.varDefs().len, outer_frame.locals.len);
+        for (function.varDefs()[0..local_count], 0..) |vd, idx| {
+            if (vd.var_name == core.atom.ids.this_) return outer_frame.locals[idx];
         }
+        return error.InvalidBytecode;
     }
     return object_ops.materializeFrameThisBinding(ctx, global, outer_frame);
 }
 
 fn capturedSpecialValue(
-    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_function: *const bytecode.FunctionBytecode,
     caller_frame: *frame_mod.Frame,
     name: core.Atom,
 ) ?core.JSValue {
-    const function = caller_function orelse return null;
-    for (function.closureVar(), 0..) |capture, index| {
+    for (caller_function.closureVar(), 0..) |capture, index| {
         if (capture.var_name == name and index < caller_frame.var_refs.len) {
             return caller_frame.var_refs[index].varRefValue();
         }
@@ -984,14 +954,13 @@ fn capturedSpecialValue(
 }
 
 fn directEvalNewTargetValue(
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
+    caller_function: *const bytecode.FunctionBytecode,
+    caller_frame: *frame_mod.Frame,
 ) core.JSValue {
-    const frame = caller_frame orelse return core.JSValue.undefinedValue();
-    return capturedSpecialValue(caller_function, frame, core.atom.ids.new_target) orelse frame.newTargetValue();
+    return capturedSpecialValue(caller_function, caller_frame, core.atom.ids.new_target) orelse caller_frame.newTargetValue();
 }
 
-pub fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, vardefs: []const bytecode.function_bytecode.BytecodeVarDef, atom_id: core.Atom) usize {
+fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, vardefs: []const bytecode.function_bytecode.BytecodeVarDef, atom_id: core.Atom) usize {
     var count: usize = 0;
     for (vardefs) |vd| {
         if (atomIdOrNameEql(rt, vd.var_name, atom_id)) count += 1;

@@ -8,11 +8,8 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const runtime = @import("../runtime.zig");
-const Bytecode = bytecode.Bytecode;
-const FunctionBytecode = bytecode.FunctionBytecode;
 const opcode = bytecode.opcode;
 const function_bytecode = bytecode.function_bytecode;
-const dump = @This();
 
 /// Disassembly options.
 pub const Options = struct {
@@ -161,7 +158,6 @@ test "dyn_env_probe flags byte disassembles as kind[,with]" {
     var writer = std.Io.Writer.fixed(&buf);
     try dumpArtifact(&writer, rt.atoms, name, 0, 0, 1, &code, 0, .{});
     const text = writer.buffered();
-    // The special case used to sit on the unreachable `.sub_opcode` arm,
-    // so the flags byte printed as a bare number.
+    // The flags byte prints by name.
     try std.testing.expect(std.mem.indexOf(u8, text, "read,with") != null);
 }

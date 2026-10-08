@@ -163,8 +163,6 @@ pub const AutoInitKind = enum(u8) {
     json_namespace,
     reflect_namespace,
     atomics_namespace,
-    navigator,
-    performance,
     array_unscopables,
     string_constant,
     empty_array,
@@ -172,18 +170,7 @@ pub const AutoInitKind = enum(u8) {
 
 pub const ArrayBuiltinMarker = enum(u8) {
     none = 0,
-    constructor = 1,
     species_getter = 2,
-    to_string = 3,
-    to_locale_string = 4,
-    concat = 5,
-};
-
-pub const TypedArrayBuiltinMarker = enum(u8) {
-    none = 0,
-    prototype_method = 1,
-    static_from = 2,
-    static_of = 3,
 };
 
 /// Exact QuickJS auto-init dispatch domain (`JSAutoInitIDEnum`).  The low two
@@ -288,13 +275,7 @@ pub const AutoInit = struct {
     native_entry: ?*const native_entry.NativeEntry = null,
     host_function_prototype: bool = false,
     native_builtin_id: i32 = 0,
-    array_builtin_marker: ArrayBuiltinMarker = .none,
-    typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
-    array_iterator_kind: u8 = 0,
-    iterator_identity: bool = false,
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
-    disposable_stack_method: u8 = 0,
-    async_disposable_stack_method: u8 = 0,
     /// Optional immutable standard/host preparation step. It may only finish
     /// metadata on the freshly-created result function; it must not retain or
     /// mutate the owner whose AUTOINIT slot is being materialized.
@@ -309,13 +290,7 @@ pub const AutoInit = struct {
             self.native_entry == other.native_entry and
             self.host_function_prototype == other.host_function_prototype and
             self.native_builtin_id == other.native_builtin_id and
-            self.array_builtin_marker == other.array_builtin_marker and
-            self.typed_array_builtin_marker == other.typed_array_builtin_marker and
-            self.array_iterator_kind == other.array_iterator_kind and
-            self.iterator_identity == other.iterator_identity and
             self.collection_method_owner_class == other.collection_method_owner_class and
-            self.disposable_stack_method == other.disposable_stack_method and
-            self.async_disposable_stack_method == other.async_disposable_stack_method and
             self.prepare_native_function == other.prepare_native_function;
     }
 };

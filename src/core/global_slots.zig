@@ -9,18 +9,12 @@
 //! it imports core only and never parser/exec/runtime/binding.
 
 const atom = @import("atom.zig");
-const runtime = @import("../runtime.zig");
 const value = @import("value.zig");
 
 pub const Slot = struct {
     name: atom.Atom,
     value: value.JSValue,
 };
-
-pub fn getByName(rt: *runtime.JSRuntime, slots: []const Slot, name: []const u8) !value.JSValue {
-    const atom_id = try rt.internAtom(name);
-    return getByAtom(slots, atom_id);
-}
 
 /// Atom-keyed form. Engine callers look up spellings that are predefined
 /// (`globalThis`), so they hold an `atom.ids.*` constant and never intern.
@@ -29,15 +23,4 @@ pub fn getByAtom(slots: []const Slot, atom_id: atom.Atom) value.JSValue {
         if (slot.name == atom_id) return slot.value;
     }
     return value.JSValue.undefinedValue();
-}
-
-pub fn setExistingByName(rt: *runtime.JSRuntime, slots: []Slot, name: []const u8, next_value: value.JSValue) !void {
-    const atom_id = try rt.internAtom(name);
-    for (slots) |*slot| {
-        if (slot.name == atom_id) {
-            slot.value = next_value;
-            return;
-        }
-    }
-    return error.TypeError;
 }

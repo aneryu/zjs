@@ -97,7 +97,7 @@ fn printUsage(io: std.Io) !void {
 
 fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.print(
         "run-test262: prepared {d}/{d} tests",
@@ -637,24 +637,21 @@ fn runEmbeddedEngine(
     stderr_out: *[]const u8,
 ) !bool {
     const rt = try zjs.JSRuntime.create(allocator, .{});
-    errdefer rt.destroy();
+    defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
-    errdefer ctx.destroy();
+    defer ctx.destroy();
     var output_buffer: [64 * 1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var event_loop = runtime_layer.EventLoop.init(ctx, .{ .output = &output });
     event_loop.install();
-    errdefer event_loop.deinit();
-    const global_obj = try zjs.globalObjectPtr(ctx);
-    try installTest262Globals(rt, ctx, global_obj);
     defer {
         event_loop.deinit();
         _ = cleanupTest262Agents(rt);
         zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
-        ctx.destroy();
-        rt.destroy();
     }
-    rt.setCanBlock(can_block);
+    const global_obj = try zjs.globalObjectPtr(ctx);
+    try installTest262Globals(rt, ctx, global_obj);
+    rt.can_block = can_block;
     // Install the file-loader dynamic import (mirrors the CLI src/cli/zjs.zig
     // and qjs's run-test262 providing the module loader): [async] dynamic-import
     // tests are SCRIPTS, so import() must work in script mode. The state must
@@ -670,7 +667,7 @@ fn runEmbeddedEngine(
     var dynamic_import_scope = try zjs.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
-        zjs.exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
+        zjs.exec.module_graph.evalModuleGraph(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
         ctx.eval(source, .{
             .mode = .script,
@@ -939,7 +936,7 @@ fn printRunResult(io: std.Io, reporter: ?*Reporter, test_path: []const u8, resul
         return;
     }
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
     const writer = &stderr_writer.interface;
     if (result == .passed or detail.len == 0) {
         try writer.print("{s} {s} ({d} ms)\n", .{ status, test_path, elapsed_ms });
@@ -1007,7 +1004,7 @@ fn printFailure(io: std.Io, reporter: ?*Reporter, test_path: []const u8, stderr:
         return;
     }
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
     const writer = &stderr_writer.interface;
     if (detail.len == 0) {
         try writer.print("FAIL {s}\n", .{test_path});

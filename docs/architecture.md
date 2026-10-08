@@ -70,15 +70,16 @@ Values, atoms, strings, objects, shapes, properties, arrays, and GC.
 | `gc_space.zig` | Measured size-class table and publication histogram; the block heap is production, so the sizes it classifies are block-cell sizes |
 | `gc_block_heap.zig` | Production block heap: 2 MiB superblocks, 64 KiB blocks, classed cells, extents, and the four per-block bitmaps (alloc / mark / doomed / `finalizerBits`) |
 | `gc_generation.zig` | Generational state: young lists and extents, remembered set, promotion, `young_trigger_count` |
-| `gc_conservative.zig` | Conservative native stack/register scan (production root net; precise roots under `-Dzjs_gc_roots_diag`) |
-| `gc_concurrent.zig` | Incremental-major state and stats (single-threaded despite the name; rename is TGC S5-c) |
-| `gc_trace_stw.zig` | The collector: incremental mark, minor and major, condemnation and sweep |
+| `gc_conservative.zig` | Conservative native stack/register scan (the production root net) |
+| `gc_incremental.zig` | Mark epoch and per-kind morgue buckets (the incremental major it is named for is retired) |
+| `gc_nursery.zig` | Opt-in copying nursery (`ZJS_GC_NURSERY=1`; off by default) |
+| `gc_trace_stw.zig` | The collector: stop-the-world minor and major, condemnation and sweep |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
 
-Lifetime model: a non-moving, generational (sticky mark bit), incrementally
-marking stop-the-world tracing collector owns every heap kind. There is no
-reference counting left anywhere on the heap, and no moving or concurrent
-collector. Ordinary object death is a bitmap operation; only the
+Lifetime model: a generational (sticky mark bit) stop-the-world tracing
+collector owns every heap kind. There is no reference counting left anywhere
+on the heap and no concurrent collector; it is non-moving except for the
+opt-in copying nursery. Ordinary object death is a bitmap operation; only the
 `needs_finalizer` population runs a destructor. VM operand stacks and locals are carved from
 a `VmStackArena` and released with the frame; they are not individually linked
 as per-frame roots. The exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
@@ -152,6 +153,7 @@ the namespaces are files:
 | `bytecode/opcode.zig` | physical ISA table, decode layer, temp/short views |
 | `bytecode/function_def.zig` | compile-time `FunctionDef` (scopes, vars, closure rows, cpool) |
 | `bytecode/carrier.zig` | `Bytecode`: the finalize staging record |
+| `bytecode/growable.zig` | geometric-growth native slices shared by the two records above |
 | `bytecode/function_bytecode.zig` | GC-managed `FunctionBytecode` the VM runs |
 | `bytecode/module.zig` | compile-time module record |
 | `bytecode/pc2line.zig` | pc → line/column encoding |
@@ -203,7 +205,7 @@ File and function naming conventions in `exec/`:
 | `zjs_vm.zig` | interpreter loop |
 | `call_runtime.zig` / `call_site.zig` | unique `[[Call]]` / `[[Construct]]` terminals and CallSite |
 | `call.zig` | engine globals, unique Bound create, Object data-plane leftovers, `evalGlobalScriptSource` |
-| `construct.zig` | unique construct bodies (`objectConstructorValue`, `weakRefWithPrototype`, `constructDOMExceptionObject`, `constructTypedArrayTypedArrayInput`) |
+| `construct.zig` | unique construct bodies (`objectConstructorValue`, `weakRefWithPrototype`, `constructTypedArrayTypedArrayInput`) |
 | `eval_entry.zig` | eval |
 | `module.zig` | modules |
 | `promise_ops.zig` | Promise abstract operations |
@@ -224,8 +226,8 @@ ordinary `call + return`; `test262.conf` still skips `tail-call-optimization`
 because method-position tails are out of scope. Per-opcode profiling is a
 working profiler on the
 `zjs-profile` artifact: profiling builds call `noteDispatch` from `cont` /
-`next` (`src/exec/tailcall_dispatch.zig`), `build.zig` ships `zjs-profile` plus
-nine `perf-*-profile` steps with exact opcode pins, and
+`next` (`src/exec/tailcall_dispatch.zig`), `build.zig` ships the `zjs-profile`
+artifact, and
 `tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
 `zjs` binary still fail-closes `--profile-opcodes`.
 
@@ -235,12 +237,14 @@ nine `perf-*-profile` steps with exact opcode pins, and
 It imports the consumer's engine module instance; the engine neither imports
 nor re-exports it. `event_loop.zig` owns timers, fd/signal handling and event
 driving; `file_module_loader.zig` owns filesystem source and URL policy;
-`globals.zig` and `output.zig` install host globals and format print/console
+`globals.zig`, `output.zig`, and `web.zig` install host globals (print/console,
+base64, queueMicrotask, gc, and the Web-compatibility `navigator`,
+`performance`, and `DOMException`) and format print/console
 output. Installation is explicit for each Realm. `HostScheduler` and
 `ModuleSourceLoader` are engine-side contracts, not concrete OS implementations.
 
 Atomics waiter cleanup, module graph semantics, and ArrayBuffer detach remain
-in `src/exec/`. Further compatibility-extension extraction is recorded in
+in `src/exec/`. The migration is recorded in
 [host boundary design](host-boundary-design.md). The dynamic plugin loader and its `zjs.ffi` ABI were deleted
 2026-09-06. Host functions register through `Context.defineFunction` /
 `createFunction`: each registration is one
@@ -355,8 +359,8 @@ Generator/async frames must survive suspend, so they own transferable
 resident storage instead of borrowing the arena.
 
 Live values in the VM are kept alive by the collector's scan of the frame
-storage -- conservative in production, precise under `-Dzjs_gc_roots_diag`
-(refcount-on-push was deleted with the rc build). `ValueRootFrame` is for
+storage -- conservative in production (refcount-on-push was deleted with the
+rc build). `ValueRootFrame` is for
 host/builtin boundaries, not generic root registration of every VM frame. Its `activate` / `deactivate`
 interface owns the test-only LIFO link and restoration protocol; callers
 provide only the root storage and keep its stack address valid for that scope.
@@ -443,7 +447,7 @@ Not implemented:
 - baseline JIT;
 - call inline cache (property sites are cached, see §4 above);
 - JIT GC stack maps;
-- moving nursery;
+- a moving nursery by default (the copying nursery is opt-in);
 - concurrent collector;
 - a public standalone `CodeBlock` / bytecode serialization API.
 

@@ -861,6 +861,7 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !Lowered {
     defer lex.deinit();
     var state = try ParseState.initFromRuntime(&lex, env.rt, env.rt.atoms, name);
     defer state.deinit(env.rt);
+    state.typescript = true;
     test_entry.configureScriptRoot(&state);
     try state.beginProgramEmission();
     try parser_core.parseDirectives(&state);
@@ -1514,6 +1515,28 @@ fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
     }
 }
 
+test "parser accepts binding and assignment patterns nested past 256 levels" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    // prefix, opener, closer, suffix: a binding, an assignment and a
+    // for-of pattern, each 300 levels deep around `a`.
+    for ([_][4][]const u8{
+        .{ "const ", "[", "]", " = s;" },
+        .{ "let a; (", "{x:", "}", " = s);" },
+        .{ "for (const ", "[", "]", " of s);" },
+    }) |shape| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(std.testing.allocator);
+        try source.appendSlice(std.testing.allocator, shape[0]);
+        for (0..300) |_| try source.appendSlice(std.testing.allocator, shape[1]);
+        try source.append(std.testing.allocator, 'a');
+        for (0..300) |_| try source.appendSlice(std.testing.allocator, shape[2]);
+        try source.appendSlice(std.testing.allocator, shape[3]);
+        var function = try parseStatement(&env, source.items);
+        defer function.deinit(env.rt);
+    }
+}
+
 test "parser accepts computed public class fields" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -1858,7 +1881,7 @@ test "F4: invalid regexp releases its published pattern constant" {
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error != null);
     try std.testing.expectEqual(parser.CompilePath.syntax_error_guard, parsed.parse_path);
-    try std.testing.expect(std.mem.indexOf(u8, parsed.syntax_error.?.message, "InvalidRegExp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.syntax_error.?.message, "invalid regular expression") != null);
 }
 
 test "F4: boolean and null literals" {
@@ -2651,7 +2674,7 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     var pc: usize = 0;
     while (pc < child.byteCode().len) {
         const op_id = child.byteCode()[pc];
-        if (op_id == op.iterator_close) {
+        if (op_id == op.iterator_check_object) {
             iterator_close_pc = pc;
             break;
         }
@@ -2675,9 +2698,9 @@ test "M3.1 F4: for-await close keeps body statement source location" {
         col_num = slot.col_num;
     }
     try std.testing.expectEqual(@as(i32, 10), line_num);
-    // QuickJS emits no source event for the synthetic iterator_close.  It
-    // inherits the last body-expression event, the `value` identifier in
-    // `void value`.
+    // The synthetic AsyncIteratorClose emits no source event, so a rejected
+    // return() result reports the last body-expression event, the `value`
+    // identifier in `void value`.
     try std.testing.expectEqual(@as(i32, 12), col_num);
 }
 
@@ -5548,6 +5571,43 @@ test "F8: export named statement" {
     try expectModuleExport(&env, record, 1, "y", "y");
 }
 
+test "F7: private bound names shadow by name and unwind on truncate" {
+    const PrivateBoundNames = @FieldType(ParseState, "class_private_bound_names");
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
+    defer account.destroy();
+    var atoms = atom.AtomTable.init(account);
+    defer atoms.deinit();
+    var names: PrivateBoundNames = .{};
+    defer names.deinit(std.testing.allocator);
+
+    const bare_x = try atoms.internString("x");
+    const hash_x = try atoms.internString("#x");
+    const outer_x = try atoms.newSymbol("#x", .private);
+    const outer_y = try atoms.newSymbol("#y", .private);
+    const inner_x = try atoms.newSymbol("#x", .private);
+
+    try names.push(std.testing.allocator, &atoms, outer_x);
+    try names.push(std.testing.allocator, &atoms, outer_y);
+    const inner_start = names.len();
+    try names.push(std.testing.allocator, &atoms, inner_x);
+
+    // Either spelling resolves to the newest entry; a bound start past the
+    // name's newest entry hides the shadowed outer ones.
+    try std.testing.expectEqual(inner_x, names.find(&atoms, bare_x, 0).?);
+    try std.testing.expectEqual(inner_x, names.find(&atoms, hash_x, inner_start).?);
+    try std.testing.expectEqual(outer_y, names.find(&atoms, outer_y, 0).?);
+    try std.testing.expectEqual(@as(?atom.Atom, null), names.find(&atoms, outer_y, inner_start));
+    try std.testing.expect(names.isBound(&atoms, inner_x));
+    try std.testing.expect(!names.isBound(&atoms, outer_x));
+
+    names.truncate(&atoms, inner_start);
+    try std.testing.expectEqual(outer_x, names.find(&atoms, hash_x, 0).?);
+    try std.testing.expect(names.isBound(&atoms, outer_x));
+    names.truncate(&atoms, 0);
+    try std.testing.expectEqual(@as(?atom.Atom, null), names.find(&atoms, bare_x, 0));
+    try std.testing.expectEqual(@as(u32, 0), names.latest.count());
+}
+
 test "F7: private field in class" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -6700,7 +6760,8 @@ test "escapedIdentifier reserved-word CurrentContext shares the Binding walk" {
     const rejected = [_][]const u8{
         "\\u0069f;",
         "var \\u0069f;",
-        "0, { l\\u0065t } = {};",
+        // `let` is reserved only in strict code (shorthand included).
+        "'use strict'; 0, { l\\u0065t } = {};",
     };
     for (rejected) |source| {
         var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "escaped-reserved.js" });
@@ -6809,8 +6870,6 @@ test "M-SCOPE event producers: ordinary scopes match QuickJS phase-1 events" {
         defer function.deinit(env.rt);
         try expectPhase1ScopeEvents(function.code, &.{
             .{ .kind = .enter, .scope = 1 },
-            .{ .kind = .enter, .scope = 2 },
-            .{ .kind = .leave, .scope = 2 },
         });
     }
     {
@@ -7066,7 +7125,8 @@ test "M-SCOPE abrupt control: classic and for-of continue targets follow the bod
         "outer: for (;;) { { continue outer; } }",
         10,
         5,
-        8,
+        7,
+        3,
     );
     try expectContinueTargetFollowsBodyLeave(
         &env,
@@ -7074,6 +7134,7 @@ test "M-SCOPE abrupt control: classic and for-of continue targets follow the bod
         12,
         7,
         10,
+        2,
     );
 }
 
@@ -7086,6 +7147,7 @@ fn expectContinueTargetFollowsBodyLeave(
     expected_events: usize,
     jump_event: usize,
     target_event: usize,
+    target_scope: u16,
 ) !void {
     const name = try env.rt.internAtom("scope-events");
     var lex = QjsLexer.init(std.testing.allocator, env.rt.atoms, source);
@@ -7107,7 +7169,7 @@ fn expectContinueTargetFollowsBodyLeave(
         fdLabelOffset(&state.function_def, label_index),
     );
     try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[target_event].kind);
-    try std.testing.expectEqual(@as(u16, 2), events[target_event].scope);
+    try std.testing.expectEqual(target_scope, events[target_event].scope);
 }
 
 test "M-SCOPE abrupt control: crossed finally sees scope leaves before gosub" {
@@ -7304,10 +7366,10 @@ test "defineVar core matches pinned QuickJS declaration collision matrix" {
         .{ .source = "function f(){ let x; { var x; } }", .fails = true },
         .{ .source = "function f(p){ var p; }", .fails = false },
         .{ .source = "function f(){ var x; var x; }", .fails = false },
-        // QuickJS source-order behavior for global source elements: the
-        // earlier lexical is accepted, while a later lexical sees the global
-        // function row and rejects it.
-        .{ .source = "let x; function x(){}", .fails = false },
+        // ScriptBody early error (§16.1.1): a top-level function is a
+        // VarDeclaredName, so it collides with a lexical in either order.
+        // (Pinned QuickJS accepts the lexical-first order.)
+        .{ .source = "let x; function x(){}", .fails = true },
         .{ .source = "function x(){}; let x;", .fails = true },
         .{ .source = "try{}catch(e){let e;}", .fails = true },
         .{ .source = "function f(){ try{}catch(e){ const e = 1; } }", .fails = true },
@@ -7798,19 +7860,25 @@ test "F10.1a FunctionDef: assignment for-of still owns a head scope" {
     try std.testing.expectEqual(@as(i32, 2), state.function_def.scopes[3].parent);
 }
 
-test "F10.1a FunctionDef: if statement owns one wrapper scope" {
+test "F10.1a FunctionDef: if statement scopes only Annex B function clauses" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
 
-    var lex = QjsLexer.init(std.testing.allocator, env.rt.atoms, "if (true) 0; else 1;");
-    var state = try ParseState.initFromRuntime(&lex, env.rt, env.rt.atoms, name);
-    defer state.deinit(env.rt);
+    inline for (.{
+        .{ "if (true) 0; else 1;", 2 },
+        .{ "if (true) function f() {} else function g() {}", 4 },
+    }) |case| {
+        var lex = QjsLexer.init(std.testing.allocator, env.rt.atoms, case[0]);
+        var state = try ParseState.initFromRuntime(&lex, env.rt, env.rt.atoms, name);
+        defer state.deinit(env.rt);
 
-    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+        try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
-    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
-    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+        const scopes = state.function_def.scopes;
+        try std.testing.expectEqual(@as(usize, case[1]), scopes.len);
+        for (scopes[2..]) |scope| try std.testing.expectEqual(@as(i32, 1), scope.parent);
+    }
 }
 
 test "F10.1a FunctionDef: classic for always owns a head scope" {
@@ -7876,7 +7944,8 @@ test "F10.1a FunctionDef: class has name and private scopes" {
     var fields_scope: ?i32 = null;
     for (state.function_def.vars) |vd| {
         if (vd.var_name == class_atom) class_scope = vd.scope_level;
-        if (vd.var_name == core.atom.ids.class_fields_init) fields_scope = vd.scope_level;
+        // Each class's binding is a fresh symbol described `<class_fields_init>`.
+        if (env.rt.atoms.kind(vd.var_name) == .symbol and std.mem.eql(u8, env.rt.atoms.name(vd.var_name) orelse "", "<class_fields_init>")) fields_scope = vd.scope_level;
     }
     try std.testing.expectEqual(@as(i32, 2), class_scope orelse return error.TestExpectedEqual);
     try std.testing.expectEqual(@as(i32, 3), fields_scope orelse return error.TestExpectedEqual);
@@ -8657,9 +8726,10 @@ test "QuickJS eval prefix is stable before descendant capture demand" {
     };
 
     // add_eval_variables constructs this fixed prefix before any child is
-    // finalized. The inner function's first use of `b` therefore cannot move
-    // that row ahead of `a`.
-    const expected = [_][]const u8{ "a", "b", "eval" };
+    // finalized, parameters last first (the last of duplicate names is the
+    // binding eval must see). The inner function's first use of `b`
+    // therefore cannot reorder it.
+    const expected = [_][]const u8{ "b", "a", "eval" };
     try std.testing.expectEqual(expected.len, middle.closureVar().len);
     for (middle.closureVar(), expected) |cv, expected_name| {
         try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
@@ -9978,11 +10048,16 @@ test "parser error long tail closes semantic and lookahead diagnostics" {
         column: u32,
     }{
         .{ .source = "1 2;", .mode = .script, .message = "expected ';', got number", .column = 3 },
-        .{ .source = "let value; let value;", .mode = .script, .message = "expected non-conflicting declaration, got ';'", .column = 21 },
+        .{ .source = "let value; let value;", .mode = .script, .message = "redeclaration of 'value'", .column = 21 },
         .{ .source = "new import('dep');", .mode = .script, .message = "expected '.', got '('", .column = 11 },
         .{ .source = "let [value} = [];", .mode = .script, .message = "expected ']', got '}'", .column = 11 },
+        .{ .source = "let [a, {b] = [];", .mode = .script, .message = "expected '}', got ']'", .column = 11 },
+        .{ .source = "class A{*[m]}", .mode = .script, .message = "expected '(', got '}'", .column = 13 },
+        .{ .source = "class A{async [m]: number}", .mode = .script, .message = "expected '(', got ':'", .column = 18 },
+        .{ .source = "#\\", .mode = .script, .message = "invalid Unicode escape sequence", .column = 1 },
+        .{ .source = "x.#\\", .mode = .script, .message = "invalid Unicode escape sequence", .column = 3 },
         .{ .source = "class C { #x; method() { delete this.#x; } }", .mode = .script, .message = "private fields cannot be deleted", .column = 26 },
-        .{ .source = "export { missing };", .mode = .module, .message = "expected local export binding, got end of input", .column = 20 },
+        .{ .source = "export { missing };", .mode = .module, .message = "export 'missing' is not defined", .column = 20 },
     };
 
     for (cases) |case| {
@@ -10029,7 +10104,7 @@ test "parser source-reachable invariant masks carry specific diagnostics" {
         .{
             .source = "class Duplicate {} class Duplicate {}",
             .mode = .module,
-            .message = "expected non-conflicting declaration, got end of input",
+            .message = "redeclaration of 'Duplicate'",
         },
     };
 
@@ -10053,7 +10128,7 @@ test "lexer syntax errors retain the failing token position" {
     const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(u32, 2), syntax_error.position.line);
     try std.testing.expectEqual(@as(u32, 11), syntax_error.position.column);
-    try std.testing.expectEqualStrings("UnterminatedString", syntax_error.message);
+    try std.testing.expectEqualStrings("unterminated string literal", syntax_error.message);
 }
 
 test "direct eval propagates script or module identity without changing display filename" {
@@ -10413,7 +10488,7 @@ test "canonical root and child survive parser arena release allocation churn and
     try std.testing.expect(warm.syntax_error == null);
     warm.deinit();
     _ = try rt.forceGC(null);
-    const live_bytes_before = rt.diagnostics.allocations.allocated_bytes;
+    const live_bytes_before = rt.allocation_diagnostics.allocated_bytes;
 
     var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "canonical-owner.js" });
     var parsed_owned = true;
@@ -10461,7 +10536,7 @@ test "canonical root and child survive parser arena release allocation churn and
     parsed.deinit();
     parsed_owned = false;
     _ = try rt.forceGC(null);
-    try std.testing.expectEqual(live_bytes_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(live_bytes_before, rt.allocation_diagnostics.allocated_bytes);
 }
 
 test "root strictness comes from directives or host options, never source comments" {
@@ -12546,7 +12621,8 @@ test "direct eval rebuilds private grammar bindings from ordered closure rows" {
         if (size == 0 or pc + size > parsed.byteCode().len) return error.TestExpectedEqual;
         pc += size;
     }
-    try std.testing.expectEqualSlices(u16, &.{ 0, 1, 2, 3, 5 }, private_ref_indices[0..private_ref_count]);
+    // A setter-only `#setter in` checks the brand through its `<set>` companion.
+    try std.testing.expectEqualSlices(u16, &.{ 0, 1, 2, 4, 5 }, private_ref_indices[0..private_ref_count]);
 }
 
 test "only direct eval enables private grammar from closure seeds" {
@@ -12961,7 +13037,7 @@ test "parser releases module and import-attribute token atoms" {
     defer rt.destroy();
 
     const source =
-        \\import zjsDefaultBindingName from "./zjs-token-module.js" with { zjsAttrKey: "zjsAttrValue" };
+        \\import zjsDefaultBindingName from "./zjs-token-module.js" with { type: "zjsAttrValue" };
         \\import { zjsNamedExportName as zjsRenamedLocalName } from "./zjs-token-other.js";
         \\import * as zjsNamespaceBindingName from "./zjs-token-third.js";
         \\export { zjsRenamedLocalName as zjsPublicExportName };
@@ -13017,7 +13093,7 @@ test "parser returns the atom table to balance across every token-bearing constr
         .{ .src = "enum ZjsEnumName { ZjsMemberA, ZjsMemberB = 5, ZjsMemberC = \"zjsStr\" } namespace ZjsNamespaceName { export const zjsNsConst = 1; }", .file = "bal-enum.ts", .mode = .script },
         .{ .src = "function zjsUsingHost() { { using zjsUsingBinding = zjsDisposable; } } zjsUsingHost();", .file = "bal-using.js", .mode = .script },
         .{ .src = "import zjsDefB, { zjsNamedB as zjsAliasB, \"zjsStringName\" as zjsStrAlias } from \"./m1.js\"; export { zjsAliasB as zjsOutName, zjsStrAlias }; export default function zjsDefaultExport() {}", .file = "bal-import.js", .mode = .module },
-        .{ .src = "export * from \"./m2.js\"; export * as zjsStarNs from \"./m3.js\"; import * as zjsNsB from \"./m4.js\" with { zjsAttrK: \"zjsAttrV\" }; export const zjsExportedConst = zjsNsB;", .file = "bal-export.js", .mode = .module },
+        .{ .src = "export * from \"./m2.js\"; export * as zjsStarNs from \"./m3.js\"; import * as zjsNsB from \"./m4.js\" with { type: \"zjsAttrV\" }; export const zjsExportedConst = zjsNsB;", .file = "bal-export.js", .mode = .module },
     };
 
     for (cases, 0..) |c, index| {
@@ -13065,7 +13141,7 @@ test "parser returns the atom table to balance across every token-bearing constr
 /// The criterion is not "final zero" but monotone ownership convergence: at
 /// every boundary the outstanding set must be exactly the set the next stage is
 /// entitled to consume. `outstanding` is measured (atom-table strong refs,
-/// Runtime allocation helpers counters); everything else is derived from structures that
+/// runtime allocation counters); everything else is derived from structures that
 /// already exist, each derivation naming the production release path it
 /// mirrors. Nothing here may be relaxed to make a boundary pass: a boundary
 /// that does not converge is a finding.
@@ -13260,9 +13336,9 @@ pub const phase_ownership = struct {
         /// breaks the owned == allocated - released identity.
         fn capture(rt: *const core.JSRuntime) Baseline {
             return .{
-                .acquisitions = rt.diagnostics.allocations.alloc_calls + rt.diagnostics.allocations.create_calls,
-                .releases = rt.diagnostics.allocations.free_calls + rt.diagnostics.allocations.destroy_calls,
-                .allocation_count = rt.diagnostics.allocations.allocation_count,
+                .acquisitions = rt.allocation_diagnostics.alloc_calls + rt.allocation_diagnostics.create_calls,
+                .releases = rt.allocation_diagnostics.free_calls + rt.allocation_diagnostics.destroy_calls,
+                .allocation_count = rt.allocation_diagnostics.allocation_count,
             };
         }
     };
@@ -13486,14 +13562,14 @@ pub const phase_ownership = struct {
             else
                 0;
 
-            const acquisitions = self.rt.diagnostics.allocations.alloc_calls + self.rt.diagnostics.allocations.create_calls;
-            const releases = self.rt.diagnostics.allocations.free_calls + self.rt.diagnostics.allocations.destroy_calls;
+            const acquisitions = self.rt.allocation_diagnostics.alloc_calls + self.rt.allocation_diagnostics.create_calls;
+            const releases = self.rt.allocation_diagnostics.free_calls + self.rt.allocation_diagnostics.destroy_calls;
             try std.testing.expect(acquisitions >= self.baseline.acquisitions);
             try std.testing.expect(releases >= self.baseline.releases);
-            try std.testing.expect(self.rt.diagnostics.allocations.allocation_count >= self.baseline.allocation_count);
+            try std.testing.expect(self.rt.allocation_diagnostics.allocation_count >= self.baseline.allocation_count);
             const builder_allocated = acquisitions - self.baseline.acquisitions;
             const builder_released = releases - self.baseline.releases;
-            const builder_owned = self.rt.diagnostics.allocations.allocation_count - self.baseline.allocation_count;
+            const builder_owned = self.rt.allocation_diagnostics.allocation_count - self.baseline.allocation_count;
 
             // The published FunctionBytecode owns the retained markers as its
             // pc2line table; discarded is the B1 marker census minus the

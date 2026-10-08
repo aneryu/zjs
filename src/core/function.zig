@@ -27,7 +27,11 @@ pub const NativeBuiltinDomain = enum(i32) {
     collection = 7,
     buffer = 8,
     uri = 9,
-    performance = 10,
+    /// WeakRef.prototype / FinalizationRegistry.prototype. qjs declares these
+    /// as their own function lists (`js_weakref_proto_funcs` quickjs.c,
+    /// `js_finrec_proto_funcs` quickjs.c) rather than folding them into
+    /// the Map/Set lists, so they get their own id namespace here too.
+    weak_ref = 10,
     json = 11,
     atomics = 12,
     reflect = 13,
@@ -36,28 +40,24 @@ pub const NativeBuiltinDomain = enum(i32) {
     function = 16,
     error_object = 17,
     iterator = 18,
-    host = 19,
+    engine_helper = 19,
     promise = 20,
-    /// WeakRef.prototype / FinalizationRegistry.prototype. qjs declares these
-    /// as their own function lists (`js_weakref_proto_funcs` quickjs.c,
-    /// `js_finrec_proto_funcs` quickjs.c) rather than folding them into
-    /// the Map/Set lists, so they get their own id namespace here too.
-    weak_ref = 21,
+    disposable = 21,
 };
 
-/// Method ids for the `.host` native-builtin domain: host/web globals and
-/// engine-internal helpers that have no spec namespace of their own
-/// (navigator accessors, constructor stubs, the shared `[Symbol.species]`
-/// getter, and the V8-style CallSite methods).
-pub const HostGlobalMethod = enum(u32) {
-    // Retired bundled-host ids. Preserve the numbering; their functions now
-    // use host-owned NativeEntry records and are not dispatched by these ids.
+/// Method ids for the `.engine_helper` native-builtin domain: engine-internal
+/// helpers without a spec namespace of their own (the shared
+/// `[Symbol.species]` getter and the V8-style CallSite methods).
+pub const EngineHelperMethod = enum(u32) {
+    // Retired bundled-host ids (btoa, atob, queueMicrotask, gc, navigator,
+    // DOMException now live in `src/host/`). Preserve the numbering.
     btoa = 1,
     atob = 2,
     queue_microtask = 3,
     gc = 4,
     navigator_user_agent_get = 5,
     dom_exception_ctor_call = 6,
+    // Live engine-internal ids.
     species_getter = 7,
     callsite_get_function = 8,
     callsite_get_function_name = 9,
@@ -66,13 +66,6 @@ pub const HostGlobalMethod = enum(u32) {
     callsite_get_column_number = 12,
     callsite_is_native = 13,
 };
-
-// QuickJS CLI exposes navigator.userAgent as "quickjs-ng/<JS_GetVersion()>".
-// Pure version constant returned by the `navigator_user_agent_get` host getter
-// above; relocated to engine core in Phase 6b-3 STEP 2. Kept tied to the
-// QuickJS reference version used by the local
-// fixtures.
-pub const navigator_user_agent = "quickjs-ng/0.14.0";
 
 pub const NativeBuiltinRef = struct {
     domain: NativeBuiltinDomain,

@@ -1,5 +1,5 @@
-//! The collector: non-moving, generational (sticky mark bit), incrementally
-//! marking, stop-the-world at every step. Majors mark from precise + conservative roots
+//! The collector: non-moving, generational (sticky mark bit),
+//! stop-the-world. Majors mark from precise + conservative roots
 //! into block bitmaps / header epochs and condemn from the bitmaps; minors
 //! trace the young set from roots plus the remembered owners. Strong edges
 //! walk `traceChildEdges*`; WeakMap/WeakSet values are NOT marked during the
@@ -34,6 +34,7 @@ const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const value_heap_layout = @import("value_heap_layout.zig");
 const Object = object_mod.Object;
+const WeakCollectionEntry = object_mod.WeakCollectionEntry;
 
 const CollectError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
@@ -118,17 +119,13 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
 /// an entry the trace found unreachable), store it into a surviving holder
 /// through `noteHolderStore` -- whose insertion barrier is disarmed, marking is
 /// over -- and then watch this sweep retire the entry and recycle the slot under
-/// a live shape key. That is exactly what deferring the call to
-/// `destroyDoomedSlice`'s drain-complete did: the incremental path condemns at
-/// finish and destroys in later slices, so the window was every interrupt poll
-/// of a whole destruction run (pdfjs: a live `objs` shape kept the key
-/// `font_p0_1` while its id was rebound to another spelling).
+/// a live shape key (pdfjs once kept the key `font_p0_1` on a live `objs`
+/// shape while its id was rebound to another spelling).
 ///
-/// Both major paths therefore call this inside their own pause, after
-/// condemnation. Unmarked string cells are condemned but NOT yet destroyed on
-/// the incremental path, so `sweepDead` also has to unbind the cached bodies
-/// that did not survive (see its "doomed cache" arm) -- that is the part the
-/// destroy handshake used to do before the mutator could look.
+/// The major therefore calls this inside its own pause, after condemnation.
+/// Unmarked string cells are condemned but not yet destroyed at that point,
+/// so `sweepDead` also unbinds the cached bodies that did not survive (see
+/// its "doomed cache" arm).
 fn sweepAtomTable(rt: *JSRuntime) void {
     const epoch = rt.gc.block_heap.mark_epoch;
     rt.atoms.sweepDead(rt, epoch);
@@ -155,7 +152,7 @@ fn traceFunctionBytecodeAtoms(rt: *JSRuntime, fb: *FunctionBytecode, visitor: an
     var operands = fb.atomOperandIterator();
     while (operands.next()) |operand| try gc_visit.atom(visitor, operand);
 
-    const hook = rt.small_inline_trace_atoms orelse return;
+    const hook = rt.small_inline.trace_atoms orelse return;
     const Bridge = struct {
         vis: VisType,
         failed: bool = false,
@@ -189,10 +186,10 @@ pub const Report = struct {
     skipped_sweep_incomplete_arenas: bool = false,
 };
 
-/// `ZJS_GC_VERIFY_MINOR=1`: what a FULL trace would keep, recomputed before
+/// `ZJS_GC_VERIFY`: what a FULL trace would keep, recomputed before
 /// each minor so the minor's condemned set can be checked against it.
 ///
-/// This is the systematic form of `ZJS_MINOR_AUDIT`. The audit asks "does some
+/// This is the systematic form of `ZJS_GC_AUDIT`. The audit asks "does some
 /// live object still name this?", which finds a missing barrier only when the
 /// owner is itself reachable AND the edge is one `traceChildEdges` enumerates
 /// -- it is blind to exactly the cases where the tracer does not know about the
@@ -304,47 +301,6 @@ fn computeFullReachable(rt: *JSRuntime, scan: gc.RootScan) !FullReachable {
     return reachable;
 }
 
-/// Reject the exact set an incremental finish is about to condemn against a
-/// trace that started from freshly cleared marks.
-///
-/// Fail-closed on PRECISE disagreements only, and that asymmetry is the whole
-/// design: a condemned object the fresh precise roots reach is a kill, full
-/// stop, so the caller aborts before weak state or object storage is mutated.
-/// A conservative-only disagreement is a different animal. This oracle runs on
-/// a deeper native frame than the cycle it audits, so pointer residue can exist
-/// in one scan and not the other -- `computeFullReachable`'s own contract has
-/// said so since the minor verifier. Counting it as a kill would abort healthy
-/// cycles; ignoring it silently would hide a real signal. So it is counted,
-/// separately (`ZJS_GC_VERIFY_MAJOR_ALL`, roots-diag builds).
-fn verifyFullCondemnation(rt: *JSRuntime, reachable: *const FullReachable) CollectError!void {
-    var precise_violations: usize = 0;
-    var conservative_violations: usize = 0;
-    var reported: usize = 0;
-    var objects = rt.gc.objectIterator(.all);
-    while (objects.next()) |header| {
-        if (rt.gc.headerMarked(header) or rt.gc.headerIsPinned(header)) continue;
-        const source = reachable.entries.get(@intFromPtr(header)) orelse continue;
-        switch (source) {
-            .precise => precise_violations += 1,
-            .conservative_only => conservative_violations += 1,
-        }
-        if (reported < 8) {
-            reported += 1;
-            std.debug.print("VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n", .{
-                @tagName(source),
-                @tagName(header.metaConst().flags.kind),
-            });
-        }
-    }
-    if (precise_violations + conservative_violations == 0) return;
-    std.debug.print("VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n", .{
-        precise_violations,
-        conservative_violations,
-    });
-    if (precise_violations == 0) return;
-    return error.PayloadMarkFailed;
-}
-
 /// Compute the census fields that each cost a whole-heap walk.
 ///
 /// A major over the compatibility heap needs `clearMarks` before the trace and
@@ -388,11 +344,7 @@ fn requireInvariant(result: anyerror!void, audit: []const u8, panic_message: []c
     };
 }
 
-fn verifyCollectorInvariants(
-    rt: *JSRuntime,
-    verify_scan_cache: bool,
-    require_retirement_commit: bool,
-) void {
+fn verifyCollectorInvariants(rt: *JSRuntime, require_retirement_commit: bool) void {
     const stale = rt.gc.address_registry.auditArenas();
     const missing = auditLiveObjectsResolve(rt);
     if (stale != 0 or missing != 0) {
@@ -402,18 +354,15 @@ fn verifyCollectorInvariants(
         });
         @panic("arena invariant violated");
     }
-    requireInvariant(rt.gc.address_registry.verifyIndex(verify_scan_cache), "ADDRESS INDEX", "address index invariant violated");
-    // The shape table is the one engine-global structure the MUTATOR consults
-    // while a morgue is open, and condemnation's delist is what keeps corpses
-    // out of it. That delist reads `is_hashed` as "linked in a bucket", so the
-    // biconditional it reads is an invariant with no owner -- check it.
+    requireInvariant(rt.gc.address_registry.verifyIndex(), "ADDRESS INDEX", "address index invariant violated");
+    // The shape table's `is_hashed` flag means "linked in a bucket"; that
+    // biconditional is an invariant with no single owner -- check it.
     requireInvariant(rt.shapes.verifyHashIndex(), "SHAPE HASH INDEX", "shape hash index invariant violated");
     // Validate construction pins before BlockHeap consults them as the
     // sole exception to the publication rule. A corrupt exception authority
     // must never turn arbitrary unpublished cells into accepted state.
     requireInvariant(rt.gc.verifyConstructionRoots(), "CONSTRUCTION ROOT", "construction root invariant violated");
     requireInvariant(rt.gc.verifyRepresentationInvariants(), "REPRESENTATION", "GC representation invariant violated");
-    auditDeferredPayloadRootsBeforeBlockPublication(rt);
     requireInvariant(rt.gc.verifyObjectPropertyStorageLayouts(rt), "PROPERTY STORAGE", "object property storage invariant violated");
     requireInvariant(rt.gc.verifyIntrusiveList(), "INTRUSIVE LIST", "intrusive list invariant violated");
     requireInvariant(rt.gc.block_heap.verify(), "BLOCK HEAP", "block heap invariant violated");
@@ -450,12 +399,9 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     // time before it.
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
-    // The synchronous major uses the same trace-coupled retirement contract as
-    // the incremental major. This is especially load-bearing after aborting an
-    // incremental cycle: its begin step has already cleared the young-block
-    // chain, so only tracing can retire the marked survivors. Without opening
-    // the transaction here `retireTracedYoung` is a no-op and `clearYoungState`
-    // has no chain left from which to find them.
+    // Trace-coupled retirement: only tracing can retire the marked young
+    // survivors. Without opening the transaction here `retireTracedYoung` is
+    // a no-op and `clearYoungState` cannot find them.
     rt.gc.generation.beginMajorRetirement();
     errdefer rt.gc.generation.abandonMajorRetirement();
     collector.nursery_boundary = rt.gc.nursery.boundary();
@@ -479,11 +425,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     rt.gc.last_report.swept = swept;
     rt.gc.last_report.census_ns = rt.gc.last_census_ns;
     if (gc.invariantChecksEnabled()) {
-        verifyCollectorInvariants(
-            rt,
-            collector.conservative_on,
-            !collector.report.skipped_sweep_incomplete_arenas,
-        );
+        verifyCollectorInvariants(rt, !collector.report.skipped_sweep_incomplete_arenas);
     }
     return swept;
 }
@@ -570,7 +512,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     if (collector.conservative_on) try collector.seedConservativeRoots();
     phase_timer.lap(rt, .conservative);
 
-    // §8.3: force-trace each remembered owner instead of `tryMark`ing it. An
+    // §8.3: force-trace each remembered owner instead of `shadeExact`ing it. An
     // old owner already carries a sticky mark, so marking it would make the
     // walk skip exactly the children the minor exists to find.
     var remembered = rt.gc.generation.rememberedIterator();
@@ -605,6 +547,12 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     try collector.drain();
     try collector.ephemeronFixedPoint();
     collector.commitEvacuations();
+    // Clear weak edges to young objects this minor found dead, as the major
+    // does for everything: old keys and targets carry sticky marks, so only
+    // young garbage is dropped. Without it, WeakMap/WeakSet entries whose
+    // keys die young accumulated until a major that their own growth never
+    // triggers, and every minor re-offered them all.
+    collector.processWeak();
     phase_timer.lap(rt, .trace);
 
     rt.gc.generation.stats.young_at_start_total += young_before;
@@ -638,7 +586,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // after the sweep survived this collection, so it is old now. TGC S4-h
     // (2): the trace did that, cell by cell, on header lines it had already
     // loaded (`retireTracedYoung`), and `sweepUnmarkedYoung` closed the young
-    // generation between the condemnation and the destruction slice -- so
+    // generation between the condemnation and the destruction pass -- so
     // anything published by a destructor is a NEW young object on a fresh
     // young list, which is what it should be. The pass that used to stand here
     // walked the `alloc_info` byte of every allocated cell of every young
@@ -647,7 +595,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // TGC S4-f (2): return this minor's holes to the allocator. Deliberately
     // AFTER `clearYoungBlocks` above -- `publishHotBlock` refuses a block that
     // still carries `flag_young`, and every block a minor touched carries it
-    // until that call. The doomed buckets are drained by the destruction slice inside
+    // until that call. The doomed buckets are drained by the destruction pass inside
     // the sweep; since TGC S4-e there is no parked-free stack any more, so
     // that half of the major call site's precondition is vacuous (0).
     rt.gc.block_heap.publishCompletedHotBlocksSlice(
@@ -695,7 +643,7 @@ fn promoteYoungSurvivorsInBulk(rt: *JSRuntime) void {
 /// young-block list and the young suffix, and zero the census and the
 /// remembered set built from it.
 ///
-/// TGC S4-h (2): this runs between the condemnation and the destruction slice,
+/// TGC S4-h (2): this runs between the condemnation and the destruction pass,
 /// so a destructor's own publication starts the NEXT young generation instead
 /// of being stranded in a census that has already been zeroed.
 fn closeYoungGeneration(rt: *JSRuntime) void {
@@ -976,39 +924,12 @@ fn reclaimNursery(rt: *JSRuntime, at: gc.nursery_mod.Nursery.Boundary) void {
     }
 }
 
-/// Destruction order for the morgue (qjs `gc_free_cycles`'s pass sequence),
-/// spelled as a phase index so a bounded slice
-/// can resume where its budget ran out. Objects first; realms, modules and
-/// function bytecode after; cells and shapes last, because earlier
-/// destructors still read them.
+/// Destruction order for the morgue (qjs `gc_free_cycles`'s pass sequence).
+/// Objects first; realms, modules and function bytecode after; cells and
+/// shapes last, because earlier destructors still read them.
 const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .function_bytecode, .var_ref, .big_int };
 
-/// Destroy up to `budget_ns` of the morgue. Returns true when it is empty.
-///
-/// Runs under `.tracer_destroy`. TGC S4-e: a destructor releases its own
-/// storage, so there is no second pass to stretch across polls; the morgue is
-/// stable between slices because everything in it is unreachable,
-/// weak-cleared, and invisible to collections (which are gated while the
-/// morgue is open).
-/// Corpses processed between budget checks.
-///
-/// The clock is not free: `gc.schedulingNanos` goes through the
-/// `std.Io.Clock` interface, so each read is at least a virtual call and a
-/// timestamp read (vDSO on Linux, not necessarily a syscall), and at the old
-/// cadence of 8 a single earley-boyer run took roughly 21 million of them.
-///
-/// This buys throughput; it does NOT buy a static pause bound, and the
-/// budget check never did. A single destruction is unbounded from this
-/// module's point of view: a class payload finalizer and an ArrayBuffer's
-/// external deinit are host callbacks, and the property loop is O(own
-/// properties). What the cadence changes is the number of ordinary small
-/// objects that can pass between two checks -- 256 of those at ~50 ns is
-/// about 13 us against a 1 ms budget. The pause distribution is the plan's
-/// gate and is measured, not asserted.
-const destroy_clock_cadence: usize = 256;
-
 fn morgueIsEmpty(rt: *const JSRuntime) bool {
-    if (rt.gc.morgue.cursor != null) return false;
     if (rt.gc.block_heap.doomed_blocks != null) return false;
     if (rt.gc.nonblock_objects) |authority| {
         if (authority.doomed.items.len != 0) return false;
@@ -1020,18 +941,13 @@ fn morgueIsEmpty(rt: *const JSRuntime) bool {
 }
 
 /// Read-only endpoint/settled census for the fixed-work gate. These counts
-/// deliberately come from the representations that keep the morgue open,
-/// rather than from lifetime collection counters: the gate needs to
-/// distinguish one unserved destruction slice from a closed transaction that
-/// accidentally retained state.
+/// deliberately come from the representations that hold condemned state,
+/// rather than from lifetime collection counters, so a collection that
+/// returned with state still condemned is visible.
 pub const DoomedStateSnapshot = struct {
-    pending: bool,
     nonempty_buckets: usize,
     bucket_headers: usize,
-    cursor_present: bool,
     doomed_blocks: usize,
-    deferred_finalizers: usize,
-    active_finalizer: bool,
 };
 
 pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
@@ -1056,51 +972,24 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     }
 
     return .{
-        .pending = rt.gc.morgue.pending,
         .nonempty_buckets = nonempty_buckets,
         .bucket_headers = bucket_headers,
-        .cursor_present = rt.gc.morgue.cursor != null,
         .doomed_blocks = doomed_blocks,
-        .deferred_finalizers = rt.deferred_class_payload_finalizers.items.len,
-        .active_finalizer = rt.active_deferred_class_payload_finalizer != null,
     };
 }
 
-/// Cross-lane publication contract for deferred plugin payload roots. Block
-/// draining may publish a partial block before the global doomed transaction
-/// closes, but no cell reachable from a live-wrapper, queued-job, or active-job
-/// payload root may be among that block's released intervals. Call this
-/// immediately before every such publication point; d/f's clustered drain and
-/// hot-block publication paths share this seam.
-fn auditDeferredPayloadRootsBeforeBlockPublication(rt: *JSRuntime) void {
-    if (!gc.invariantChecksEnabled()) return;
-    requireInvariant(rt.verifyDeferredClassPayloadRootLiveness(), "DEFERRED PAYLOAD ROOT", "deferred payload root entered doomed or released storage");
-}
-
-/// The sliced-destruction exit contract. The morgue gate is the only thing
-/// preventing a fresh trace from observing resource-stripped or parked
-/// objects, so a false gate must mean every representation of that state is
-/// empty. Payload-root liveness is checked even while the transaction stays
-/// open, because partial blocks may already have been published by then.
+/// Outside a collection the morgue is empty: every collection destroys what
+/// it condemned before it returns, so no trace can observe a
+/// resource-stripped or parked object.
 pub fn auditDoomedExitInvariant(rt: *const JSRuntime) void {
     if (!gc.invariantChecksEnabled()) return;
-    auditDeferredPayloadRootsBeforeBlockPublication(@constCast(rt));
-    if (rt.gc.morgue.pending) return;
     if (!morgueIsEmpty(rt)) @panic("gc: closed doomed state retains morgue entries");
-}
-
-/// A new condemnation may reuse every morgue field. Catch a caller that
-/// starts one before the previous destruction transaction has really closed.
-fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
-    std.debug.assert(!rt.gc.morgue.pending);
-    std.debug.assert(morgueIsEmpty(rt));
 }
 
 /// Move a condemned non-object carrier onto its kind's morgue bucket.
 ///
-/// TGC S5-b: every condemnation path -- both STW sweeps and the incremental
-/// finish -- publishes here, so the destruction slice has exactly one input
-/// representation. Objects never arrive: block cells are owned by the doomed
+/// Every condemnation path publishes here, so destruction has exactly one
+/// input representation. Objects never arrive: block cells are owned by the doomed
 /// bitmap and non-block Objects by the side authority's doomed lane.
 inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
     const kind = header.metaConst().flags.kind;
@@ -1111,23 +1000,12 @@ inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
 /// The condemnation half of every sweep: detach the unmarked, unpinned
 /// carriers onto the morgue and retire the survivors' young bits.
 ///
-/// TGC S5-b: this was written three times -- the synchronous major's whole
-/// list, the minor's young suffix, and the incremental finish's pause -- with
-/// the same four-case body (marked / pinned / dead list carrier / dead
-/// side-authority Object) and three different spellings of it. What actually
-/// differed is two axes, and they are the two parameters here:
-///
-///   `young_only` picks the range. The minor walks the young suffix from
-///   `young_head`, whose predecessor was captured at the first publication, so
-///   the detach stays O(young) instead of searching from the head per corpse;
-///   the majors walk the whole list from the sentinel. The side authority is
-///   unordered rather than a suffix in both cases, so its young half is a
-///   filter on the young bit rather than a range.
-///
-///   `sink` is the per-corpse extra work. The finish pause owes the pacing
-///   contract a byte total and owes the shape table an immediate delisting
-///   (the mutator runs before the destruction slices); the synchronous sweeps
-///   destroy in the same pause and owe neither.
+/// `young_only` picks the range. The minor walks the young suffix from
+/// `young_head`, whose predecessor was captured at the first publication, so
+/// the detach stays O(young) instead of searching from the head per corpse;
+/// the major walks the whole list from the sentinel. The side authority is
+/// unordered rather than a suffix in both cases, so its young half is a
+/// filter on the young bit rather than a range.
 ///
 /// The survivor arms retire the young bit rather than leaving it to a bulk
 /// pass: TGC S4-h (2) made the trace retire block cells as it loads them, but
@@ -1139,7 +1017,7 @@ inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
 /// bit would make the barrier remember its owner on every store, forever.
 ///
 /// Returns the number of headers condemned.
-fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
+fn condemnListSweep(rt: *JSRuntime, young_only: bool) usize {
     var condemned: usize = 0;
 
     // List carriers are singly linked in trace. Walk them with an explicit
@@ -1170,7 +1048,6 @@ fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
                 cursor = next;
                 continue;
             }
-            sink.note(rt, header);
             rt.gc.detachCycleCandidateAfter(previous, header);
             condemnIntoBucket(rt, header);
             condemned += 1;
@@ -1194,7 +1071,6 @@ fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
                 object_index += 1;
                 continue;
             }
-            sink.note(rt, header);
             rt.gc.condemnNonBlockObject(header);
             condemned += 1;
         }
@@ -1202,53 +1078,10 @@ fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
     return condemned;
 }
 
-/// The sink of a sweep that destroys in the same pause: nothing is owed
-/// between the condemnation and the teardown, so there is no extra per-corpse
-/// work at all.
-const SamePauseSink = struct {
-    fn note(_: *const @This(), _: *JSRuntime, _: *gc.Header) void {}
-};
-
-/// The sink of the incremental finish: the mutator runs between this
-/// condemnation and the destruction slices, so the byte total the pacing
-/// contract reads and the shape table the mutator consults must both be
-/// settled here.
-const FinishCondemnSink = struct {
-    doomed_bytes: usize = 0,
-
-    fn note(self: *@This(), rt: *JSRuntime, header: *gc.Header) void {
-        self.doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
-        // A condemned shape must leave the transition table NOW, not at its
-        // destructor: a table that still serves the corpse lets a live object
-        // adopt a shape that is already scheduled to be freed. Realms and
-        // modules sit on membership lists that only collections walk, and
-        // those are gated while the morgue is open; the shape table is the one
-        // engine-global structure the MUTATOR consults.
-        if (header.metaConst().flags.kind == .shape) {
-            rt.shapes.delistCondemnedShape(header);
-        }
-    }
-};
-
-/// Outcome of one destruction slice. `morgue_empty` is the only thing the
-/// slice can report that its caller cannot re-derive cheaply: the budget may
-/// have run out mid-phase, and the resume state lives in the registry.
-const CondemnedSliceResult = struct {
-    destroyed: usize,
-    morgue_empty: bool,
-};
-
-/// Ordered teardown of the morgue, in one bounded slice.
+/// Ordered teardown of the whole morgue. Returns the number destroyed.
 ///
-/// TGC S5-b: the single destruction authority. The STW sweeps and the
-/// incremental morgue drain used to be two transcriptions of the same five
-/// kind passes -- one walking `tmp_obj_list` with a `residual_kinds` bitmap
-/// prescan, one walking the `doomed_by_kind` buckets with a budget -- and
-/// they had already drifted (`sweep_current` was published for a different
-/// subset of kinds on each side). Condemnation now feeds the buckets on
-/// every path, and a `budget_ns` of `maxInt` is exactly the old STW
-/// semantics: no clock check can trip, so the slice runs the morgue to
-/// empty.
+/// The single destruction authority: every condemnation path (both
+/// collections) feeds the per-kind buckets, and this drains them.
 ///
 /// The order is load-bearing (qjs `gc_free_cycles`): objects first, then
 /// realms, modules and function bytecode, and only then the cells and shapes
@@ -1265,13 +1098,10 @@ const CondemnedSliceResult = struct {
 ///
 /// `sweep_string_extents` runs the whole-table extent sweep after the block
 /// corpses: only a full major trace can prove an OLD extent dead, so the
-/// synchronous major asks for it and the minor (which sweeps young extents
-/// from `Heap.young_extents`) and the incremental drain (which swept them in
-/// the finish pause) do not.
-fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: bool) CondemnedSliceResult {
-    const started = gc.schedulingNanos();
+/// major asks for it and the minor (which sweeps young extents from
+/// `Heap.young_extents`) does not.
+fn destroyCondemned(rt: *JSRuntime, sweep_string_extents: bool) usize {
     var destroyed: usize = 0;
-    var since_clock: usize = 0;
 
     const old_phase = rt.gc.hot.phase;
     rt.gc.hot.phase = .tracer_destroy;
@@ -1309,13 +1139,6 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                 else => unreachable,
             }
             destroyed += 1;
-            since_clock += 1;
-            if (since_clock == destroy_clock_cadence) {
-                since_clock = 0;
-                if (gc.schedulingNanos() -| started >= budget_ns) {
-                    return .{ .destroyed = destroyed, .morgue_empty = false };
-                }
-            }
         }
         // The destructor set is drained, so the rest of this block is
         // bitmap work that cannot be interrupted. Close the block out of
@@ -1344,13 +1167,10 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
     }
 
     // Whole-table extent sweep: only a full major trace can prove an OLD
-    // extent dead. Unbudgeted by construction -- the only caller that asks
-    // for it is the synchronous major, whose budget cannot trip.
+    // extent dead.
     if (sweep_string_extents) destroyed += string_mod.sweepExtents(rt);
 
-    while (rt.gc.morgue.kind_pass < doomed_phase_kinds.len + 1) {
-        const final_pass = rt.gc.morgue.kind_pass == doomed_phase_kinds.len;
-        const phase_kind: gc.GcKind = if (final_pass) .shape else doomed_phase_kinds[rt.gc.morgue.kind_pass];
+    for (doomed_phase_kinds ++ [_]gc.GcKind{.shape}) |phase_kind| {
         if (phase_kind == .object) {
             if (rt.gc.nonblock_objects) |authority| {
                 while (authority.doomed.pop()) |h| {
@@ -1358,21 +1178,12 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                     Object.destroyFromHeader(rt, h);
                     rt.gc.lists.sweep_current = null;
                     destroyed += 1;
-                    since_clock += 1;
-                    if (since_clock == destroy_clock_cadence) {
-                        since_clock = 0;
-                        if (gc.schedulingNanos() -| started >= budget_ns) {
-                            return .{ .destroyed = destroyed, .morgue_empty = false };
-                        }
-                    }
                 }
             }
-            rt.gc.morgue.kind_pass += 1;
-            rt.gc.morgue.cursor = null;
             continue;
         }
         const bucket = &rt.gc.morgue.by_kind[@intFromEnum(phase_kind)];
-        var cursor = rt.gc.morgue.cursor orelse bucket.sentinel.next_non_object;
+        var cursor = bucket.sentinel.next_non_object;
         while (cursor) |h| {
             if (h == &bucket.sentinel) break;
             const next = h.nextNonObject();
@@ -1382,7 +1193,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
             const wanted = kind == phase_kind;
             if (wanted) {
                 // Each kind owns one bucket and destruction consumes it from
-                // the head, including after a budgeted resume.
+                // the head.
                 bucket.delAfterTraversalOwned(&bucket.sentinel, h);
                 rt.gc.lists.sweep_current = h;
                 switch (kind) {
@@ -1415,104 +1226,11 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                 rt.gc.lists.sweep_current = null;
                 if (kind != .function_bytecode) destroyed += 1;
             }
-            // Count VISITED nodes, not destroyed ones. The morgue is walked
-            // once per kind, so a pass looking for shapes steps over every
-            // object, realm, module and var_ref on the list -- and with the
-            // counter inside the `wanted` arm those steps never reached a
-            // budget check. A long list of the wrong kind was an unbounded
-            // scan with no clock read in it (adversarial review, codex,
-            // 2026-08-27).
-            since_clock += 1;
-            if (since_clock == destroy_clock_cadence) {
-                since_clock = 0;
-                if (gc.schedulingNanos() -| started >= budget_ns) {
-                    rt.gc.morgue.cursor = next;
-                    return .{ .destroyed = destroyed, .morgue_empty = false };
-                }
-            }
             cursor = next;
         }
-        rt.gc.morgue.kind_pass += 1;
-        rt.gc.morgue.cursor = null;
     }
 
-    return .{ .destroyed = destroyed, .morgue_empty = true };
-}
-
-/// Run the STW twin of a destruction slice: the whole morgue, no budget, from
-/// a fresh phase cursor. Both synchronous sweeps condemn into the same buckets
-/// as the incremental finish, so the only difference left is the absence of a
-/// resume state and of the sliced transaction's bookkeeping.
-fn destroyCondemnedWhole(rt: *JSRuntime, sweep_string_extents: bool) usize {
-    rt.gc.morgue.kind_pass = 0;
-    rt.gc.morgue.cursor = null;
-    const result = destroyCondemnedSlice(rt, std.math.maxInt(u64), sweep_string_extents);
-    std.debug.assert(result.morgue_empty);
-    return result.destroyed;
-}
-
-/// Destroy up to `budget_ns` of the morgue. Returns the number destroyed.
-///
-/// Runs under `.tracer_destroy`. TGC S4-e: a destructor releases its own
-/// storage, so there is no second pass to stretch across polls; the morgue is
-/// stable between slices because everything in it is unreachable,
-/// weak-cleared, and invisible to collections (which are gated while the
-/// morgue is open).
-pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
-    rt.assertGCAllowed();
-    std.debug.assert(rt.gc.morgue.pending);
-    const result = destroyCondemnedSlice(rt, budget_ns, false);
-    rt.gc.morgue.destroyed += result.destroyed;
-    rt.gc.incremental.stats.doomed_destroyed_objects +|= result.destroyed;
-    if (!result.morgue_empty) return result.destroyed;
-
-    // TGC S4-e: a deferred class payload finalizer still retains JSValues into
-    // this condemnation, so the transaction stays open until those callbacks
-    // have run. Everything else that used to hold it open (the parked-free
-    // drain) is gone.
-    if (!rt.hasPendingDeferredClassPayloadFinalizers()) {
-        // Every destructor has run and released its own storage, so block
-        // alloc bitmaps are canonical. This transaction boundary, not
-        // per-block doomed-list removal, is the first sound point to publish
-        // partial blocks for interval reuse.
-        auditDeferredPayloadRootsBeforeBlockPublication(rt);
-        rt.gc.block_heap.publishCompletedHotBlocks();
-        rt.gc.morgue.pending = false;
-        rt.gc.morgue.cursor = null;
-        rt.gc.incremental.stats.cycles_completed += 1;
-        // TGC S3 §2.4: the atom sweep is NOT here. It belongs to the pause that
-        // took the verdict (`finishIncrementalCycle`); running it after the
-        // mutator has had a whole destruction run's worth of polls lets a
-        // re-interned id be retired under a live holder. See `sweepAtomTable`.
-    }
-    auditDoomedExitInvariant(rt);
-    return result.destroyed;
-}
-
-/// Complete any pending sliced destruction synchronously. Explicit
-/// collections and teardown call this: destruction is irreversible, so unlike
-/// an open marking cycle it cannot be aborted, only finished.
-pub fn finishPendingDestruction(rt: *JSRuntime) void {
-    rt.assertGCAllowed();
-    while (rt.gc.morgue.pending) {
-        _ = destroyDoomedSlice(rt, std.math.maxInt(u64));
-        // Payload jobs may retain JSValues into this condemnation. Their
-        // callbacks therefore run after every resource destructor but before
-        // the parked structs are allowed to disappear. The synchronous entry
-        // promises completion, so it also owns completing this prerequisite.
-        if (rt.hasPendingDeferredClassPayloadFinalizers()) {
-            std.debug.assert(rt.gc.hot.phase == .none);
-            // Destruction has returned to Phase.none. Publish that idle state
-            // to the reentrant callback so its allocations can request the
-            // next collection; the active-job guard still prevents that new
-            // request from entering a collector while this morgue is open.
-            const collector_was_running = rt.gc_running;
-            rt.gc_running = false;
-            rt.drainDeferredClassPayloadFinalizers();
-            rt.gc_running = collector_was_running;
-        }
-    }
-    auditDoomedExitInvariant(rt);
+    return destroyed;
 }
 
 /// The other direction of the arena invariant: every live object must be
@@ -1566,10 +1284,6 @@ const Collector = struct {
     report: Report = .{},
     exact_mark_count: usize = 0,
     conservative_on: bool,
-    /// Incremental-cycle mode: `shade` pushes grey objects onto the
-    /// persistent barrier queue instead of the per-collection work list, so
-    /// the frontier survives between increments. The work list is untouched
-    /// in this mode, which also means the collector's arena never allocates.
     /// Minor mode: `seedRoots` adds the atom table's not-yet-promoted symbol
     /// bodies (`AtomTable.young_symbol_atoms`). A major must NOT take those
     /// as roots -- it is the collection that is entitled to retire a symbol
@@ -1586,6 +1300,24 @@ const Collector = struct {
     /// so a stamp here would destroy the verdict the probe exists to check
     /// (`AtomTable.atomEdgeBodyWithoutStamp`).
     atom_stamps_frozen: bool = false,
+    /// Set for the duration of `ephemeronFixedPoint`.
+    ephemerons: ?*Ephemerons = null,
+
+    /// Ephemeron fixed point state. Tracing a weak-collection holder offers
+    /// its entries and tracing a weak-keyed object releases the entries
+    /// waiting on its key, so a chain of entries resolves in one drain
+    /// instead of one full rescan per link.
+    const Ephemerons = struct {
+        /// Object key identity -> newest waiter in `waiters`.
+        waiting: std.AutoHashMapUnmanaged(usize, u32) = .empty,
+        waiters: std.ArrayListUnmanaged(Waiter) = .empty,
+        /// Symbol keys are never traced as objects; rescanned per round.
+        symbol_keyed: std.ArrayListUnmanaged(*WeakCollectionEntry) = .empty,
+        out_of_memory: bool = false,
+
+        const Waiter = struct { entry: *WeakCollectionEntry, next: u32 };
+        const no_waiter = std.math.maxInt(u32);
+    };
 
     fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1787,7 +1519,7 @@ const Collector = struct {
         // published-grey push the moment registration completes -- or it
         // dies unconstructed, in which case there was nothing to keep.
         if (!header.meta().alloc_info.heap_accounted) return;
-        // A condemned corpse awaiting its destruction slice. No precise root
+        // A condemned corpse awaiting its destruction pass. No precise root
         // can name it -- the remark proved it unreachable and processWeak
         // cleared its identities -- so the only way here is conservative
         // stack residue resolving a parked slab block that still reads
@@ -1849,6 +1581,17 @@ const Collector = struct {
         self.shadeExact(obj.gcHeader());
     }
 
+    /// Objects whose address a runtime list stores raw -- the weak-holder
+    /// chain (`gc_weak.registerHolder`) and `borrowed_reference_holders` --
+    /// must never move: a move rebinds only the weak-identity tables, so
+    /// those lists would keep naming the husk. They are never young (they are
+    /// allocated old), which `evacuate` asserts.
+    fn addressHeldByRuntimeList(header: *gc.Header) bool {
+        if (header.metaConst().flags.kind != .object) return false;
+        const object = Object.fromHeader(header);
+        return object.isWeakReferenceHolderClass() or object.flags.is_borrowed_reference_holder;
+    }
+
     /// The copying half of the young generation.
     ///
     /// Returns the object's new address when it lives in the nursery, so the
@@ -1873,6 +1616,7 @@ const Collector = struct {
             return gc.forwardingTarget(header);
         }
         const page = self.rt.gc.nursery.pageOf(addr) orelse return null;
+        std.debug.assert(!addressHeldByRuntimeList(header));
         // Two kinds of pin, one rule: the object stays. A ledger pin keys on
         // the address (a detached generator shell has no Shape and is reached
         // only that way); a conservative pin is a native frame word that
@@ -1945,7 +1689,7 @@ const Collector = struct {
     /// S4-b/S4-c put one or two of these cells behind EVERY object with
     /// out-of-line properties or a payload, which made this edge 30% of
     /// `shadeExact` on splay (5.1% of the whole run, split 17.3/13.1 between
-    /// incremental major marking and minors -- the baseline S2-i tree, whose
+    /// major marking and minors -- the baseline S2-i tree, whose
     /// only storage cell was the rope tail buffer, spends 0.0% here).
     ///
     /// The guards are `shadeExact`'s, in its order and for its reasons:
@@ -2001,13 +1745,12 @@ const Collector = struct {
         // writable slots. Discover every root address restriction before any
         // of those slots (including construction-root children) can move it.
         try self.retainPagesNamedByReadonlyRoots();
-        // `context_head` / `constructing_context_head` are membership lists,
-        // not strong roots (gc-invariants.md). A host-released Realm still
-        // sitting on the list because a heap cycle holds its last RC must be
-        // collectable — the same graph trial deletion frees. Live contexts
-        // are reached through host-create-ref `root_providers` (registered
-        // by ownership, unregistered when that ref is consumed) and
-        // `traceActiveRoots`.
+        // `contexts.live_head` / `contexts.constructing_head` are membership lists,
+        // not strong roots (gc-invariants.md): a host-released Realm still on
+        // the list but reachable only from garbage must be collectable. Live
+        // contexts are reached through host-create-ref `root_providers`
+        // (registered by ownership, unregistered when that ref is consumed)
+        // and `traceActiveRoots`.
         for (self.rt.gc.pins.headers(), self.rt.gc.pins.pinCounts()) |header, pin_count| {
             // Detached generator shells have a complete payload but no Shape
             // until parameter initialization resolves the final prototype.
@@ -2081,11 +1824,11 @@ const Collector = struct {
         // holder can be an OLD shape naming it by atom id -- an edge no minor
         // traces and no barrier records.
         if (self.minor_mode) try self.rt.atoms.traceYoungSymbolBodies(&visitor);
-        // `runObjectCycleRemovalWithValueRoots` passes a frame that is not
+        // `JSRuntime.collectFull` can pass a frame that is not
         // necessarily linked on `active_value_roots`. Trial deletion ignored
         // it because RC>0 already kept those values; STW must visit it.
         if (self.extra_roots) |roots| {
-            try self.rt.traceValueRootFrameChain(roots, &visitor);
+            try self.rt.traceValueRootFrames(roots, &visitor);
         }
     }
 
@@ -2149,7 +1892,7 @@ const Collector = struct {
         };
         try self.rt.traceActiveRoots(&visitor);
         if (self.extra_roots) |roots|
-            try self.rt.traceValueRootFrameChain(roots, &visitor);
+            try self.rt.traceValueRootFrames(roots, &visitor);
     }
 
     fn seedConservativeRoots(self: *Collector) CollectError!void {
@@ -2173,6 +1916,7 @@ const Collector = struct {
         if (comptime std.debug.runtime_safety) self.tracing_owner = header;
         try traceHeaderEdges(self.rt, self, header);
         if (self.err) |err| return err;
+        if (self.ephemerons != null) self.traceEphemeronEdges(header);
         // Trace-coupled retirement: promotion is bound to "strong edges
         // handled", not to the mark claim, so a header retired here has
         // genuinely been through this cycle's trace.
@@ -2189,7 +1933,7 @@ const Collector = struct {
     /// constructor does to a half-built object.
     ///
     /// The half-built object that reaches here is the detached generator
-    /// shell. `createDetachedGeneratorShell` leaves `shape_ref` absent until
+    /// shell. `createGeneratorShell` leaves `shape_ref` absent until
     /// `finishGeneratorShell` resolves the prototype, while
     /// `runGeneratorParameterInit` already stores into its payload -- so the
     /// shell is a legitimate remembered owner with no readable Shape, and the
@@ -2217,7 +1961,7 @@ const Collector = struct {
         // the trace that does not claim a mark, so it is the only one that
         // must not retire. Promoting a header the trace has not proven live
         // takes it out of the census and off the young list while leaving it
-        // unmarked, and `ZJS_MINOR_AUDIT=fatal` catches the result as a live
+        // unmarked, and `ZJS_GC_AUDIT=fatal` catches the result as a live
         // old owner holding an unremembered edge into the condemned young set.
         // A remembered owner CAN be young: the barrier classifies an
         // unpublished header as old (it reads `flags.young == false`) and
@@ -2229,25 +1973,49 @@ const Collector = struct {
     }
 
     fn ephemeronFixedPoint(self: *Collector) CollectError!void {
+        var state: Ephemerons = .{};
+        self.ephemerons = &state;
+        defer self.ephemerons = null;
+        var holder = self.rt.weak.holder_head;
+        while (holder) |object| : (holder = object.weakReferenceHolderNext()) {
+            if (self.rt.gc.headerMarked(object.gcHeader())) self.offerEphemeronHolder(object);
+        }
+        while (true) {
+            if (self.err) |err| return err;
+            try self.drain();
+            self.report.ephemeron_rounds += 1;
+            if (state.out_of_memory) {
+                self.ephemerons = null;
+                return self.ephemeronFixedPointByRescan();
+            }
+            var progressed = false;
+            var index: usize = 0;
+            while (index < state.symbol_keyed.items.len) {
+                const entry = state.symbol_keyed.items[index];
+                if (!keyIsMarked(self.rt, entry.key_identity)) {
+                    index += 1;
+                    continue;
+                }
+                self.shadeEphemeronValue(entry);
+                _ = state.symbol_keyed.swapRemove(index);
+                progressed = true;
+            }
+            if (!progressed) break;
+        }
+    }
+
+    /// The allocation-free fallback: rescan every entry until a round
+    /// shades nothing.
+    fn ephemeronFixedPointByRescan(self: *Collector) CollectError!void {
         while (true) {
             const before = self.report.ephemeron_values_shaded;
-            var holder = gc.gc_weak.holderHead(self.rt);
-            while (holder) |object| {
-                const next = object.weakReferenceHolderNext();
-                if (self.rt.gc.headerMarked(object.gcHeader())) {
-                    if (object.collectionPayloadForCycleGc()) |payload| {
-                        for (payload.weak_entries.items) |*entry| {
-                            if (!keyIsMarked(self.rt, entry.key_identity)) continue;
-                            const child = entry.value.cycleMarkHeader() orelse continue;
-                            if (self.rt.gc.headerMarked(child)) continue;
-                            // Conditional strong edges need the same relocation
-                            // and rollback handling as ordinary value slots.
-                            self.visitValue(&entry.value);
-                            self.report.ephemeron_values_shaded += 1;
-                        }
-                    }
+            var holder = self.rt.weak.holder_head;
+            while (holder) |object| : (holder = object.weakReferenceHolderNext()) {
+                if (!self.rt.gc.headerMarked(object.gcHeader())) continue;
+                const payload = object.collectionPayload() orelse continue;
+                for (payload.weak_entries.items) |*entry| {
+                    if (keyIsMarked(self.rt, entry.key_identity)) self.shadeEphemeronValue(entry);
                 }
-                holder = next;
             }
             if (self.err) |err| return err;
             try self.drain();
@@ -2256,16 +2024,73 @@ const Collector = struct {
         }
     }
 
+    /// Called for every traced header while `ephemerons` is set.
+    fn traceEphemeronEdges(self: *Collector, header: *gc.Header) void {
+        if (header.meta().flags.kind != .object) return;
+        const object = Object.fromHeader(header);
+        if (object.isWeakReferenceHolderClass()) self.offerEphemeronHolder(object);
+        if (!object.flags.has_weak_id) return;
+        const state = self.ephemerons.?;
+        const identity = gc.gc_weak.peekObject(self.rt, object) orelse return;
+        const released = state.waiting.fetchRemove(identity) orelse return;
+        var cursor = released.value;
+        while (cursor != Ephemerons.no_waiter) {
+            const waiter = state.waiters.items[cursor];
+            self.shadeEphemeronValue(waiter.entry);
+            cursor = waiter.next;
+        }
+    }
+
+    fn offerEphemeronHolder(self: *Collector, holder: *Object) void {
+        const payload = holder.collectionPayload() orelse return;
+        for (payload.weak_entries.items) |*entry| self.offerEphemeron(entry);
+    }
+
+    fn offerEphemeron(self: *Collector, entry: *WeakCollectionEntry) void {
+        if (keyIsMarked(self.rt, entry.key_identity)) return self.shadeEphemeronValue(entry);
+        const state = self.ephemerons.?;
+        if (state.out_of_memory) return;
+        const arena = self.allocator();
+        if ((entry.key_identity & 1) != 0) {
+            state.symbol_keyed.append(arena, entry) catch {
+                state.out_of_memory = true;
+            };
+            return;
+        }
+        const waiter_index: u32 = @intCast(state.waiters.items.len);
+        const slot = state.waiting.getOrPut(arena, entry.key_identity) catch {
+            state.out_of_memory = true;
+            return;
+        };
+        const next = if (slot.found_existing) slot.value_ptr.* else Ephemerons.no_waiter;
+        state.waiters.append(arena, .{ .entry = entry, .next = next }) catch {
+            if (!slot.found_existing) _ = state.waiting.remove(entry.key_identity);
+            state.out_of_memory = true;
+            return;
+        };
+        slot.value_ptr.* = waiter_index;
+    }
+
+    /// The key is live, so the value is too. Conditional strong edges need
+    /// the same relocation and rollback handling as ordinary value slots.
+    fn shadeEphemeronValue(self: *Collector, entry: *WeakCollectionEntry) void {
+        const child = entry.value.cycleMarkHeader() orelse return;
+        if (self.rt.gc.headerMarked(child)) return;
+        self.visitValue(&entry.value);
+        self.report.ephemeron_values_shaded += 1;
+    }
+
     fn processWeak(self: *Collector) void {
         for (self.rt.roots.weak_root_slots.items) |slot| {
             const identity = slot.identity orelse continue;
             if (!keyIsMarked(self.rt, identity)) {
-                self.rt.clearWeakRootSlot(slot, true);
+                self.rt.clearWeakRootSlot(slot);
+                self.rt.roots.queueWeakNotify(slot);
             }
         }
 
         var finalization_enqueue_blocked = false;
-        var current = gc.gc_weak.holderHead(self.rt);
+        var current = self.rt.weak.holder_head;
         while (current) |holder| {
             const next = holder.weakReferenceHolderNext();
             if (self.rt.gc.headerMarked(holder.gcHeader())) {
@@ -2284,7 +2109,7 @@ const Collector = struct {
             }
         }
 
-        if (holder.collectionPayloadForCycleGc()) |payload| {
+        if (holder.collectionPayload()) |payload| {
             var read_index: usize = 0;
             var write_index: usize = 0;
             var removed = false;
@@ -2312,8 +2137,10 @@ const Collector = struct {
         var write_index: usize = 0;
         while (read_index < finalization_payload.cells.items.len) : (read_index += 1) {
             var cell = finalization_payload.cells.items[read_index];
+            if (cell.state == .removed) continue;
             if (cell.unregister_token_identity) |identity| {
                 if (!keyIsMarked(self.rt, identity)) {
+                    _ = finalization_payload.dropTokenCell(identity);
                     self.rt.clearWeakIdentitySlot(&cell.unregister_token_identity);
                 }
             }
@@ -2335,14 +2162,19 @@ const Collector = struct {
                 write_index += 1;
                 continue;
             }
-            // Tombstone before enqueue/destroy so a reentrant collection cannot
+            // Tombstone before enqueue so a reentrant collection cannot
             // consume another cell's reserved job slot (§9.3).
             finalization_payload.cells.items[read_index].state = .queued;
-            object_gc.enqueueFinalizationCleanup(self.rt, finalization_payload, cell.held_value);
-            cell.state = .queued;
-            cell.destroy(self.rt);
+            var queued = cell;
+            if (object_gc.enqueueFinalizationCleanup(self.rt, holder.value(), finalization_payload, &queued)) {
+                finalization_payload.cells.items[write_index] = queued;
+                write_index += 1;
+            } else {
+                queued.destroy(self.rt);
+            }
         }
         finalization_payload.cells.shrinkRetainingCapacity(write_index);
+        finalization_payload.removed_cells = 0;
         holder.pruneBorrowedReferenceHolderIfEmpty(self.rt);
     }
 
@@ -2390,7 +2222,7 @@ const Collector = struct {
         var doomed: std.ArrayList(*gc.Header) = .empty;
         defer doomed.deinit(self.allocator());
         // Every condemned kind is freed, not just `.object` -- see
-        // `destroyCondemnedSlice`. A young var_ref or shape the trace did not reach
+        // `destroyCondemned`. A young var_ref or shape the trace did not reach
         // is exactly as dead as a young object it did not reach. The trace is
         // the liveness authority; rc cannot mask a missing root or barrier.
         if (snapshot_doomed) {
@@ -2440,8 +2272,7 @@ const Collector = struct {
             self.stampYoungBlockCorpses();
             // The list half is the young suffix and the side-authority half
             // is filtered by the young bit; both are the shared walk.
-            var sink = SamePauseSink{};
-            _ = condemnListSweep(self.rt, &sink, true);
+            _ = condemnListSweep(self.rt, true);
         }
         if (full_reachable) |reachable| {
             var violations: usize = 0;
@@ -2509,7 +2340,7 @@ const Collector = struct {
         self.rt.gc.hot.phase = .tracer_destroy;
         defer self.rt.gc.hot.phase = old_phase;
 
-        // The extent half of the young set, FIRST. The destruction slice
+        // The extent half of the young set, FIRST. The destruction pass
         // covers only the block/bucket carriers, and an extent is in neither;
         // without this a short-lived >128 B string had to survive to the next
         // major. It runs before the close because it reads both structures the
@@ -2527,7 +2358,7 @@ const Collector = struct {
         std.debug.assert(self.rt.gc.generation.stats.young_publications == published_before);
 
         // TGC S4-h (2): close the young generation BETWEEN the condemnation and
-        // the destruction slice, not after it.
+        // the destruction pass, not after it.
         //
         // Trace-coupled retirement leaves nothing for a bulk promotion pass to
         // do -- but it also leaves nothing to promote an object a DESTRUCTOR
@@ -2545,7 +2376,7 @@ const Collector = struct {
         if (snapshot_doomed) promoteYoungSurvivorsInBulk(self.rt);
         closeYoungGeneration(self.rt);
 
-        reclaimed += destroyCondemnedWhole(self.rt, false);
+        reclaimed += destroyCondemned(self.rt, false);
 
         // Survivors keep their marks: that is what makes them old.
         return reclaimed;
@@ -2567,8 +2398,7 @@ const Collector = struct {
         );
 
         // The whole live list plus the rare side-authoritative Objects.
-        var sink = SamePauseSink{};
-        _ = condemnListSweep(self.rt, &sink, false);
+        _ = condemnListSweep(self.rt, false);
 
         // The compact trace header has no predecessor.  Close the retired
         // pre-sweep suffix here; any allocation performed by destruction opens
@@ -2579,18 +2409,16 @@ const Collector = struct {
         self.rt.gc.hot.phase = .tracer_destroy;
         defer self.rt.gc.hot.phase = old_phase;
 
-        const garbage_count = destroyCondemnedWhole(self.rt, true);
+        const garbage_count = destroyCondemned(self.rt, true);
         sweepAtomTable(self.rt);
         // The pages go back only now: the destructors above allocate, and an
         // object one of them created must not be on a page already handed away.
         if (self.rt.gc.nursery.enabled) reclaimNursery(self.rt, self.nursery_boundary);
-        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) {
-            self.rt.gc.block_heap.publishCompletedHotBlocks();
-        }
+        self.rt.gc.block_heap.publishCompletedHotBlocks();
         return garbage_count;
     }
 
-    /// Diagnostic (`ZJS_MINOR_AUDIT=1`): report any live object still holding a
+    /// Diagnostic (`ZJS_GC_AUDIT`): report any live object still holding a
     /// strong edge to something this minor is about to condemn.
     ///
     /// That combination is exactly a missing write barrier -- the trace could
@@ -2615,134 +2443,131 @@ const Collector = struct {
             owner_class: u32 = 0,
             owner_ptr: *gc.Header = undefined,
             owner_young: bool = false,
-            owner_remembered: bool = false,
+            /// Hash index over `doomed` when it could be built; the linear
+            /// scan otherwise. Diagnostic memory comes from the page
+            /// allocator, never from the heap being audited.
+            doomed_set: ?*const std.AutoHashMapUnmanaged(*gc.Header, void) = null,
+            fn isDoomed(a: *const @This(), h: *gc.Header) bool {
+                if (a.doomed_set) |set| return set.contains(h);
+                for (a.doomed) |d| {
+                    if (d == h) return true;
+                }
+                return false;
+            }
             fn hit(a: *@This(), h: ?*gc.Header) void {
                 const child = h orelse return;
-                for (a.doomed) |d| {
-                    if (d != child) continue;
-                    // The condemned cell is not necessarily an object: since
-                    // TGC S2 a string body is an ordinary tracer cell and can
-                    // be the child of a live owner's edge, so read the class
-                    // only when the kind really is `.object`.
-                    const c: ?*Object = if (child.metaConst().flags.kind == .object) Object.fromHeader(child) else null;
-                    if (a.owner_kind == .object) {
-                        const o = Object.fromHeader(a.owner_ptr);
-                        var where: []const u8 = "unknown";
-                        var hit_atom: atom_mod.Atom = .empty;
-                        if (o.promisePayload()) |pp| {
-                            if (pp.result) |v| if (v.cycleMarkHeader() == child) {
-                                where = "promise.result";
-                            };
-                            if (pp.reaction_callback) |v| if (v.cycleMarkHeader() == child) {
-                                where = "promise.reaction_callback";
-                            };
-                            if (pp.reaction_arg) |v| if (v.cycleMarkHeader() == child) {
-                                where = "promise.reaction_arg";
-                            };
-                            for (pp.reactions) |v| {
-                                if (v.cycleMarkHeader() == child) where = "promise.reactions";
-                            }
+                if (!a.isDoomed(child)) return;
+                gc.forensics.audit_reports +|= 1;
+                if (!gc.forensics.auditPrints()) return;
+                // The condemned cell is not necessarily an object: since
+                // TGC S2 a string body is an ordinary tracer cell and can
+                // be the child of a live owner's edge, so read the class
+                // only when the kind really is `.object`.
+                const c: ?*Object = if (child.metaConst().flags.kind == .object) Object.fromHeader(child) else null;
+                if (a.owner_kind == .object) {
+                    const o = Object.fromHeader(a.owner_ptr);
+                    var where: []const u8 = "unknown";
+                    var hit_atom: atom_mod.Atom = .empty;
+                    if (o.promisePayload()) |pp| {
+                        if (pp.result) |v| if (v.cycleMarkHeader() == child) {
+                            where = "promise.result";
+                        };
+                        for (pp.reactions) |v| {
+                            if (v.cycleMarkHeader() == child) where = "promise.reactions";
                         }
-                        if (o.isFastArray()) {
-                            for (o.fastArrayValues()) |v| {
-                                if (v.cycleMarkHeader() == child) where = "dense";
-                            }
-                        }
-                        if (o.ordinaryPayloadForAudit()) |op| {
-                            const fields = .{
-                                .{ "ordinary.callsite_file", op.callsite_file },
-                                .{ "ordinary.callsite_function", op.callsite_function },
-                                .{ "ordinary.promise_reaction_on_fulfilled", op.promise_reaction_on_fulfilled },
-                                .{ "ordinary.promise_reaction_on_rejected", op.promise_reaction_on_rejected },
-                                .{ "ordinary.promise_reaction_resolve", o.promiseReactionResolve() },
-                                .{ "ordinary.promise_reaction_reject", o.promiseReactionReject() },
-                                .{ "ordinary.promise_capability_resolve", op.promise_capability_resolve },
-                                .{ "ordinary.promise_capability_reject", op.promise_capability_reject },
-                                .{ "ordinary.promise_combinator_resolve", op.promise_combinator_resolve },
-                                .{ "ordinary.promise_combinator_reject", op.promise_combinator_reject },
-                                .{ "ordinary.promise_combinator_values", op.promise_combinator_values },
-                                .{ "ordinary.promise_combinator_keys", op.promise_combinator_keys },
-                                .{ "ordinary.error_stack", op.error_stack },
-                                .{ "ordinary.error_stack_sites", op.error_stack_sites },
-                            };
-                            inline for (fields) |field| {
-                                if (field[1]) |v| if (v.cycleMarkHeader() == child) {
-                                    where = field[0];
-                                };
-                            }
-                        }
-                        if (o.promiseReactionIntrinsicCapability()) |capability| {
-                            if (capability.target.cycleMarkHeader() == child) where = "reaction.intrinsic_target";
-                            if (capability.self_error_global.cycleMarkHeader() == child) where = "reaction.self_error_global";
-                        }
-                        if (o.cachedIteratorNextSlotForCycleGc(a.rt)) |slot| {
-                            if (slot.*) |v| if (v.cycleMarkHeader() == child) {
-                                where = "iterator_next_cache";
-                            };
-                        }
-                        if (o.flags.class_payload_kind == .generator) {
-                            const gp = o.generatorPayloadPtr();
-                            if (gp.async_promise) |v| if (v.cycleMarkHeader() == child) {
-                                where = "generator.async_promise";
-                            };
-                            if (gp.execution) |execution| {
-                                if (execution.this_value.cycleMarkHeader() == child) where = "generator.this";
-                                if (execution.current_function.cycleMarkHeader() == child) where = "generator.current_function";
-                                if (execution.yield_star_iterator.cycleMarkHeader() == child) where = "generator.yield_star_iterator";
-                                const storage = &execution.suspended.storage;
-                                for (storage.stack.values) |v| if (v.cycleMarkHeader() == child) {
-                                    where = "generator.stack";
-                                };
-                                for (storage.frame.locals) |v| if (v.cycleMarkHeader() == child) {
-                                    where = "generator.locals";
-                                };
-                                for (storage.frame.args) |v| if (v.cycleMarkHeader() == child) {
-                                    where = "generator.args";
-                                };
-                            }
-                        }
-                        for (o.propertyEntries(), 0..) |*e, pi| {
-                            const pf = property.Flags.fromBits(o.shape_ref.props()[pi].flags);
-                            if (pf.deleted) continue;
-                            switch (pf.kind) {
-                                .data => if (e.slot.data.cycleMarkHeader() == child) {
-                                    where = "prop_data";
-                                    hit_atom = o.shape_ref.props()[pi].atom_id;
-                                },
-                                .accessor => {
-                                    if (e.slot.accessor.getter) |g| if (g.gcHeader() == child) {
-                                        where = "prop_getter";
-                                    };
-                                    if (e.slot.accessor.setter) |st| if (st.gcHeader() == child) {
-                                        where = "prop_setter";
-                                    };
-                                },
-                                else => {},
-                            }
-                        }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{
-                            o.class_id,
-                            @tagName(o.flags.class_payload_kind),
-                            where,
-                            a.rt.atoms.name(hit_atom) orelse "?",
-                            o.shape_ref.prop_count,
-                            a.rt.gc.headerMarked(o.gcHeader()),
-                        });
                     }
-                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n", .{
-                        @tagName(a.owner_kind),
-                        @intFromPtr(a.owner_ptr),
-                        a.owner_young,
-                        a.owner_remembered,
-                        @tagName(child.metaConst().flags.kind),
-                        if (c) |obj| obj.class_id else 0,
-                        if (c) |obj| @tagName(obj.flags.class_payload_kind) else "-",
-                        child.metaConst().flags.young,
-                        a.rt.gc.headerMarked(child),
+                    if (o.isFastArray()) {
+                        for (o.fastArrayValues()) |v| {
+                            if (v.cycleMarkHeader() == child) where = "dense";
+                        }
+                    }
+                    if (o.ordinaryPayloadForAudit()) |op| {
+                        const fields = .{
+                            .{ "ordinary.callsite_file", op.callsite_file },
+                            .{ "ordinary.callsite_function", op.callsite_function },
+                            .{ "ordinary.promise_reaction_on_fulfilled", op.promise_reaction_on_fulfilled },
+                            .{ "ordinary.promise_reaction_on_rejected", op.promise_reaction_on_rejected },
+                            .{ "ordinary.promise_reaction_resolve", o.promiseReactionResolve() },
+                            .{ "ordinary.promise_reaction_reject", o.promiseReactionReject() },
+                            .{ "ordinary.promise_capability_resolve", op.promise_capability_resolve },
+                            .{ "ordinary.promise_capability_reject", op.promise_capability_reject },
+                            .{ "ordinary.promise_combinator_resolve", op.promise_combinator_resolve },
+                            .{ "ordinary.promise_combinator_reject", op.promise_combinator_reject },
+                            .{ "ordinary.promise_combinator_values", op.promise_combinator_values },
+                            .{ "ordinary.promise_combinator_keys", op.promise_combinator_keys },
+                            .{ "ordinary.error_stack", op.error_stack },
+                            .{ "ordinary.error_stack_sites", op.error_stack_sites },
+                        };
+                        inline for (fields) |field| {
+                            if (field[1]) |v| if (v.cycleMarkHeader() == child) {
+                                where = field[0];
+                            };
+                        }
+                    }
+                    if (o.promiseReactionIntrinsicCapability()) |capability| {
+                        if (capability.target.cycleMarkHeader() == child) where = "reaction.intrinsic_target";
+                        if (capability.self_error_global.cycleMarkHeader() == child) where = "reaction.self_error_global";
+                    }
+                    if (o.flags.class_payload_kind == .generator) {
+                        const gp = o.generatorPayloadPtr();
+                        if (gp.async_promise) |v| if (v.cycleMarkHeader() == child) {
+                            where = "generator.async_promise";
+                        };
+                        if (gp.execution) |execution| {
+                            if (execution.this_value.cycleMarkHeader() == child) where = "generator.this";
+                            if (execution.current_function.cycleMarkHeader() == child) where = "generator.current_function";
+                            const storage = &execution.suspended.storage;
+                            for (storage.stack.values) |v| if (v.cycleMarkHeader() == child) {
+                                where = "generator.stack";
+                            };
+                            for (storage.frame.locals) |v| if (v.cycleMarkHeader() == child) {
+                                where = "generator.locals";
+                            };
+                            for (storage.frame.args) |v| if (v.cycleMarkHeader() == child) {
+                                where = "generator.args";
+                            };
+                        }
+                    }
+                    for (o.propertyEntries(), 0..) |*e, pi| {
+                        const pf = property.Flags.fromBits(o.shape_ref.props()[pi].flags);
+                        if (pf.deleted) continue;
+                        switch (pf.kind) {
+                            .data => if (e.slot.data.cycleMarkHeader() == child) {
+                                where = "prop_data";
+                                hit_atom = o.shape_ref.props()[pi].atom_id;
+                            },
+                            .accessor => {
+                                if (e.slot.accessor.getter) |g| if (g.gcHeader() == child) {
+                                    where = "prop_getter";
+                                };
+                                if (e.slot.accessor.setter) |st| if (st.gcHeader() == child) {
+                                    where = "prop_setter";
+                                };
+                            },
+                            else => {},
+                        }
+                    }
+                    std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{
+                        o.class_id,
+                        @tagName(o.flags.class_payload_kind),
+                        where,
+                        a.rt.atoms.name(hit_atom) orelse "?",
+                        o.shape_ref.prop_count,
+                        a.rt.gc.headerMarked(o.gcHeader()),
                     });
-                    if (gc.forensics.auditIsFatal()) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
-                    return;
                 }
+                std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n", .{
+                    @tagName(a.owner_kind),
+                    @intFromPtr(a.owner_ptr),
+                    a.owner_young,
+                    a.rt.gc.generation.isRemembered(a.owner_ptr),
+                    @tagName(child.metaConst().flags.kind),
+                    if (c) |obj| obj.class_id else 0,
+                    if (c) |obj| @tagName(obj.flags.class_payload_kind) else "-",
+                    child.metaConst().flags.young,
+                    a.rt.gc.headerMarked(child),
+                });
+                if (gc.forensics.auditIsFatal()) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
             }
             pub fn visitValue(a: *@This(), val: *JSValue) void {
                 a.hit(val.cycleMarkHeader());
@@ -2766,27 +2591,20 @@ const Collector = struct {
             pub fn visitWeakCollectionEntry(_: *@This(), _: *object_payloads.WeakCollectionEntry) void {}
             pub fn visitFinalizationCell(_: *@This(), _: *object_payloads.FinalizationRegistryCell) void {}
         };
-        var audit = Audit{ .doomed = doomed_items, .rt = self.rt };
+        var doomed_set: std.AutoHashMapUnmanaged(*gc.Header, void) = .empty;
+        defer doomed_set.deinit(std.heap.page_allocator);
+        const indexed = blk: {
+            doomed_set.ensureTotalCapacity(std.heap.page_allocator, @intCast(doomed_items.len)) catch break :blk false;
+            for (doomed_items) |d| doomed_set.putAssumeCapacity(d, {});
+            break :blk true;
+        };
+        var audit = Audit{ .doomed = doomed_items, .rt = self.rt, .doomed_set = if (indexed) &doomed_set else null };
         var it = self.rt.gc.objectIterator(.all);
         while (it.next()) |h| {
-            var condemned = false;
-            for (doomed_items) |d| {
-                if (d == h) {
-                    condemned = true;
-                    break;
-                }
-            }
-            if (condemned) continue;
+            if (audit.isDoomed(h)) continue;
             audit.owner_kind = h.metaConst().flags.kind;
             audit.owner_ptr = h;
             audit.owner_young = h.metaConst().flags.young;
-            audit.owner_remembered = blk: {
-                var rit = self.rt.gc.generation.rememberedIterator();
-                while (rit.next()) |addr| {
-                    if (addr.* == @intFromPtr(h)) break :blk true;
-                }
-                break :blk false;
-            };
             switch (h.metaConst().flags.kind) {
                 .object => {
                     const owner = Object.fromHeader(h);
@@ -2880,7 +2698,7 @@ test "nursery evacuation allocation failure rolls back a traced cycle" {
     try std.testing.expect(!rt.gc.containsHeader(moved_first));
     try std.testing.expect(!rt.gc.containsHeader(moved_second));
     try rt.gc.verifyHeapAccounting(rt);
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(values[0].bits != original[0].bits);
     try std.testing.expectEqual(values[1].bits, (try Object.fromHeader(values[0].cycleMarkHeader().?).getProperty(atom_mod.ids.value)).bits);
 }
@@ -2932,14 +2750,14 @@ test "nursery ephemeron OOM rolls back table slots and weak identities" {
     for (table.weakCollectionEntries(), original[1 .. original.len - 1], original[2..]) |entry, key, value| {
         try std.testing.expectEqual(value.bits, entry.value.bits);
         try std.testing.expectEqual(Object.fromHeader(key.cycleMarkHeader().?), rt.liveObjectFromWeakIdentity(entry.key_identity).?);
-        try std.testing.expectEqual(entry.key_identity >> 1, rt.weak_object_ids.get(@intFromPtr(key.cycleMarkHeader().?)).?);
+        try std.testing.expectEqual(entry.key_identity >> 1, rt.weak.object_ids.get(@intFromPtr(key.cycleMarkHeader().?)).?);
     }
-    try std.testing.expectEqual(@as(usize, original.len - 2), rt.weak_object_ids.count());
-    try std.testing.expectEqual(rt.weak_object_ids.count(), rt.weak_id_objects.count());
+    try std.testing.expectEqual(@as(usize, original.len - 2), rt.weak.object_ids.count());
+    try std.testing.expectEqual(rt.weak.object_ids.count(), rt.weak.id_objects.count());
     try rt.gc.verifyHeapAccounting(rt);
     // Retry with the same minimal roots and prove the whole chain is live.
     @memset(values[2..], JSValue.undefinedValue());
-    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    _ = try rt.collectFull(null, .declared_only);
     try std.testing.expect(values[1].bits != original[1].bits);
     for (table.weakCollectionEntries(), original[2..]) |entry, previous| {
         try std.testing.expect(entry.value.bits != previous.bits);

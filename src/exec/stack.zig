@@ -26,7 +26,7 @@ const JSValue = @import("../core/value.zig").JSValue;
 /// tied the window's lifetime to a probe inside `setTopPtr`, which put a
 /// `mrs tpidr_el0` + two TLS loads + a compare (16 instructions) on EVERY
 /// operand-top publication, `op_return`'s included. The lifetime is now
-/// decided where it is read instead -- `active_invocation_trace.traceMachine`
+/// decided where it is read instead -- `inline_calls.traceMachine`
 /// accepts the window only while its owning Stack is still one of the
 /// Machine's live levels AND that Stack's top is still exactly at the
 /// region's start, which is the same predicate the eager clear implemented
@@ -252,6 +252,13 @@ pub const Stack = struct {
     /// Documentary alias of `peek`; see `pushOwned`.
     pub const peekBorrowed = peek;
 
+    /// The value `offset` slots below the top (0 = the top).
+    pub fn peekFromTop(self: *const Stack, offset: u8) !JSValue {
+        const index_from_top: usize = offset;
+        if (index_from_top >= self.len()) return error.StackUnderflow;
+        return self.values[self.len() - 1 - index_from_top];
+    }
+
     pub fn reserveAdditional(self: *Stack, additional: usize) !void {
         const live_len = self.len();
         const stack_limit = self.stackLimit();
@@ -280,7 +287,6 @@ pub const Stack = struct {
         if (next_capacity < needed) return error.StackOverflow;
 
         const next = try self.runtime.allocNative(JSValue, next_capacity);
-        errdefer self.runtime.freeNative(JSValue, next);
         const old_values = self.liveValues();
         const old_backing = self.backingValues();
         const old_capacity = current_capacity;

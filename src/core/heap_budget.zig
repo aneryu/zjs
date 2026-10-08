@@ -29,6 +29,18 @@ pub const Budget = struct {
     probe_ctx: ?*anyopaque = null,
     limit_retries: usize = 0,
 
+    /// Test builds: deliver an allocation event to the installed probe with
+    /// nested notifies suspended, so a probe that allocates or collects is
+    /// never re-entered. Returns false when no probe is installed.
+    pub fn runProbe(self: *Budget, bytes: usize) bool {
+        const probe = self.probe orelse return false;
+        if (self.suspend_alloc_notify) return true;
+        self.suspend_alloc_notify = true;
+        defer self.suspend_alloc_notify = false;
+        probe(self.probe_ctx, bytes);
+        return true;
+    }
+
     pub fn charge(self: *Budget, n: usize) void {
         self.bytes +|= n;
         if (self.cycle_peak_output) |peak| peak.* = @max(peak.*, self.bytes);

@@ -6,7 +6,7 @@
 //! its explicit deinitializer and owns or shares the backing bytes according
 //! to its constructor. The generic Value parameter avoids a core import cycle
 //! and exposes this type as `JSValue.Bytes` to higher layers. QuickJS source
-//! map: `JSArrayBuffer`/`JSTypedArray` at quickjs.c.
+//! map: `JSArrayBuffer`/`JSTypedArray`.
 
 const std = @import("std");
 
@@ -115,17 +115,18 @@ pub fn JSBytes(comptime Value: type) type {
             pub fn toArrayBuffer(self: *Store, ctx: anytype) !Value {
                 const deinit_fn = self.deinit_fn orelse return error.InvalidStore;
                 const rt = ctx.runtimePtr();
-                if (self.is_shared) return self.toSharedArrayBuffer(rt, deinit_fn);
+                if (self.is_shared) return self.toSharedArrayBuffer(ctx, deinit_fn);
                 const Object = @import("object.zig").Object;
                 const class_ids = @import("class.zig").ids;
-                const object = try Object.create(rt, class_ids.array_buffer, null);
+                const object = try Object.create(rt, class_ids.array_buffer, ctx.classPrototypeObject(class_ids.array_buffer));
                 errdefer Object.destroyFromHeader(rt, object.gcHeader());
                 try object.installExternalByteStorage(rt, self.bytes, deinit_fn, self.context);
                 self.disarm();
                 return object.value();
             }
 
-            fn toSharedArrayBuffer(self: *Store, rt: anytype, deinit_fn: DeinitFn) !Value {
+            fn toSharedArrayBuffer(self: *Store, ctx: anytype, deinit_fn: DeinitFn) !Value {
+                const rt = ctx.runtimePtr();
                 const Object = @import("object.zig").Object;
                 const object_mod = @import("object.zig");
                 const class_ids = @import("class.zig").ids;
@@ -138,7 +139,7 @@ pub fn JSBytes(comptime Value: type) type {
                 // a second free of the same host allocation.
                 self.disarm();
                 errdefer store.release();
-                const object = try Object.create(rt, class_ids.shared_array_buffer, null);
+                const object = try Object.create(rt, class_ids.shared_array_buffer, ctx.classPrototypeObject(class_ids.shared_array_buffer));
                 errdefer Object.destroyFromHeader(rt, object.gcHeader());
                 object.installSharedByteStorage(rt, store);
                 return object.value();
@@ -160,7 +161,7 @@ pub fn JSBytes(comptime Value: type) type {
             const bytes = object.byteStorage();
             return .{
                 .ptr = bytes.ptr,
-                .mut_ptr = if (object.arrayBufferImmutable()) null else bytes.ptr,
+                .mut_ptr = bytes.ptr,
                 .len = bytes.len,
                 .shared = object.class_id == class_ids.shared_array_buffer,
             };
@@ -193,7 +194,7 @@ pub fn JSBytes(comptime Value: type) type {
             const bytes = buffer_bytes[byte_offset .. byte_offset + len];
             return .{
                 .ptr = bytes.ptr,
-                .mut_ptr = if (buffer.arrayBufferImmutable()) null else bytes.ptr,
+                .mut_ptr = bytes.ptr,
                 .len = bytes.len,
                 .shared = buffer.class_id == class_ids.shared_array_buffer,
             };
@@ -214,7 +215,7 @@ pub fn JSBytes(comptime Value: type) type {
             const bytes = buffer_bytes[byte_offset .. byte_offset + len];
             return .{
                 .ptr = bytes.ptr,
-                .mut_ptr = if (buffer.arrayBufferImmutable()) null else bytes.ptr,
+                .mut_ptr = bytes.ptr,
                 .len = bytes.len,
                 .shared = buffer.class_id == class_ids.shared_array_buffer,
             };
@@ -472,7 +473,7 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
     });
 
     // Refuse the SharedArrayBuffer object allocation.
-    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     const result = ctx.arrayBuffer(&store);
     rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, result);
@@ -502,10 +503,6 @@ test "JSBytes views ArrayBuffer storage without copying" {
     const mutable = try bytes.sliceMut();
     mutable[1] = 9;
     try std.testing.expectEqual(@as(u8, 9), object.byteStorage()[1]);
-
-    object.arrayBufferImmutableSlot().* = true;
-    const readonly = try value.asBytes();
-    try std.testing.expectError(error.ReadOnly, readonly.sliceMut());
 }
 
 test "JSBytes views TypedArray byte range without copying" {

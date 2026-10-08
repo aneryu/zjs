@@ -1,23 +1,10 @@
-//! Promise engine-core construction primitives.
-//!
-//! QuickJS keeps Promise object creation, fulfillment/rejection, the legacy
-//! Promise.* static helpers, and unhandled-rejection bookkeeping inside the
-//! engine core (js_promise_*), not in a builtins-only layer. These functions
-//! are pure engine primitives: they depend only on `core.Object`,
-//! `core.runtime` rooting, `core.function` (the lazy `then`/`catch` install +
-//! native-function factory), and the core job queue. They have zero exec/
-//! builtins dependency, so they live in core and are consumed directly by the
-//! VM (exec/promise_ops.zig and friends).
+//! Promise engine-core construction primitives: creating promises already
+//! fulfilled or rejected, and reporting a rejection handled. They depend only
+//! on core, so the VM and exec (`exec/promise_ops.zig` and friends) share them.
 
 const core = @import("root.zig");
 const jobs = @import("jobs.zig");
 const std = @import("std");
-
-/// QuickJS source map: narrow Promise constructor payload used by transitional
-/// `new_promise` bytecode.
-pub fn construct(realm: *core.RealmContext) !core.JSValue {
-    return constructWithPrototype(realm, null);
-}
 
 pub fn constructWithPrototype(realm: *core.RealmContext, prototype: ?*core.Object) !core.JSValue {
     const rt = realm.runtime;
@@ -64,6 +51,9 @@ pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, pr
     const object = promiseObject(promise) orelse return error.TypeError;
     try object.setPromiseResult(rt, rooted_reason);
     object.promiseIsRejectedSlot().* = true;
+    // RejectPromise step 7: HostPromiseRejectionTracker(promise, "reject").
+    // A caller that subscribes at once reports it handled (`markHandled`).
+    if (realm.track_unhandled_rejections) realm.recordUnhandledPromiseRejection(promise, rooted_reason);
     return promise;
 }
 
@@ -128,12 +118,6 @@ fn promiseObject(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    const promise = try rejectedWithPrototype(ctx, reason, prototype);
-    ctx.recordUnhandledPromiseRejection(promise, reason);
-    return promise;
-}
-
 /// Mirrors qjs perform_promise_then on an already-rejected unhandled promise
 /// (quickjs.c, tracker fired with is_handled=TRUE →
 /// js_std_promise_rejection_tracker quickjs-libc.c:4259-4268): unreport THIS
@@ -141,12 +125,7 @@ pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue
 /// different promise, even one rejected with a sameValue reason.
 pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (!promise.promiseIsRejected()) return;
-    const reason = promise.promiseResult() orelse return;
     ctx.removeUnhandledPromiseRejection(promise.value());
-    if (!ctx.hasException()) return;
-    if (ctx.runtime.current_exception.sameValue(reason)) {
-        ctx.clearException();
-    }
 }
 
 pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {

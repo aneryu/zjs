@@ -4,7 +4,6 @@ const std = @import("std");
 const root = @import("../parser.zig");
 const bytecode = @import("../bytecode.zig");
 const atom_module = @import("../core/atom.zig");
-const core = @import("../core/root.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const bytecode_module = bytecode.module;
 const tok = root.token;
@@ -13,7 +12,6 @@ const parse_state = @import("parse_state.zig");
 const declarations = @import("declarations.zig");
 const identifiers = @import("identifiers.zig");
 const lookahead = @import("lookahead.zig");
-const emitter = @import("emitter.zig");
 const expressions = @import("expressions.zig");
 const statements = @import("statements.zig");
 const functions = @import("functions.zig");
@@ -106,8 +104,7 @@ pub fn parseImport(s: *State) Error!void {
     // Named imports: import { x, y as z } from 'module'
     if (s.peekKind() == .lbrace) {
         var imports = std.ArrayList(ModuleImportSpec).empty;
-        defer freeModuleImportSpecs(s, &imports);
-        var saw_type_only_specifier = false;
+        defer imports.deinit(s.scratch);
         try s.advance();
         while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
             // TypeScript `import { type X }`: the specifier is erased.
@@ -115,13 +112,16 @@ pub fn parseImport(s: *State) Error!void {
             if (s.isIdent("type") and typescript.tsSpecifierTypeModifier(s)) {
                 try s.advance();
                 type_only = true;
-                saw_type_only_specifier = true;
             }
             // Import name (identifier or string)
             if (!isModuleNameToken(s.peekKind())) {
                 return s.failExpectedDescription("import name");
             }
             const import_name_was_string = s.peekKind() == .string;
+            // Only an IdentifierName that is also an Identifier can bind
+            // without `as`: `import { if }` is an error.
+            const import_name_is_binding = identifiers.isIdentifierLikeToken(s) and
+                !identifiers.identifierLikeHasInvalidEscapeForBinding(s);
             const import_name = try moduleImportNameAtom(s);
             try s.advance();
 
@@ -138,6 +138,7 @@ pub fn parseImport(s: *State) Error!void {
             } else if (import_name_was_string) {
                 return s.failExpectedDescription("'as'");
             } else {
+                if (!import_name_is_binding) return s.failExpectedDescription("'as'");
                 local_name = import_name;
                 try validateModuleImportBindingName(s, local_name);
             }
@@ -153,12 +154,9 @@ pub fn parseImport(s: *State) Error!void {
             try s.advance();
         }
         try s.expectToken(.rbrace);
-        if (saw_type_only_specifier and imports.items.len == 0 and default_local_name == null) {
-            // Every specifier was type-only: tsc elides the whole import.
-            try typescript.tsSkipFromClause(s);
-            _ = try s.expectSemicolon();
-            return;
-        }
+        // Even when every specifier is `type`, the module is still loaded
+        // (verbatimModuleSyntax keeps `import {} from "m"`); only a whole
+        // `import type` declaration is elided.
         const request_index = try parseFromClause(s);
         if (default_local_name) |default_name| {
             try addModuleImportBinding(s, request_index, atom_default, default_name, false);
@@ -194,14 +192,34 @@ fn moduleHasExportName(record: *const bytecode_module.Record, export_name: Atom)
 
 pub fn addModuleExportName(s: *State, export_name: Atom, local_name: Atom) Error!void {
     const record = s.ensureModule();
-    if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
+    if (moduleHasExportName(record, export_name)) return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
     try record.addExport(export_name, local_name);
 }
 
-pub fn validateModuleLocalExports(s: *State) Error!void {
-    const record = s.module_record orelse return;
+/// An exported enum or namespace may merge with an earlier exported
+/// declaration of the same name (class, function, enum or namespace): that
+/// export already names the one merged binding.
+fn addMergeableModuleExportName(s: *State, name: Atom) Error!void {
+    const record = s.ensureModule();
     for (record.exports) |entry| {
-        if (!identifiers.hasKnownBinding(s, entry.local_name)) return s.failExpectedDescription("local export binding");
+        if (entry.export_name == name and entry.local_name == name) return;
+    }
+    try addModuleExportName(s, name, name);
+}
+
+pub fn validateModuleLocalExports(s: *State) Error!void {
+    if (s.module_record == null) return;
+    const record = &s.module_record.?;
+    var index: usize = 0;
+    while (index < record.exports.len) {
+        const local_name = record.exports[index].local_name;
+        if (identifiers.hasKnownBinding(s, local_name)) {
+            index += 1;
+        } else if (std.mem.indexOfScalar(Atom, s.ts_type_names.items, local_name) != null) {
+            try record.removeExport(index);
+        } else {
+            return s.failNamed("export '{s}' is not defined", "export is not defined", local_name);
+        }
     }
 }
 
@@ -210,6 +228,16 @@ fn addModuleImportAttribute(s: *State, request_index: u32, key: Atom, value: Ato
     for (record.import_attributes) |entry| {
         if (entry.request_index == request_index and entry.key == key)
             return s.failExpectedDescription("unique import attribute key");
+    }
+    // AllImportAttributesSupported: the host supports only `type`. The spec
+    // reports this while loading; failing at parse is observably the same
+    // (the module never evaluates) and names the key at its source position.
+    if (key != atom_module.ids.type_) {
+        const key_name = s.atoms.name(key) orelse return error.ParserInvariant;
+        var message_buffer: [128]u8 = undefined;
+        const message = std.fmt.bufPrint(&message_buffer, "import attribute '{s}' is not supported", .{key_name}) catch
+            "import attribute is not supported";
+        return s.failWithMessage(null, message);
     }
     try record.addImportAttribute(request_index, key, value);
 }
@@ -260,14 +288,14 @@ fn addModuleIndirectExport(
     is_namespace: bool,
 ) Error!void {
     const record = s.ensureModule();
-    if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
+    if (moduleHasExportName(record, export_name)) return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
     try record.addIndirectExport(request_index, export_name, import_name, is_namespace);
 }
 
 fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
     const record = s.ensureModule();
     if (export_name != atom_star and moduleHasExportName(record, export_name))
-        return s.failExpectedDescription("unique export name");
+        return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
     try record.addStarExport(request_index, export_name);
 }
 
@@ -289,36 +317,16 @@ pub fn isModuleNameToken(kind: tok.Kind) bool {
 /// The current module import/export name. Identifier tokens hand back their
 /// borrowed id and string names are freshly interned; either way the
 /// enclosing `CompileAtomScope` is the root, so the caller does not free.
+/// A string ModuleExportName must be well-formed Unicode (§16.2.1.1): the
+/// WTF-8 bytes of a lone surrogate fail strict UTF-8 validation.
 fn moduleImportNameAtom(s: *State) Error!Atom {
     const kind = s.peekKind();
     if (kind == .ident) return s.token.payload.ident.atom;
     if (kind.isKeyword()) return kind.keywordAtom();
-    return try moduleStringAtom(s);
-}
-
-fn isWellFormedModuleString(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const width = std.unicode.utf8ByteSequenceLength(bytes[index]) catch return false;
-        if (index + width > bytes.len) return false;
-        if (width == 3 and bytes[index] == 0xED and bytes[index + 1] >= 0xA0 and bytes[index + 1] <= 0xBF) {
-            if (bytes[index + 2] & 0xC0 == 0x80) return false;
-        }
-        _ = std.unicode.utf8Decode(bytes[index .. index + width]) catch |err| switch (err) {
-            error.Utf8EncodesSurrogateHalf => return false,
-            else => return false,
-        };
-        index += width;
+    if (!std.unicode.utf8ValidateSlice(s.token.payload.str.bytes)) {
+        return s.failWithMessage(null, "module export name must be well-formed Unicode");
     }
-    return true;
-}
-
-fn freeModuleImportSpecs(s: *State, imports: *std.ArrayList(ModuleImportSpec)) void {
-    imports.deinit(s.scratch);
-}
-
-fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) void {
-    exports.deinit(s.scratch);
+    return try moduleStringAtom(s);
 }
 
 /// Parse export statement
@@ -353,7 +361,7 @@ pub fn parseExport(s: *State) Error!void {
     }
     if (next_tok == .kw_interface and typescript.tsDeclarationStart(s) == .interface) return typescript.tsParseInterfaceDeclaration(s);
     if (typescript.tsDeclarationStart(s) == .ambient) return typescript.tsParseAmbientDeclaration(s);
-    if (s.isIdent("abstract") and s.peekNextKind() == .kw_class) {
+    if (s.isIdent("abstract") and nextOnSameLineIs(s, .kw_class)) {
         try s.advance();
         return parseExportedClass(s, false);
     }
@@ -361,13 +369,13 @@ pub fn parseExport(s: *State) Error!void {
         if (next_tok == .kw_const) try s.advance();
         try typescript.parseEnumDeclaration(s);
         const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
-        try addModuleExportName(s, name_atom, name_atom);
+        try addMergeableModuleExportName(s, name_atom);
         return;
     }
     if (typescript.tsDeclarationStart(s) == .namespace) {
         try typescript.parseNamespaceDeclaration(s);
         const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
-        try addModuleExportName(s, name_atom, name_atom);
+        try addMergeableModuleExportName(s, name_atom);
         return;
     }
     if (next_tok == .kw_import) {
@@ -392,17 +400,24 @@ pub fn parseExport(s: *State) Error!void {
     const source_start = s.currentFunctionSourceStart();
     if (next_tok == .kw_function) return parseExportedFunction(s, .normal, source_start, false);
     if (next_tok == .kw_class) return parseExportedClass(s, false);
-    if (next_tok == .ident and s.isIdent("async") and s.peekNextKind() == .kw_function) {
+    if (next_tok == .ident and s.isIdent("async") and nextOnSameLineIs(s, .kw_function)) {
         try s.advance(); // consume async
         return parseExportedFunction(s, .async, source_start, false);
     }
     return s.failExpectedDescription("export declaration");
 }
 
+/// `async function` / `abstract class` modifiers apply only with no line
+/// terminator before the keyword ([no LineTerminator here]).
+fn nextOnSameLineIs(s: *State, kind: tok.Kind) bool {
+    const next = s.peekNext();
+    return next.kind == kind and !next.line_terminator;
+}
+
 /// `export default <class | function | async function | expression>`.
 fn parseExportDefault(s: *State) Error!void {
     try s.advance();
-    if (s.isIdent("abstract") and s.peekNextKind() == .kw_class) try s.advance();
+    if (s.isIdent("abstract") and nextOnSameLineIs(s, .kw_class)) try s.advance();
     if (s.peekKind() == .kw_interface and typescript.tsDeclarationStart(s) == .interface) {
         return typescript.tsParseInterfaceDeclaration(s);
     }
@@ -410,7 +425,7 @@ fn parseExportDefault(s: *State) Error!void {
     switch (s.peekKind()) {
         .kw_class => return parseExportedClass(s, true),
         .kw_function => return parseExportedFunction(s, .normal, source_start, true),
-        .ident => if (s.isIdent("async") and s.peekNextKind() == .kw_function) {
+        .ident => if (s.isIdent("async") and nextOnSameLineIs(s, .kw_function)) {
             try s.advance();
             return parseExportedFunction(s, .async, source_start, true);
         },
@@ -429,6 +444,7 @@ fn parseExportedFunction(s: *State, func_kind: ParseFunctionKind, source_start: 
     const name_atom = exportDefaultFunctionName(s);
     if (is_default and name_atom == null) {
         try functions.parseAnonymousDefaultFunctionDecl(s, func_kind, source_start);
+        if (s.ts_last_decl_was_signature) return;
         return addModuleExportName(s, atom_default, atom_star_default);
     }
     try functions.parseFunctionDecl(s, func_kind, source_start);
@@ -459,7 +475,7 @@ fn bindDefaultExportValue(s: *State) Error!void {
 /// `export { a, b as c } [from "m"]`.
 fn parseExportList(s: *State) Error!void {
     var export_specs = std.ArrayList(ModuleExportSpec).empty;
-    defer freeModuleExportSpecs(s, &export_specs);
+    defer export_specs.deinit(s.scratch);
     var saw_type_only_specifier = false;
     try s.advance();
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
@@ -475,9 +491,6 @@ fn parseExportList(s: *State) Error!void {
             return s.failExpectedDescription("export name");
         }
         const local_name_was_string = s.peekKind() == .string;
-        if (local_name_was_string and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-            return s.failUnexpectedToken();
-        }
         const local_name = try moduleImportNameAtom(s);
         var export_name = local_name;
         try s.advance();
@@ -487,9 +500,6 @@ fn parseExportList(s: *State) Error!void {
             try s.advance();
             if (!isModuleNameToken(s.peekKind())) {
                 return s.failExpectedDescription("export name");
-            }
-            if (s.peekKind() == .string and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-                return s.failUnexpectedToken();
             }
             export_name = try moduleImportNameAtom(s);
             try s.advance();
@@ -509,8 +519,10 @@ fn parseExportList(s: *State) Error!void {
     try s.expectToken(.rbrace);
 
     if (saw_type_only_specifier and export_specs.items.len == 0) {
-        // Every specifier was type-only: nothing is exported.
-        if (s.isIdent("from")) try typescript.tsSkipFromClause(s);
+        // Every specifier was type-only: nothing is exported, but a `from`
+        // module is still loaded and evaluated (`export {} from "m"`), as for
+        // `import { type X } from "m"`.
+        if (s.isIdent("from")) _ = try parseFromClause(s);
         _ = try s.expectSemicolon();
         return;
     }
@@ -542,7 +554,6 @@ fn parseExportStar(s: *State) Error!void {
         if (!isModuleNameToken(s.peekKind())) {
             return s.failExpectedDescription("export name");
         }
-        if (s.peekKind() == .string and !isWellFormedModuleString(s.token.payload.str.bytes)) return s.failUnexpectedToken();
         export_name = try moduleImportNameAtom(s);
         try s.advance();
     }
@@ -625,12 +636,15 @@ fn parseWithClause(s: *State, request_index: u32) Error!void {
     try s.expectToken(.lbrace);
 
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
-        // Key (identifier or string)
-        if (s.peekKind() != .ident and s.peekKind() != .string) {
+        // AttributeKey : IdentifierName | StringLiteral (reserved words too).
+        const key_kind = s.peekKind();
+        if (key_kind != .ident and key_kind != .string and !key_kind.isKeyword()) {
             return s.failExpectedDescription("import attribute key");
         }
-        const key_atom = if (s.peekKind() == .ident)
+        const key_atom = if (key_kind == .ident)
             s.token.payload.ident.atom
+        else if (key_kind.isKeyword())
+            key_kind.keywordAtom()
         else
             try moduleStringAtom(s);
         try s.advance();
