@@ -535,8 +535,26 @@ pub fn runNextAtomicsHostCompletion(ctx: *core.JSContext, block_indefinite: bool
 }
 
 pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
-    ctx.runtime.assertOwnerThread();
-    ctx.runtime.roots.assertMutable();
+    removeAsyncWaiters(ctx.runtime, .{ .context = ctx });
+}
+
+/// Runtime teardown: unlink and free every waitAsync node of `rt`, whatever
+/// realm issued it. Child realms (`createRealm`) have no host Context whose
+/// `deinit` would remove their waiters, and a node left in the process-wide
+/// list would point into the destroyed Runtime.
+pub fn retireAtomicsWaitersForRuntime(rt: *core.JSRuntime) void {
+    if (!rt.execution.wait_async_used) return;
+    removeAsyncWaiters(rt, .runtime);
+}
+
+const AsyncWaiterOwner = union(enum) {
+    context: *core.JSContext,
+    runtime,
+};
+
+fn removeAsyncWaiters(rt: *core.JSRuntime, owner: AsyncWaiterOwner) void {
+    rt.assertOwnerThread();
+    rt.roots.assertMutable();
     const io = atomicsWaiterIo();
     while (true) {
         atomics_waiter_mutex.lockUncancelable(io);
@@ -544,7 +562,11 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
         var previous: ?*AtomicsWaiter = null;
         var cursor = atomics_waiters;
         while (cursor) |waiter| : (cursor = waiter.next) {
-            if (waiter.realm.borrow() != ctx) {
+            const owned = switch (owner) {
+                .context => |ctx| waiter.realm.borrow() == ctx,
+                .runtime => atomicsAsyncWaiterRuntime(waiter) == rt,
+            };
+            if (!owned) {
                 previous = waiter;
                 continue;
             }

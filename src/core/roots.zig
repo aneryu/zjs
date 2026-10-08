@@ -434,39 +434,50 @@ pub const RootSet = struct {
 
     pub fn takePersistent(self: *RootSet, rt: *JSRuntime, slot: *RootSlot) JSValue {
         self.assertMutable();
-        self.removePersistent(rt, slot);
+        self.removePersistent(slot);
         const value = slot.value;
         slot.value = JSValue.undefinedValue();
         rt.destroyNative(RootSlot, slot);
         return value;
     }
 
-    fn removePersistent(self: *RootSet, rt: *JSRuntime, slot: *RootSlot) void {
-        var found: ?usize = null;
-        for (self.persistent_root_slots.items, 0..) |registered, index| {
-            if (registered == slot) {
-                found = index;
-                break;
+    /// Identifies the slot by address only, so a second release through a
+    /// copied handle is caught before the freed slot is touched. Handles are
+    /// usually released newest first, so the scan starts at the tail; trace
+    /// order is irrelevant, so removal swaps. Capacity is kept for reuse and
+    /// released by `deinit`.
+    fn removePersistent(self: *RootSet, slot: *RootSlot) void {
+        const items = self.persistent_root_slots.items;
+        var index = items.len;
+        while (index != 0) {
+            index -= 1;
+            if (items[index] == slot) {
+                _ = self.persistent_root_slots.swapRemove(index);
+                return;
             }
         }
-        const index = found.?;
-        _ = self.persistent_root_slots.orderedRemove(index);
-        if (self.persistent_root_slots.items.len == 0) self.persistent_root_slots.clearAndFree(rt.nativeAllocator());
+        @panic("persistent handle released twice (a copied JSValueHandle?)");
     }
 
-    pub fn assertNoOutstandingBuffers(self: *const RootSet) void {
-        if (self.active_exact_roots != null)
-            @panic("JSRuntime destroyed with active exact roots");
-        if (self.value_root_buffers != 0)
-            @panic("JSRuntime destroyed with outstanding value root buffers");
+    /// Host-owned root edges Runtime teardown does not own.
+    pub const Outstanding = enum { value_handles, root_providers };
+
+    /// The first kind of host root edge still open, or null. A provider left
+    /// registered would be traced by the teardown collections after its
+    /// owner may already be gone; every engine provider is scoped.
+    pub fn firstOutstanding(self: *const RootSet) ?Outstanding {
+        if (self.local_root_slots.items.len != 0 or
+            self.persistent_root_slots.items.len != 0 or
+            self.weak_root_slots.items.len != 0) return .value_handles;
+        if (self.root_providers_len != 0) return .root_providers;
+        return null;
     }
 
     pub fn assertNoOutstanding(self: *const RootSet) void {
-        if (self.local_root_slots.items.len != 0 or
-            self.persistent_root_slots.items.len != 0 or
-            self.weak_root_slots.items.len != 0)
-        {
-            @panic("JSRuntime destroyed with outstanding value handles");
+        const outstanding = self.firstOutstanding() orelse return;
+        switch (outstanding) {
+            .value_handles => @panic("JSRuntime destroyed with outstanding value handles"),
+            .root_providers => @panic("JSRuntime destroyed with registered root providers"),
         }
     }
 

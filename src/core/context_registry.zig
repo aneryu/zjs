@@ -139,8 +139,16 @@ pub fn unlinkLive(rt: *JSRuntime, ctx: *JSContext) void {
 
 pub fn assertNoHostRealmRefs(rt: *JSRuntime) void {
     if (comptime !std.debug.runtime_safety) return;
+    std.debug.assert(!anyHostRealmRef(rt));
+}
+
+/// Whether some realm still has an undestroyed host create-reference.
+pub fn anyHostRealmRef(rt: *const JSRuntime) bool {
     var realms = rt.contexts.iterator(.include_constructing);
-    while (realms.next()) |ctx| std.debug.assert(ctx.host_api_release_consumed);
+    while (realms.next()) |ctx| {
+        if (!ctx.host_api_release_consumed) return true;
+    }
+    return false;
 }
 
 pub fn invalidateStandardArrayPrototype(rt: *JSRuntime, object_prototype: *Object) void {

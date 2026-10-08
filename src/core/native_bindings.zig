@@ -25,11 +25,28 @@ pub const Registry = struct {
 };
 
 pub fn alloc(rt: *JSRuntime, template: native_entry.NativeEntry) !*const native_entry.NativeEntry {
+    rt.assertOwnerThread();
     const entry = try rt.createNative(native_entry.NativeEntry);
     errdefer rt.destroyNative(native_entry.NativeEntry, entry);
     entry.* = template;
     try rt.native_bindings.entries.append(rt.nativeAllocator(), entry);
     return entry;
+}
+
+/// Return an entry no function object has installed yet (the failure path
+/// of host function creation). Published entries stay until teardown.
+pub fn abandon(rt: *JSRuntime, entry: *const native_entry.NativeEntry) void {
+    const entries = &rt.native_bindings.entries;
+    var index = entries.items.len;
+    while (index != 0) {
+        index -= 1;
+        if (entries.items[index] == entry) {
+            const owned = entries.swapRemove(index);
+            rt.destroyNative(native_entry.NativeEntry, owned);
+            return;
+        }
+    }
+    @panic("abandoned native entry is not in this runtime's arena");
 }
 
 pub fn registerFinalizer(rt: *JSRuntime, ptr: *anyopaque, finalize: *const fn (*anyopaque) void) !void {
@@ -41,6 +58,7 @@ pub fn registerFinalizer(rt: *JSRuntime, ptr: *anyopaque, finalize: *const fn (*
 /// then register the finalizer without a failure in between. Pair with
 /// `registerReservedFinalizer`, or `releaseFinalizerReservation` on failure.
 pub fn reserveFinalizer(rt: *JSRuntime) !void {
+    rt.assertOwnerThread();
     const bindings = &rt.native_bindings;
     try bindings.finalizers.ensureUnusedCapacity(rt.nativeAllocator(), bindings.reserved_finalizers + 1);
     bindings.reserved_finalizers += 1;

@@ -492,8 +492,13 @@ pub const RealmContext = struct {
         }
         if (!self.construction_complete) return error.InvalidBuiltinRegistry;
         // This is the sole fallible step. If it triggers collection, the realm
-        // remains absent from every live traversal.
-        try self.runtime.registerRootProvider(self.rootProvider());
+        // remains absent from every live traversal. A realm whose host
+        // create-ref was already consumed (a `createRealm` child) has no host
+        // root left unless a scheduler holds it; registering would leave an
+        // inert provider until the realm is finalized.
+        if (!self.host_api_release_consumed or self.host_scheduler != null) {
+            try self.runtime.registerRootProvider(self.rootProvider());
+        }
         context_registry.unlinkConstructing(self.runtime, self);
         self.publication_state = .live;
         context_registry.linkLive(self.runtime, self);

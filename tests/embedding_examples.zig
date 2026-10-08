@@ -925,3 +925,21 @@ test "API validation errors are not masked by a stale exception and carry messag
     defer std.testing.allocator.free(message);
     try std.testing.expectEqualStrings("TypeError: cannot convert bigint to number", message);
 }
+
+test "runtime teardown retires a child realm's pending waitAsync waiter" {
+    // A `createRealm` child has no host Context whose `destroy` would remove
+    // its waiter from the process-wide list; Runtime teardown must, or the
+    // node outlives the Runtime (leak here, dangling for foreign notifiers).
+    const allocator = std.testing.allocator;
+    const rt = try zjs.Runtime.create(allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.Context.create(rt, .{});
+    defer ctx.destroy();
+
+    const realm = try ctx.createRealm();
+    try ctx.defineDataProperty(try ctx.globalObject(), "child", realm, .{});
+    const result = try ctx.eval(
+        \\child.global.eval("Atomics.waitAsync(new Int32Array(new SharedArrayBuffer(4)), 0, 0).async")
+    , .{});
+    try std.testing.expectEqual(@as(?bool, true), result.as(.boolean));
+}

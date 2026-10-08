@@ -71,21 +71,24 @@ pub const DynamicImportLoader = struct {
 };
 
 /// Scoped loader override, restored by `deinit` in LIFO order. `deinit` is
-/// idempotent so error-path defers are safe.
+/// idempotent so error-path defers are safe. Every scope must close before
+/// the Runtime is destroyed.
 pub const DynamicImportLoaderScope = struct {
     runtime: *JSRuntime,
     previous: DynamicImportLoader,
-    installed: DynamicImportLoader,
+    /// Nesting depth; scopes must close innermost first.
+    depth: usize,
     active: bool = true,
 
     pub fn deinit(self: *DynamicImportLoaderScope) void {
         if (!self.active) return;
-        self.runtime.assertOwnerThread();
-        // An inner scope still installed means scopes closed out of order;
+        const rt = self.runtime;
+        rt.assertOwnerThread();
+        // An inner scope still open means scopes closed out of order;
         // restoring here would reinstate a stale loader.
-        const current = self.runtime.dynamic_import_loader;
-        std.debug.assert(current.callback == self.installed.callback and current.userdata == self.installed.userdata);
-        self.runtime.dynamic_import_loader = self.previous;
+        if (rt.dynamic_import_loader_depth != self.depth) @panic("dynamic import loader scopes closed out of order");
+        rt.dynamic_import_loader = self.previous;
+        rt.dynamic_import_loader_depth -= 1;
         self.active = false;
     }
 };
@@ -210,6 +213,8 @@ pub const JSRuntime = struct {
 
     contexts: context_registry.Lists = .{},
     dynamic_import_loader: DynamicImportLoader = .{},
+    /// Open `DynamicImportLoaderScope`s.
+    dynamic_import_loader_depth: usize = 0,
     native_bindings: native_bindings.Registry = .{},
     /// Host handler, termination request, and poll countdowns.
     interrupt: interrupt_mod.State = .{},
@@ -275,37 +280,17 @@ pub const JSRuntime = struct {
         });
         errdefer gc.destroy();
 
-        // The tables below keep allocators bound to `rt` but must not allocate
-        // through them before `rt` is fully initialized. Give the allocation
-        // path defined state anyway, and check below that nothing allocated.
-        rt.allocator = allocator;
-        rt.gc = gc;
-        rt.allocation_diagnostics = .{};
-        const storage_allocator = rt.probedNativeAllocator();
-        const native_allocator = native_allocation.nativeAllocatorWithBacking(rt, allocator);
-        const atoms = try AtomTable.create(allocator, .{
-            .storage_allocator = storage_allocator,
-            .native_allocator = native_allocator,
-            .gc_registry = gc,
-        });
-        errdefer atoms.destroy();
-        const classes = try ClassTable.create(allocator, storage_allocator, atoms);
-        errdefer classes.destroy();
-        const shapes = try ShapeRegistry.create(allocator, storage_allocator, atoms, gc);
-        errdefer shapes.destroy();
-        std.debug.assert(std.meta.eql(rt.allocation_diagnostics, native_allocation.AllocationDiagnostics{}));
-
-        // Establish defaults and option-derived state before any subsystem can
-        // read the runtime. Every owned subsystem is already constructed;
+        // Every field is defined before any subsystem can see `rt`; only the
+        // three registry pointers are filled in as their tables are built.
         // GC callbacks remain disabled until the complete Runtime is activated.
         rt.* = .{
             .diagnostic_clock = options.diagnostic_clock,
             .allocator = allocator,
             .owner_thread_id = std.Thread.getCurrentId(),
             .gc = gc,
-            .atoms = atoms,
-            .classes = classes,
-            .shapes = shapes,
+            .atoms = undefined,
+            .classes = undefined,
+            .shapes = undefined,
             .job_queue = job_mod.Queue.init(rt),
             .microtasks = .{ .policy = options.microtask_policy },
             .stack = .{
@@ -318,6 +303,22 @@ pub const JSRuntime = struct {
             .interrupt = .{ .hook = if (options.interrupt_handler) |handler| .{ .handler = handler, .context = options.interrupt_context } else null },
             .host_wait = .{ .can_block = options.can_block },
         };
+
+        // The tables keep allocators bound to `rt` but must not allocate
+        // through them during construction; check that nothing did.
+        const storage_allocator = rt.probedNativeAllocator();
+        const native_allocator = native_allocation.nativeAllocatorWithBacking(rt, allocator);
+        rt.atoms = try AtomTable.create(allocator, .{
+            .storage_allocator = storage_allocator,
+            .native_allocator = native_allocator,
+            .gc_registry = gc,
+        });
+        errdefer rt.atoms.destroy();
+        rt.classes = try ClassTable.create(allocator, storage_allocator, rt.atoms);
+        errdefer rt.classes.destroy();
+        rt.shapes = try ShapeRegistry.create(allocator, storage_allocator, rt.atoms, gc);
+        errdefer rt.shapes.destroy();
+        std.debug.assert(std.meta.eql(rt.allocation_diagnostics, native_allocation.AllocationDiagnostics{}));
 
         rt.stack.armNativeLimit();
 
@@ -334,8 +335,16 @@ pub const JSRuntime = struct {
         if (!self.isOwnerThread()) return error.WrongRuntimeThread;
     }
 
+    /// Host entry points check the owner thread in every build mode.
     pub fn assertOwnerThread(self: *const JSRuntime) void {
         if (!self.isOwnerThread()) @panic("JSRuntime mutation from non-owner thread");
+    }
+
+    /// Engine primitives that are also hot internal paths (atom interning,
+    /// symbol materialization) check only in safety-checked builds, like
+    /// `ClassTable.assertOwnerThread`.
+    inline fn debugAssertOwnerThread(self: *const JSRuntime) void {
+        if (comptime std.debug.runtime_safety) self.assertOwnerThread();
     }
 
     /// True while any JS or native call frame of this runtime is active.
@@ -356,18 +365,22 @@ pub const JSRuntime = struct {
     fn deinit(self: *JSRuntime) void {
         self.assertOwnerThread();
         self.assertIdleForTeardown();
+        if (self.openHostScope()) |reason| @panic(reason);
         // The resident host invocation (exec/call_site.zig) is only ever
         // published for the duration of a call, so an idle runtime retires it
         // here; a runtime destroyed mid-call fails the assertion above first.
         execution.retireHostInvocation(self);
+        // Pending waitAsync nodes live in a process-wide list that foreign
+        // threads walk; none may outlive this Runtime, including those of
+        // child realms no host Context ever cleaned up.
+        engine_services.retireAtomicsWaiters(self);
         self.vm_stack.deinit(self.nativeAllocator());
         self.exception.clear();
         self.microtasks.clearKeptObjects(self.nativeAllocator());
         self.job_queue.deinit();
         self.strings = .{};
-        native_bindings.destroyOwned(self);
-        // Teardown does not own public handles: every scope/persistent/weak
-        // owner must close its edge first.
+        // Teardown does not own public handles or root providers: every
+        // scope/persistent/weak/provider owner must close its edge first.
         self.roots.assertNoOutstanding();
         self.gc.scheduler.host_quiescent = true;
         _ = gc_driver.collectForTeardown(self);
@@ -397,6 +410,10 @@ pub const JSRuntime = struct {
         // residual dynamic symbol bodies (notably Symbol.for's registry ref)
         // before AtomTable.deinit asserts that no materialized bodies remain.
         self.atoms.releaseValueSymbolBodiesAfterGc();
+        // Host function `state` finalizers run only after every managed
+        // object -- including NativeObject payload finalizers that may share
+        // that state -- has been finalized. The entries go with them.
+        native_bindings.destroyOwned(self);
         // These native containers share the Runtime allocator for their entire
         // lifetime; parser scratch is owned separately by each compilation.
         self.weak.deinit(self.nativeAllocator());
@@ -418,10 +435,17 @@ pub const JSRuntime = struct {
         allocator.destroy(self);
     }
 
-    /// Checked teardown entry for hosts that cannot prove their call thread.
-    /// On rejection the Runtime is untouched and remains owned by its creator.
-    pub fn tryDestroy(self: *JSRuntime) RuntimeMutationError!void {
+    /// Checked teardown entry for hosts that cannot prove their call thread
+    /// or that the Runtime is idle: `WrongRuntimeThread` off the owner thread,
+    /// `RuntimeBusy` while execution, a scope, a root frame or a host root
+    /// edge (handle, root provider, undestroyed Context) is still open. On
+    /// rejection the Runtime is untouched and remains owned by its creator.
+    pub fn tryDestroy(self: *JSRuntime) (RuntimeMutationError || error{RuntimeBusy})!void {
         try self.requireOwnerThread();
+        if (self.teardownBlocker() != null or
+            self.openHostScope() != null or
+            self.roots.firstOutstanding() != null or
+            context_registry.anyHostRealmRef(self)) return error.RuntimeBusy;
         self.destroy();
     }
 
@@ -507,11 +531,17 @@ pub const JSRuntime = struct {
     /// gone before teardown in every optimization mode; silently continuing
     /// would leave their deferred cleanup pointing into a destroyed Runtime.
     fn assertIdleForTeardown(self: *const JSRuntime) void {
+        if (self.teardownBlocker()) |reason| @panic(reason);
+    }
+
+    /// Why teardown cannot start now, or null when the Runtime is idle.
+    fn teardownBlocker(self: *const JSRuntime) ?[]const u8 {
         if (comptime gc_scope.checks_enabled) {
-            if (self.active_no_gc_scope != null) @panic("JSRuntime destroyed during no-GC scope");
+            if (self.active_no_gc_scope != null) return "JSRuntime destroyed during no-GC scope";
         }
-        if (self.roots.isTracing()) @panic("JSRuntime destroyed during tracing");
-        self.roots.assertNoOutstandingBuffers();
+        if (self.roots.isTracing()) return "JSRuntime destroyed during tracing";
+        if (self.roots.active_exact_roots != null) return "JSRuntime destroyed with active exact roots";
+        if (self.roots.value_root_buffers != 0) return "JSRuntime destroyed with outstanding value root buffers";
         if (self.stack.call_depth != 0 or
             self.stack.native_call_depth != 0 or
             self.stack.bytecode_bytes != 0 or
@@ -520,8 +550,17 @@ pub const JSRuntime = struct {
             job_mod.ActiveJobRoot.anyFor(self) or
             self.microtasks.running or self.microtasks.scope_depth != 0)
         {
-            @panic("JSRuntime destroyed while execution or root frames are active");
+            return "JSRuntime destroyed while execution or root frames are active";
         }
+        return null;
+    }
+
+    /// Host scopes that hold this Runtime and would touch it on close. Not
+    /// part of `teardownBlocker`: an idle Runtime (gate audits) may keep them.
+    fn openHostScope(self: *const JSRuntime) ?[]const u8 {
+        if (self.roots.handle_scope_depth != 0) return "JSRuntime destroyed with an open handle scope";
+        if (self.dynamic_import_loader_depth != 0) return "JSRuntime destroyed with an open dynamic import loader scope";
+        return null;
     }
 
     /// Resolves an even weak identity (`weak_id << 1`) to its registered
@@ -535,14 +574,17 @@ pub const JSRuntime = struct {
     pub const registerWeakObjectIdentity = gc_weak.registerObject;
 
     pub fn enterHandleScope(self: *JSRuntime) HandleScope {
+        self.assertOwnerThread();
         return HandleScope.enter(self);
     }
 
     pub fn symbolValue(self: *JSRuntime, atom_id: atom.Atom) !JSValue {
+        self.debugAssertOwnerThread();
         return self.atoms.symbolValue(self, atom_id);
     }
 
     pub fn newSymbolValue(self: *JSRuntime, description: ?[]const u8) !JSValue {
+        self.assertOwnerThread();
         const atom_id = if (description) |bytes|
             try self.atoms.newValueSymbol(bytes)
         else
@@ -552,12 +594,14 @@ pub const JSRuntime = struct {
     }
 
     pub fn globalSymbolValue(self: *JSRuntime, key: []const u8) !JSValue {
+        self.assertOwnerThread();
         const atom_id = try self.atoms.internRegisteredValueSymbol(key);
         return self.symbolValue(atom_id);
     }
 
     /// One strong persistent handle; a `JSValue` is copied by bits.
     pub fn createPersistentValue(self: *JSRuntime, value: JSValue) !JSValueHandle {
+        self.assertOwnerThread();
         return JSValueHandle.init(self, value);
     }
 
@@ -567,6 +611,7 @@ pub const JSRuntime = struct {
         callback: ?WeakPersistentCallback,
         callback_context: ?*anyopaque,
     ) !WeakPersistentValue {
+        self.assertOwnerThread();
         return WeakPersistentValue.init(self, value, callback, callback_context);
     }
 
@@ -679,6 +724,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn memoryUsage(self: *const JSRuntime) MemoryUsage {
+        self.assertOwnerThread();
         var live_dynamic_atoms: usize = 0;
         var dynamic_atom_bytes: usize = 0;
         for (self.atoms.entries) |entry| {
@@ -721,6 +767,7 @@ pub const JSRuntime = struct {
     /// sorts a scratch copy; callers that only want counters should not pay
     /// for it.
     pub fn gcPauseDistribution(self: *const JSRuntime) ?gc_mod.PauseDistribution {
+        self.assertOwnerThread();
         return self.gc.pauseDistribution();
     }
 
@@ -731,6 +778,7 @@ pub const JSRuntime = struct {
 
     /// Maintained counters only. Does not walk the heap.
     pub fn gcStats(self: *const JSRuntime) gc_mod.Stats {
+        self.assertOwnerThread();
         var stats = self.gc.counterSnapshot(self);
         self.fillGcCounters(&stats);
         return stats;
@@ -738,6 +786,7 @@ pub const JSRuntime = struct {
 
     /// One heap census. Heap bytes stay separate from external debt.
     pub fn gcDetailedStats(self: *const JSRuntime) gc_mod.DetailedStats {
+        self.assertOwnerThread();
         var detailed = self.gc.statsSnapshot(self);
         self.fillGcCounters(&detailed.counters);
         detailed.counters.weak_ref_count += self.weakObjectEntryCount();
@@ -834,6 +883,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {
+        self.debugAssertOwnerThread();
         return self.atoms.internString(bytes);
     }
 
@@ -851,10 +901,11 @@ pub const JSRuntime = struct {
         self.assertOwnerThread();
         const previous = self.dynamic_import_loader;
         self.dynamic_import_loader = next;
+        self.dynamic_import_loader_depth += 1;
         return .{
             .runtime = self,
             .previous = previous,
-            .installed = next,
+            .depth = self.dynamic_import_loader_depth,
         };
     }
 
@@ -1088,9 +1139,113 @@ test "nested dynamic import loader scopes restore in LIFO order" {
     var outer = rt.installDynamicImportLoader(.{ .userdata = &outer_data });
     var inner = rt.installDynamicImportLoader(.{ .userdata = &inner_data });
     try std.testing.expectEqual(@as(?*anyopaque, &inner_data), rt.dynamic_import_loader.userdata);
+    try std.testing.expectEqual(@as(usize, 2), rt.dynamic_import_loader_depth);
     inner.deinit();
     inner.deinit(); // idempotent
     try std.testing.expectEqual(@as(?*anyopaque, &outer_data), rt.dynamic_import_loader.userdata);
+    // Re-installing the same loader is still a distinct, ordered scope.
+    var same = rt.installDynamicImportLoader(.{ .userdata = &outer_data });
+    try std.testing.expectEqual(@as(usize, 2), same.depth);
+    same.deinit();
     outer.deinit();
     try std.testing.expectEqual(@as(?*anyopaque, null), rt.dynamic_import_loader.userdata);
+    try std.testing.expectEqual(@as(usize, 0), rt.dynamic_import_loader_depth);
+}
+
+test "tryDestroy rejects a busy runtime and leaves it intact" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    var destroyed = false;
+    defer if (!destroyed) rt.destroy();
+
+    const Probe = struct {
+        fn trace(_: *anyopaque, _: *RootVisitor) RootTraceError!void {}
+    };
+    var provider_state: u8 = 0;
+    const provider = RootProvider{ .context = &provider_state, .trace = Probe.trace };
+    try rt.registerRootProvider(provider);
+    try std.testing.expectEqual(@as(?RootSet.Outstanding, .root_providers), rt.roots.firstOutstanding());
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    rt.unregisterRootProvider(provider);
+
+    var handle = try rt.createPersistentValue(JSValue.int32(1));
+    try std.testing.expectEqual(@as(?RootSet.Outstanding, .value_handles), rt.roots.firstOutstanding());
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    handle.deinit();
+
+    var scope = rt.enterHandleScope();
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    scope.deinit();
+
+    var loader = rt.installDynamicImportLoader(.{});
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    loader.deinit();
+
+    var microtasks = try rt.enterMicrotaskScope();
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    try microtasks.finish();
+
+    const ctx = try context_mod.JSContext.create(rt, .{});
+    try std.testing.expectError(error.RuntimeBusy, rt.tryDestroy());
+    ctx.destroy();
+
+    try std.testing.expectEqual(@as(?RootSet.Outstanding, null), rt.roots.firstOutstanding());
+    try rt.tryDestroy();
+    destroyed = true;
+}
+
+test "persistent handles release in any order" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var handles: [3]JSValueHandle = undefined;
+    for (&handles, 0..) |*handle, index| handle.* = try rt.createPersistentValue(JSValue.int32(@intCast(index)));
+    handles[0].deinit();
+    try std.testing.expectEqual(@as(usize, 2), rt.roots.persistent_root_slots.items.len);
+    try std.testing.expectEqual(@as(?i32, 1), handles[1].get().as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), handles[2].get().as(.int));
+    handles[2].deinit();
+    handles[1].deinit();
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
+}
+
+test "an abandoned native entry is returned to the runtime" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const kept = try rt.allocNativeEntry(native_entry.retired_entry);
+    const before = rt.allocation_diagnostics.allocated_bytes;
+    const abandoned = try rt.allocNativeEntry(native_entry.retired_entry);
+    native_bindings.abandon(rt, abandoned);
+    try std.testing.expectEqual(before, rt.allocation_diagnostics.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), rt.native_bindings.entries.items.len);
+    try std.testing.expectEqual(@as(*const native_entry.NativeEntry, kept), rt.native_bindings.entries.items[0]);
+}
+
+test "host state finalizers run after managed objects are finalized" {
+    const native_object = @import("core/native_object.zig");
+    const Log = struct {
+        var events: [2]u8 = undefined;
+        var len: usize = 0;
+
+        fn record(event: u8) void {
+            events[len] = event;
+            len += 1;
+        }
+        fn object(_: *anyopaque) callconv(.c) void {
+            record('o');
+        }
+        fn state(_: *anyopaque) void {
+            record('s');
+        }
+    };
+    Log.len = 0;
+    var shared: u8 = 0;
+    {
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const native_type = try native_object.registerType(rt, "OrderProbe", Log.object);
+        _ = try native_object.create(rt, native_type, null, &shared);
+        try rt.registerNativeEntryFinalizer(&shared, Log.state);
+    }
+    try std.testing.expectEqualSlices(u8, "os", Log.events[0..Log.len]);
 }

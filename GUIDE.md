@@ -118,7 +118,9 @@ class definition growth/unregistration, context-list and prototype-slot
 mutation, and GC commits all follow that token. Checked
 host boundaries reject a foreign caller with `error.WrongRuntimeThread` before
 allocation or mutation; infallible internal teardown paths assert the same
-precondition. Same-thread callback reentry is supported and must use the normal
+precondition. Host entry points that cannot fail panic off the owner thread
+in every build mode; engine primitives that are also hot internal paths
+(`internAtom`, `symbolValue`) check only in safety-checked builds. Same-thread callback reentry is supported and must use the normal
 generation/reconciliation rules—thread ownership is not a non-reentrancy
 guard. No broad Runtime structural lock substitutes for this contract.
 

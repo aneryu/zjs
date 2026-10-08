@@ -1013,6 +1013,9 @@ pub const JSContext = struct {
         template.flags.host_constructor = options.with_prototype or options.constructor;
         // The entry itself is immortal until teardown.
         const entry = try rt.allocNativeEntry(template);
+        // Until `installNativeEntry` publishes it, a failure returns the
+        // entry instead of leaving it in the arena until teardown.
+        errdefer native_bindings.abandon(rt, entry);
         const function_capacity: usize = 2 + @as(usize, @intFromBool(options.with_prototype));
         const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, @intCast(template.arity), function_capacity);
         const function_object = try Object.expect(function_value);

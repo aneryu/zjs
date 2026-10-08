@@ -142,7 +142,14 @@ stable-address Runtime. The allocator is a required first argument, separate
 from `Runtime.Options`; there is no default. Its backing state must remain
 valid until `destroy()` returns.
 Release the Runtime with `destroy()`. Runtime has no public in-place
-initialization or copied ownership state.
+initialization or copied ownership state. Before `destroy()`, every host
+Context, handle scope, persistent or weak handle, registered root provider,
+microtask scope and dynamic-import loader scope must be closed and no call
+may be active; `destroy()` panics otherwise. `tryDestroy()` checks the same
+conditions instead: `error.WrongRuntimeThread` off the owner thread,
+`error.RuntimeBusy` otherwise, leaving the Runtime untouched. Teardown also
+retires every pending `Atomics.waitAsync` waiter of the Runtime, including
+those issued from `createRealm` children.
 
 The engine's call-budget, native-stack guard, and active-backtrace fields are
 internal `JSRuntime` state, grouped in `Runtime.stack` (`StackBudget`); no
@@ -484,14 +491,18 @@ native function is not polled while it runs; a long one should return
   ownership hand-off for `state`, taken only when `createFunction` /
   `defineFunction` succeeds (an error leaves `state` with the caller and the
   finalizer never runs); it runs on the runtime thread during
-  `Runtime.destroy` (destroying a context or collecting the function
-  object does not run it). If `state` references
+  `Runtime.destroy`, after every managed object (native-object finalizers
+  included) has been finalized (destroying a context or collecting the
+  function object does not run it). If `state` references
   runtime-owned JavaScript values, it must own public handles and release
   them before the runtime is destroyed.
 - Each registration allocates one `NativeEntry` in the runtime's entry arena.
   Entries are immutable and are never freed before the runtime dies
   (contract C9); the function objects that reference them are ordinary
-  GC-managed objects.
+  GC-managed objects. A failed `createFunction` / `defineFunction` returns
+  its entry. The arena grows with every successful registration: in a
+  long-lived Runtime create host functions once and reuse them rather than
+  per request.
 - `Call.ctx` is the realm the function was created in (contract C6), which
   may differ from the realm of the caller.
 - Arguments are the VM's operand window and stay alive for the duration of

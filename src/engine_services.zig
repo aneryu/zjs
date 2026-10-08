@@ -77,6 +77,11 @@ pub fn destroyAtomicsWaiter(waiter: *AtomicsWaiter) void {
     atomics.destroyAsyncWaiter(waiter);
 }
 
+/// Runtime teardown: free every pending Atomics.waitAsync node of `rt`.
+pub fn retireAtomicsWaiters(rt: *runtime.JSRuntime) void {
+    atomics.retireAtomicsWaitersForRuntime(rt);
+}
+
 /// Promise roots of this Runtime's pending Atomics.waitAsync waiters. Only
 /// called once the Runtime has linked a waiter (`wait_async_used`).
 pub fn traceAtomicsWaitAsyncRoots(rt: *runtime.JSRuntime, visitor: *runtime.RootVisitor) runtime.RootTraceError!void {
