@@ -167,7 +167,7 @@ fn installDOMException(ctx: *core.JSContext, global: *core.Object) !void {
 
     // The intrinsic %Error.prototype% of `global`'s own Realm, independent of
     // the mutable global `Error` binding.
-    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
     slots[1] = (realm.nativeErrorPrototypeObject(.error_) orelse return error.InvalidBuiltinRegistry).value();
 
     var facade = zjs.borrowContext(ctx);
@@ -258,7 +258,7 @@ pub fn throwDOMException(ctx: *core.JSContext, global: *core.Object, name: []con
     slots[1] = try objectAt(slots[0]).getProperty(core.atom.ids.DOMException);
     if (slots[1].is(.object)) slots[1] = try objectAt(slots[1]).getProperty(core.atom.ids.prototype);
     if (!slots[1].is(.object)) {
-        const realm = rt.contextForGlobalIncludingConstructing(objectAt(slots[0])) orelse return error.InvalidBuiltinRegistry;
+        const realm = rt.contexts.forGlobal(objectAt(slots[0]), .include_constructing) orelse return error.InvalidBuiltinRegistry;
         slots[1] = (realm.nativeErrorPrototypeObject(.error_) orelse return error.InvalidBuiltinRegistry).value();
     }
     slots[2] = try value_ops.createStringValue(rt, message);

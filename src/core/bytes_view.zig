@@ -344,7 +344,7 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
     // a collection under the tracer rather than this release. `backing` is
     // host memory, not a heap reference, so only the buffer object needs to
     // die and nothing here needs rooting.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 
@@ -429,7 +429,7 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     // SharedArrayBuffer itself, which under the tracer means a collection
     // rather than this release. Nothing here needs rooting -- the buffer
     // object is the thing that must die.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 

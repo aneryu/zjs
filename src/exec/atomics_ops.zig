@@ -310,7 +310,7 @@ fn atomicsWait(
     // runs after the operand coercions but BEFORE the memory load/compare, so
     // a non-blockable thread throws TypeError instead of returning
     // "not-equal".
-    if (!ctx.runtime.can_block) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
+    if (!ctx.runtime.host_wait.can_block) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
@@ -395,7 +395,7 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
         waiter.cond.signal(io);
         if (waiter.promise != null) {
             if (waiter.realm.borrow()) |waiter_ctx| {
-                waiter_ctx.runtime.signalHostCompletion(io);
+                waiter_ctx.runtime.host_wait.signal(io);
             }
         }
         woken += 1;
@@ -458,8 +458,6 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
             waiter_ctx,
             waiter,
             &waiter.promise.?,
-            atomicsRunAsyncWaiterCompletion,
-            atomicsDestroyAsyncWaiterOpaque,
         ) catch |err| {
             // Entry preparation may allocate or run GC. Retry the same frozen
             // completion later, but never while the global waiter mutex is
@@ -513,12 +511,12 @@ pub fn waitForAtomicsHostSignalUntil(
         return false;
     }
 
-    rt.resetHostCompletionSignal();
+    rt.host_wait.reset();
     atomics_waiter_mutex.unlock(io);
     if (deadline) |limit| {
-        _ = rt.waitForHostCompletionUntil(io, limit);
+        _ = rt.host_wait.waitUntil(io, limit);
     } else {
-        rt.waitForHostCompletion(io);
+        rt.host_wait.wait(io);
     }
     return true;
 }
@@ -591,7 +589,7 @@ fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, timeou
             if (std.Io.Timestamp.now(io, .awake).nanoseconds >= limit.nanoseconds) break;
         }
         atomics_waiter_mutex.unlock(io);
-        const interrupted = rt.runInterruptHandler();
+        const interrupted = rt.interrupt.poll();
         if (!interrupted) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
         atomics_waiter_mutex.lockUncancelable(io);
         if (interrupted and waiter.completion == .waiting) {
@@ -764,14 +762,8 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
         }
     };
     var probe = Probe{};
-    const saved_trigger = rt.gc.heap_budget.probe;
-    const saved_trigger_context = rt.gc.heap_budget.probe_ctx;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_context;
-    }
-    rt.gc.heap_budget.probe = Probe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
+    const saved_trigger = rt.gc.heap_budget.installProbe(.{ .run = Probe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger);
     // Fill the first 4-job window (320 bytes with 8-byte JSValue) so
     // settlement growth is 8 jobs / 640 bytes and misses the small-object
     // slab. A warm 320-class pop never reaches the backing allocator, so
@@ -793,8 +785,7 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     try std.testing.expect(promise.promiseResult() == null);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    rt.gc.heap_budget.probe = saved_trigger;
-    rt.gc.heap_budget.probe_ctx = saved_trigger_context;
+    rt.gc.heap_budget.restoreProbe(saved_trigger);
     try processExpiredAtomicsWaiters(ctx);
     while (rt.job_queue.jobs.len > 1) {
         var filler_job = rt.job_queue.takeFirst().?;
@@ -802,7 +793,7 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     }
     waiter_live = false;
     try std.testing.expect(promise.promiseResult() == null);
-    try std.testing.expect((try promise_ops.drainOnePendingJob(ctx, null, global)) == .success);
+    try std.testing.expect((try promise_ops.drainOnePendingJob(ctx, null)) == .success);
     try std.testing.expect(promise.promiseResult() != null);
     try std.testing.expect(!promise.promiseIsRejected());
 }
@@ -1087,10 +1078,7 @@ fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     rt.nativeAllocator().destroy(waiter);
 }
 
-fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
-    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(raw_waiter));
-    atomicsDestroyAsyncWaiter(waiter);
-}
+pub const destroyAsyncWaiter = atomicsDestroyAsyncWaiter;
 
 /// Run one owner-thread waitAsync completion. `drainOnePendingJob` reserves the
 /// unlinked entry's queue slot before calling this function. Every failure is
@@ -1098,7 +1086,7 @@ fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
 /// typed completion can be restored at the FIFO head. Success fulfills the
 /// promise like any other (its reactions are queued) and releases the
 /// reservation.
-fn atomicsRunAsyncWaiterCompletion(
+pub fn atomicsRunAsyncWaiterCompletion(
     ctx: *core.JSContext,
     payload: *const jobs_mod.AtomicsWaiterPayload,
 ) core.errors.RuntimeError!void {
@@ -1229,16 +1217,12 @@ pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     ctx.runtime.assertOwnerThread();
     ctx.runtime.roots.assertMutable();
-    installWaitAsyncRootAdapter();
+    // Sticky: from here on this Runtime's root walk visits the registry.
+    ctx.runtime.execution.noteWaitAsyncUsed();
     const io = atomicsWaiterIo();
     atomics_waiter_mutex.lockUncancelable(io);
     defer atomics_waiter_mutex.unlock(io);
     atomicsLinkWaiter(waiter);
-}
-
-fn installWaitAsyncRootAdapter() void {
-    if (core.runtime.trace_atomics_wait_async != null) return;
-    core.runtime.trace_atomics_wait_async = traceWaitAsyncRoots;
 }
 
 test "waitAsync completion remembers a newly allocated result on an aged promise" {
@@ -1252,7 +1236,7 @@ test "waitAsync completion remembers a newly allocated result on an aged promise
     const promise_root = try roots.ref(0);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     try promise_root.set(rt, promise.value());
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!promise.gcHeader().metaConst().flags.young);
     const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
     waiter.* = .{ .key = .{ .offset_or_ptr = 0 }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx), .completion = .timed_out };
@@ -1262,15 +1246,13 @@ test "waitAsync completion remembers a newly allocated result on an aged promise
     placeholder.deinit();
     rt.job_queue.reserveUnlinkedEntrySlot();
     const payload = jobs_mod.AtomicsWaiterPayload{
-        .runner = atomicsRunAsyncWaiterCompletion,
-        .destroyer = atomicsDestroyAsyncWaiterOpaque,
         .waiter = waiter,
         .promise = promise.value(),
     };
     try atomicsRunAsyncWaiterCompletion(ctx, &payload);
     const result_header = promise.promiseResult().?.cycleMarkHeader().?;
     try std.testing.expect(result_header.metaConst().flags.young);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(result_header));
     try std.testing.expect(promise.promiseResult().?.asStringBodyRaw().?.eqlBytes("timed-out"));
 }
@@ -1294,20 +1276,14 @@ test "waitAsync detached handoff remains rooted during queue allocation" {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             if (self.called) return;
             self.called = true;
-            _ = self.rt.collectFull(null, .declared_only) catch {
+            _ = self.rt.collectForTest() catch {
                 self.failed = true;
             };
         }
     };
     var probe = Probe{ .rt = rt };
-    const previous_probe = rt.gc.heap_budget.probe;
-    const previous_context = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.collect;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = previous_probe;
-        rt.gc.heap_budget.probe_ctx = previous_context;
-    }
+    const previous_probe = rt.gc.heap_budget.installProbe(.{ .run = Probe.collect, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(previous_probe);
     try processExpiredAtomicsWaiters(ctx);
     const alive = rt.gc.containsHeader(header);
     var job = rt.job_queue.takeFirst().?;
@@ -1343,7 +1319,7 @@ test "waitAsync failed handoff relinks a relocated value then retries" {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             if (self.called) return;
             self.called = true;
-            _ = core.gc_trace_stw.collectMinor(self.rt, null, .declared_only) catch {
+            _ = core.gc_trace_stw.collectMinor(self.rt, .declared_only) catch {
                 self.failed = true;
                 return;
             };
@@ -1352,19 +1328,14 @@ test "waitAsync failed handoff relinks a relocated value then retries" {
         }
     };
     var probe = Probe{ .rt = rt, .failing = &failing };
-    const previous_probe = rt.gc.heap_budget.probe;
-    const previous_context = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.collect;
-    rt.gc.heap_budget.probe_ctx = &probe;
+    const previous_probe = rt.gc.heap_budget.installProbe(.{ .run = Probe.collect, .context = &probe });
     defer {
         failing.fail_index = std.math.maxInt(usize);
-        rt.gc.heap_budget.probe = previous_probe;
-        rt.gc.heap_budget.probe_ctx = previous_context;
+        rt.gc.heap_budget.restoreProbe(previous_probe);
     }
     try std.testing.expectError(error.OutOfMemory, processExpiredAtomicsWaiters(ctx));
     failing.fail_index = std.math.maxInt(usize);
-    rt.gc.heap_budget.probe = previous_probe;
-    rt.gc.heap_budget.probe_ctx = previous_context;
+    rt.gc.heap_budget.restoreProbe(previous_probe);
     try std.testing.expect(probe.called and !probe.failed);
     try std.testing.expect(waiter.linked);
     try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
@@ -1475,6 +1446,28 @@ test "waitAsync root trace repairs original slots outside the waiter lock" {
     try std.testing.expectEqual(native_before, rt.allocation_diagnostics.allocated_bytes);
 }
 
+test "waitAsync registry tracing is enabled per Runtime on first link" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const other = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer other.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    try std.testing.expect(!rt.execution.wait_async_used);
+    const promise = try core.Object.createPlainObject(rt, null);
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+    waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx) };
+    atomicsLinkAsyncWaiter(waiter);
+    defer cleanupAtomicsWaitersForContext(ctx);
+    try std.testing.expect(rt.execution.wait_async_used);
+    // A Runtime that never linked a waiter keeps skipping the global registry.
+    try std.testing.expect(!other.execution.wait_async_used);
+    _ = try other.collectForTest();
+    // The linked waiter's Promise is rooted only through the registry walk.
+    _ = try rt.collectForTest();
+    try std.testing.expect(rt.gc.containsHeader(waiter.promise.?.cycleMarkHeader().?));
+}
+
 test "waitAsync root trace follows nursery relocation and foreign notification" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -1488,7 +1481,7 @@ test "waitAsync root trace follows nursery relocation and foreign notification" 
     waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx) };
     atomicsLinkAsyncWaiter(waiter);
     defer cleanupAtomicsWaitersForContext(ctx);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     const moved = waiter.promise.?.heapReference().?;
     try std.testing.expect(@intFromPtr(moved) != before);
     try std.testing.expect(rt.gc.containsHeader(waiter.promise.?.cycleMarkHeader().?));
@@ -1515,8 +1508,7 @@ test "waitAsync root trace follows nursery relocation and foreign notification" 
     try std.testing.expectEqual(moved, waiter.promise.?.heapReference().?);
 }
 
-fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(rt_opaque));
+pub fn traceWaitAsyncRoots(rt: *core.JSRuntime, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
     rt.assertOwnerThread();
     rt.roots.beginTrace();
     defer rt.roots.endTrace();
@@ -1583,9 +1575,9 @@ fn waitAsyncResultRooted(ctx: *core.JSContext, is_async: bool, value: core.JSVal
     errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
     // Property definition still borrows its receiver and descriptor across
     // allocation. Pin this window until that lower-level API accepts roots.
-    var pin = try core.runtime.pinHeaderForNative(ctx.runtime, result.gcHeader());
+    var pin = try core.runtime.NativePin.initHeader(ctx.runtime, result.gcHeader());
     defer pin.deinit();
-    var input_pin = try core.runtime.pinValueForNative(ctx.runtime, try input.get(ctx.runtime));
+    var input_pin = try core.runtime.NativePin.initValue(ctx.runtime, try input.get(ctx.runtime));
     defer if (input_pin) |*held| held.deinit();
     try defineValueProperty(ctx.runtime, result, core.atom.ids.async_, core.JSValue.boolean(is_async));
     try defineValueProperty(ctx.runtime, result, core.atom.ids.value, try input.get(ctx.runtime));
@@ -1611,20 +1603,14 @@ test "waitAsync result construction roots and pins survive allocation GC" {
             self.busy = true;
             defer self.busy = false;
             self.calls += 1;
-            _ = self.rt.collectFull(null, .declared_only) catch {
+            _ = self.rt.collectForTest() catch {
                 self.failed = true;
             };
         }
     };
     var probe = Probe{ .rt = rt };
-    const old_probe = rt.gc.heap_budget.probe;
-    const old_context = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.collect;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = old_probe;
-        rt.gc.heap_budget.probe_ctx = old_context;
-    }
+    const old_probe = rt.gc.heap_budget.installProbe(.{ .run = Probe.collect, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(old_probe);
     const result_value = try atomicsWaitAsyncResult(ctx, true, input.value());
     const result = objectFromValue(result_value).?;
     const stored = try result.getProperty(core.atom.ids.value);
@@ -1662,7 +1648,7 @@ test "waitAsync result allocation failures unwind construction roots and pins" {
         }
         try std.testing.expectEqual(pins_before, rt.gc.pins.count());
         try std.testing.expect(rt.active_value_roots == root_head);
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.gc.containsHeader((try input.get(rt)).cycleMarkHeader().?));
         if (succeeded) break;
     }
@@ -1688,7 +1674,7 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_payload = core.JSValue.functionBytecode(&fb.header);
 
@@ -1706,7 +1692,7 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
         try std.testing.expect(stored.same(result_payload));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

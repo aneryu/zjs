@@ -95,7 +95,7 @@ test "JSON rawJSON native allocation failures release roots and native buffers" 
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         const rt = try core.JSRuntime.create(failing.allocator(), .{});
         defer rt.destroy();
-        rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+        rt.setGCThreshold(std.math.maxInt(usize));
         const source = "\"" ++ "\\u0100" ** 100 ++ "\"";
         const input = (try core.string.String.createAscii(rt, source)).value();
         failing.fail_index = failing.alloc_index + offset;
@@ -314,7 +314,7 @@ test "regexp legacy statics materialization survives allocation GC" {
         failure: ?anyerror = null,
         fn run(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
                 return;
             };
@@ -344,19 +344,15 @@ test "regexp legacy statics materialization survives allocation GC" {
     const found = engine.exec.string_ops.RegExpMatch{ .index = 2, .len = long_len + 4, .capture_slots = &captures, .capture_count = 10 };
     try std.testing.expect(engine.exec.string_ops.encodeRegExpLegacyCaptureSlice(2, long_len) == null);
     var probe = Probe{ .rt = rt };
-    rt.gc.heap_budget.probe = Probe.run;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = null;
-        rt.gc.heap_budget.probe_ctx = null;
-    }
+    _ = rt.gc.heap_budget.installProbe(.{ .run = Probe.run, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(null);
     const before = rt.active_value_roots;
     try engine.exec.string_ops.updateRegExpLegacyStaticsForMatch(rt, global, try source.get(rt), &found, bytes.len);
-    rt.gc.heap_budget.probe = null;
+    rt.gc.heap_budget.restoreProbe(null);
     if (probe.failure) |err| return err;
     try std.testing.expect(probe.calls >= 3);
     try std.testing.expect(rt.active_value_roots == before);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     const legacy = global.installedRealmRegExpLegacyStatics(rt).?;
     try std.testing.expect(!legacy.lazy_no_capture_match);
     try std.testing.expectEqual(@as(usize, long_len + 4), core.string.stringValueLenUnchecked(legacy.last_match.?));
@@ -423,7 +419,7 @@ test "regexp capture result survives GC at each allocation" {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
             if (self.fail_at == self.calls) self.rt.setMemoryLimit(0);
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
                 return;
             };
@@ -448,18 +444,12 @@ test "regexp capture result survives GC at each allocation" {
             const captures = [_]usize{ 2, 3, 3, 4 };
             const found = engine.exec.string_ops.RegExpMatch{ .index = 2, .len = 2, .capture_slots = &captures, .capture_bytecode = compiled.bytecode, .capture_count = 2, .has_named_captures = true };
             var probe = Probe{ .rt = rt, .fail_at = fail_at };
-            const previous_probe = rt.gc.heap_budget.probe;
-            const previous_context = rt.gc.heap_budget.probe_ctx;
-            rt.gc.heap_budget.probe = Probe.run;
-            rt.gc.heap_budget.probe_ctx = &probe;
-            defer {
-                rt.gc.heap_budget.probe = previous_probe;
-                rt.gc.heap_budget.probe_ctx = previous_context;
-            }
+            const previous_probe = rt.gc.heap_budget.installProbe(.{ .run = Probe.run, .context = &probe });
+            defer rt.gc.heap_budget.restoreProbe(previous_probe);
             const before = rt.active_value_roots;
             const pins_before = rt.gc.pins.count();
             const created = engine.exec.string_ops.createRegExpMatchArrayFromValue(rt, try js.context.globalObject(), try input.get(rt), &found, 6, true);
-            rt.gc.heap_budget.probe = null;
+            rt.gc.heap_budget.restoreProbe(null);
             if (probe.failure) |err| return err;
             try std.testing.expect(rt.active_value_roots == before);
             try std.testing.expectEqual(pins_before, rt.gc.pins.count());
@@ -467,12 +457,12 @@ test "regexp capture result survives GC at each allocation" {
                 try std.testing.expect(probe.calls >= allocation);
                 try std.testing.expectError(error.OutOfMemory, created);
                 rt.setMemoryLimit(null);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectForTest();
                 continue;
             }
             try result.set(rt, try created);
             try std.testing.expect(probe.calls >= 6);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
             const letter = try rt.internAtom("letter");
             const array = core.value_semantics.objectFromValue(try result.get(rt)).?;
             try std.testing.expectEqual(@as(u32, 3), array.arrayLength());
@@ -529,7 +519,7 @@ test "regexp execution retains converted input across lastIndex callback GC" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.input orelse return error.MissingRegExpInput)) {
                 self.lost = true;
                 return error.LostRegExpInput;
@@ -605,7 +595,7 @@ test "regexp execution retains bytecode snapshot during interrupt reentry" {
                 self.failure = err;
                 return true;
             };
-            _ = rt.collectFull(null, .declared_only) catch |err| {
+            _ = rt.collectForTest() catch |err| {
                 self.failure = err;
                 return true;
             };
@@ -680,11 +670,11 @@ test "regexp compile OOM preserves source and compiled program together" {
     try flags.set(rt, (try core.string.String.createAscii(rt, "g")).value());
     var compiled = try engine.exec.regexp_ops.compileWithRuntime(rt, prefix ++ "\xc4\x80]", "g");
     defer compiled.deinit(rt.nativeAllocator());
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     const base = rt.gc.heap_budget.bytes;
     _ = try core.string.String.createLatin1(rt, compiled.bytecode);
     const bytecode_charge = rt.gc.heap_budget.bytes - base;
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(base, rt.gc.heap_budget.bytes);
     const before = rt.active_value_roots;
     rt.setMemoryLimit(base + bytecode_charge);
@@ -734,7 +724,7 @@ test "regexp compile retains converted source across flags callback GC" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.source orelse return error.MissingRegExpSource)) {
                 self.lost = true;
                 return error.LostRegExpSource;
@@ -810,7 +800,7 @@ test "date boundary constructor retains later arguments and coerced values" {
         lost: bool = false,
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (self.later_id != null and self.rt.liveObjectFromWeakIdentity(self.later_id.?) == null) {
                 self.lost = true;
@@ -873,7 +863,7 @@ test "date boundary setters retain receiver across argument coercion" {
         calls: usize = 0,
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (!self.rt.gc.containsHeader(self.receiver.?)) {
                 self.lost = true;
@@ -1584,7 +1574,7 @@ test "string boundary conversion chains retain converted source" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.source orelse return error.MissingUnicodeSource)) {
                 self.lost = true;
                 return error.LostUnicodeSource;
@@ -1641,7 +1631,7 @@ test "string boundary generic regexp replace retains source across callbacks" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.source orelse return error.MissingReplaceSource))
                 return error.LostReplaceSource;
             self.calls += 1;
@@ -1706,7 +1696,7 @@ test "string boundary matchAll dispatch roots converted source across pattern GC
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.source orelse return error.MissingMatchAllSource))
                 return error.LostMatchAllSource;
             self.calls += 1;
@@ -1776,7 +1766,7 @@ test "string boundary regexp iterator next retains exec result across coercion G
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (!self.rt.gc.containsHeader(self.result orelse return error.MissingIteratorMatch)) {
                 self.lost = true;
@@ -1824,7 +1814,7 @@ test "string boundary regexp iterator prototype survives allocation GC and OOM" 
         failure: ?anyerror = null,
         fn run(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
                 return;
             };
@@ -1836,14 +1826,8 @@ test "string boundary regexp iterator prototype survives allocation GC and OOM" 
     const rt = js.runtime;
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     var probe = Probe{ .rt = rt };
-    const previous_probe = rt.gc.heap_budget.probe;
-    const previous_context = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.run;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = previous_probe;
-        rt.gc.heap_budget.probe_ctx = previous_context;
-    }
+    const previous_probe = rt.gc.heap_budget.installProbe(.{ .run = Probe.run, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(previous_probe);
     const proto = try engine.exec.string_ops.regExpStringIteratorPrototype(js.context, global);
     if (probe.failure) |err| return err;
     try std.testing.expect(probe.calls >= 2);
@@ -1851,7 +1835,7 @@ test "string boundary regexp iterator prototype survives allocation GC and OOM" 
     try std.testing.expect((try proto.getProperty(tag_atom)).asStringBodyRaw().?.eqlBytes("RegExp String Iterator"));
     const next_atom = core.atom.predefinedId("next", .string).?;
     try std.testing.expect(engine.exec.call_runtime.isCallableValue(try proto.getProperty(next_atom)));
-    rt.gc.heap_budget.probe = null;
+    rt.gc.heap_budget.restoreProbe(null);
     const object = try core.Object.createPlainObject(rt, null);
     const header = object.gcHeader();
     rt.forcePreciseRootScanForTest();
@@ -1894,7 +1878,7 @@ fn testRegExpMatchSearchRoots(comptime match: bool) !void {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (!self.rt.gc.containsHeader(self.source orelse return error.MissingRegExpSource)) {
                 self.lost = true;
@@ -2011,7 +1995,7 @@ fn testRegExpSpeciesRoots(comptime match_all: bool) !void {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (!self.rt.gc.containsHeader(self.victim orelse return error.MissingSplitSource)) {
                 self.lost = true;
@@ -2075,8 +2059,8 @@ test "string boundary regexp split avoids implicit rope materialization" {
     rt.forcePreciseRootScanForTest();
     defer rt.restoreDefaultRootScanForTest();
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = try engine.exec.string_ops.regExpSymbolSplitGeneric(js.context, null, global, splitter, source.value(), 20, true, null, null);
     try std.testing.expect(rt.gc.collection_epoch > epoch);
@@ -2096,7 +2080,7 @@ test "string boundary regexp split retains values across observable callbacks" {
         calls: usize = 0,
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             return core.JSValue.undefinedValue();
         }
@@ -2183,8 +2167,8 @@ test "string boundary regexp fast replace owns roots during materialization GC" 
     rt.forcePreciseRootScanForTest();
     defer rt.restoreDefaultRootScanForTest();
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = (try engine.exec.string_ops.regExpReplaceFast(js.context, null, global, rx, source.value(), replacement.value(), null, null)).?;
     try std.testing.expect(rt.gc.collection_epoch > epoch);
@@ -2378,7 +2362,7 @@ test "string boundary slice conversions retain source across index callbacks" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.calls += 1;
             if (!self.rt.gc.containsHeader(self.victim orelse return error.MissingSliceSource)) {
                 self.lost = true;
@@ -2416,7 +2400,7 @@ test "string boundary concat protects converted parts across coercion GC" {
         lost: bool = false,
         fn make(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             for (self.victims[0..self.count]) |header| {
                 if (!self.rt.gc.containsHeader(header)) {
                     self.lost = true;
@@ -2553,7 +2537,7 @@ test "string boundary padding keeps converted source alive across coercion GC" {
         }
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.collections += 1;
             if (!self.rt.gc.containsHeader(self.victim orelse return error.MissingPadSource)) return error.LostPadSource;
             return core.JSValue.undefinedValue();
@@ -2661,7 +2645,7 @@ test "waitAsync roots arguments across coercion GC and preserves conversion orde
         collections: usize = 0,
         fn collect(raw: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.collections += 1;
             return core.JSValue.undefinedValue();
         }
@@ -2715,7 +2699,7 @@ test "string boundary replaceAll reborrows after coercion and replacement GC" {
         }
         fn collect(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             self.collections += 1;
             return core.JSValue.undefinedValue();
         }
@@ -2758,7 +2742,7 @@ const ReplaceCaptureGcProbe = struct {
 
     fn collect(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        _ = try self.rt.collectFull(null, .declared_only);
+        _ = try self.rt.collectForTest();
         self.collections += 1;
         self.alive = self.rt.gc.containsHeader(self.victim orelse return error.MissingCapture);
         return core.JSValue.undefinedValue();
@@ -3540,8 +3524,7 @@ test "synchronous native fence reuses one Machine and restores native cleanup or
     try std.testing.expect(metrics.max_depth >= 2);
     try std.testing.expectEqual(@as(usize, 5), probe.invoke_calls);
     try std.testing.expect(probe.cleanup_ran);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     try std.testing.expectEqual(baseline_call_depth, js.runtime.stack.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
@@ -3601,7 +3584,7 @@ test "synchronous native reentry crosses Entry chunk boundaries exactly" {
             std.math.divCeil(usize, depth, 16) catch unreachable,
             metrics.entry_chunk_allocations,
         );
-        try std.testing.expect(js.runtime.active_invocation == null);
+        try std.testing.expect(js.runtime.execution.active_invocation == null);
         try std.testing.expectEqual(baseline_call_depth, js.runtime.stack.call_depth);
         try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
         try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
@@ -3677,8 +3660,7 @@ test "synchronous native fence restores every budget after interrupt" {
     try std.testing.expect(js.context.exceptionIsUncatchable());
     const caught = try global.getProperty(caught_key);
     try std.testing.expectEqual(false, caught.as(.boolean).?);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     try std.testing.expectEqual(baseline_call_depth, js.runtime.stack.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
@@ -3734,8 +3716,7 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
     // in-window method push (native-boundary design §5.4), not a sync call.
     try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 }
 
 test "synchronous apply fallbacks restore the outer active invocation" {
@@ -3778,8 +3759,7 @@ test "synchronous apply fallbacks restore the outer active invocation" {
     // The same-Realm apply is a §5.4 window push, not a sync call; only the
     // foreign-Realm apply leaves the Machine (and starts the second one).
     try std.testing.expectEqual(@as(usize, 0), metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 }
 
 test "ordinary spread calls enter eligible bytecode targets on the current Machine" {
@@ -3834,8 +3814,7 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 }
 
 test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallbacks" {
@@ -4047,8 +4026,7 @@ test "constructor spread preserves new target on the current Machine" {
     const derived_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.entry_chunk_allocations);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const foreign_outer_key = try js.runtime.internAtom("__spreadConstructorForeignOuter");
     const foreign_outer = try global.getProperty(foreign_outer_key);
@@ -4181,8 +4159,7 @@ test "Array and TypedArray synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 42), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 }
 
 test "Map and Set synchronous callback cohort stays on one Machine" {
@@ -4340,8 +4317,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const interrupt_key = try js.runtime.internAtom("__collectionCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -4366,8 +4342,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -4660,8 +4635,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const foreign_key = try js.runtime.internAtom("__propertyCallbackForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -4682,8 +4656,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     // The local plain accessor is already emitted as a direct VM
     // InlineCallRequest; only the foreign accessor needs a fresh root.
     try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const interrupt_key = try js.runtime.internAtom("__propertyCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -4708,8 +4681,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -4860,8 +4832,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const foreign_key = try js.runtime.internAtom("__jsonCallbackForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -4880,8 +4851,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const interrupt_key = try js.runtime.internAtom("__jsonCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -4906,8 +4876,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -5116,8 +5085,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const foreign_key = try js.runtime.internAtom("__cohortFiveForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -5136,8 +5104,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const interrupt_key = try js.runtime.internAtom("__cohortFiveInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -5162,8 +5129,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -5342,15 +5308,13 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     try js.runJobs();
     const reaction_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 3), reaction_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 6), reaction_metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const reaction_value_key = try js.runtime.internAtom("__promiseExecutorReactionValue");
     const reaction_value = try global.getProperty(reaction_value_key);
@@ -5376,8 +5340,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
 
     const interrupt_key = try js.runtime.internAtom("__promiseExecutorInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -5401,8 +5364,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.stack.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.stack.bytecode_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
-    try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(!js.runtime.execution.hasLiveRecords());
     try std.testing.expect(!js.context.hasException());
 
     js.runtime.setInterruptHandler(null, null);
@@ -6481,7 +6443,7 @@ test "js_closure2 attach roots captures through the function object" {
     const old_threshold = js.runtime.gcThreshold();
     js.runtime.setGCThreshold(0);
     defer js.runtime.setGCThreshold(old_threshold);
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     _ = try js.eval("globalThis.__r11_out = globalThis.__r11_fn()");
 
@@ -7890,7 +7852,7 @@ test "bound function call skips zero-length combined args allocation" {
     var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
-    _ = try rt.forceGC(&root_frame);
+    _ = try rt.forceGC(null);
 
     const base_bytes = rt.allocation_diagnostics.allocated_bytes;
     const base_allocations = rt.allocation_diagnostics.allocation_count;
@@ -10497,10 +10459,10 @@ test "AggregateError construct releases copied errors array owner" {
 
     // Warm interned stack / shape objects from the first formal construct.
     try ConstructOnce.run(ctx, global, constructor, source.value());
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const baseline_objects = rt.gc.liveCountKind(.object);
     try ConstructOnce.run(ctx, global, constructor, source.value());
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCountKind(.object));
 }
@@ -12760,7 +12722,7 @@ test "Engine eval exit leaves closed var-ref cycles for explicit collection" {
     defer js.runtime.setGCThreshold(old_threshold);
 
     _ = try js.eval(";");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_live_objects = js.runtime.gc.liveCount();
     const baseline_objects = js.runtime.gc.liveCountKind(.object);
     const baseline_var_refs = js.runtime.gc.liveCountKind(.var_ref);
@@ -12775,14 +12737,14 @@ test "Engine eval exit leaves closed var-ref cycles for explicit collection" {
 
     try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
     try std.testing.expect(js.runtime.gc.liveCount() > baseline_live_objects);
-    try std.testing.expect(js.runtime.collectForTest() > 0);
+    try std.testing.expect((try js.runtime.collectForTest()).freed_objects > 0);
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCountKind(.object));
     try std.testing.expectEqual(baseline_var_refs, js.runtime.gc.liveCountKind(.var_ref));
     try std.testing.expectEqual(baseline_function_bytecode, js.runtime.gc.liveCountKind(.function_bytecode));
     // Function-bytecode destruction drops its atom ids after marking. A
     // follow-up major may therefore reclaim cached string bodies, but it must
     // not resurrect or retain any part of the closed var-ref cycle.
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCountKind(.object));
     try std.testing.expectEqual(baseline_var_refs, js.runtime.gc.liveCountKind(.var_ref));
     try std.testing.expectEqual(baseline_function_bytecode, js.runtime.gc.liveCountKind(.function_bytecode));
@@ -12795,16 +12757,16 @@ fn expectEvalCycleReclaimed(js: *helpers.TestEngine, warmup_source: []const u8, 
 
     _ = try js.eval(warmup_source);
     try js.runJobs();
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_live_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval(cycle_source);
     try js.runJobs();
 
     try std.testing.expect(js.runtime.gc.liveCount() > baseline_live_objects);
-    try std.testing.expect(js.runtime.collectForTest() > 0);
+    try std.testing.expect((try js.runtime.collectForTest()).freed_objects > 0);
     try std.testing.expectEqual(baseline_live_objects, js.runtime.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 0), js.runtime.collectForTest());
+    try std.testing.expectEqual(@as(usize, 0), (try js.runtime.collectForTest()).freed_objects);
 }
 
 test "Promise result cycle is released by runtime cycle removal" {
@@ -12894,7 +12856,7 @@ test "module import-meta and eval-exception cycles are released by runtime cycle
     ctx_alive = false;
     const expected = rt.gc.liveCount();
     try std.testing.expect(expected != 0);
-    try std.testing.expectEqual(expected, rt.collectForTest());
+    try std.testing.expectEqual(expected, (try rt.collectForTest()).freed_objects);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.shape));
 }
@@ -14047,7 +14009,7 @@ test "prepared Promise reactions reserve storage without claiming FIFO order" {
 test "waitAsync completions enter one typed cross-realm FIFO after facade release" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const global_a = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try engine.exec.zjs_vm.contextGlobal(js.context);
 
     const realm_b = try core.JSContext.create(js.runtime, .{});
     var realm_b_owner = true;
@@ -14091,10 +14053,10 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     realm_b_owner = false;
     try std.testing.expect(js.runtime.job_queue.jobs[1].realm.borrow() == realm_b);
 
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expect(promise_a.promiseResult() != null);
     try std.testing.expect(promise_b.promiseResult() == null);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expect(promise_b.promiseResult() != null);
 
     // Fulfilling a promise nothing subscribed to queues no further job.
@@ -14123,7 +14085,7 @@ test "public property key coercion accepts a Symbol.toPrimitive key" {
 test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try engine.exec.zjs_vm.contextGlobal(js.context);
     const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
 
     const waiter = try js.runtime.nativeAllocator().create(engine.exec.atomics_ops.AtomicsWaiter);
@@ -14144,12 +14106,12 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
 
     // TGC S4-b: sweep first -- the limit-triggered retry collection can now
     // reclaim storage cells, so the baseline must already be the live size.
-    _ = js.runtime.collectFull(null, .engine_active) catch {};
+    _ = js.runtime.collectFull() catch {};
     js.runtime.setNativeBytesLimitForTest(js.runtime.allocation_diagnostics.allocated_bytes);
     defer js.runtime.setNativeBytesLimitForTest(null);
     try std.testing.expectError(
         error.OutOfMemory,
-        engine.exec.promise_ops.drainOnePendingJob(js.context, null, global),
+        engine.exec.promise_ops.drainOnePendingJob(js.context, null),
     );
     try std.testing.expect(promise.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
@@ -14157,18 +14119,18 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .generic);
 
     js.runtime.setNativeBytesLimitForTest(null);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expect(promise.promiseResult() != null);
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expectEqual(@as(usize, 1), helpers.test_engine.job_counter);
 }
 
 test "dynamic import job OOM retains its FIFO position for retry" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
-    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try engine.exec.zjs_vm.contextGlobal(js.context);
 
     const ImportProbe = struct {
         var attempts: usize = 0;
@@ -14198,24 +14160,24 @@ test "dynamic import job OOM retains its FIFO position for retry" {
 
     try std.testing.expectError(
         error.OutOfMemory,
-        engine.exec.promise_ops.drainOnePendingJob(js.context, null, global),
+        engine.exec.promise_ops.drainOnePendingJob(js.context, null),
     );
     try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .dynamic_import);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .generic);
 
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expectEqual(@as(usize, 2), ImportProbe.attempts);
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expectEqual(@as(usize, 1), helpers.test_engine.job_counter);
 }
 
 test "dynamic import job keeps its enqueue Realm after creator facade release" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const host_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try engine.exec.zjs_vm.contextGlobal(js.context);
     const entry_realm = try core.JSContext.create(js.runtime, .{});
     var entry_realm_owner = true;
     defer if (entry_realm_owner) entry_realm.destroy();
@@ -14249,7 +14211,7 @@ test "dynamic import job keeps its enqueue Realm after creator facade release" {
 
     entry_realm.destroy();
     entry_realm_owner = false;
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, host_global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expect(ImportProbe.seen_realm == entry_realm);
     try std.testing.expect(ImportProbe.seen_global == entry_global);
 }
@@ -14257,7 +14219,7 @@ test "dynamic import job keeps its enqueue Realm after creator facade release" {
 test "dynamic import loader mutates only the enqueue Realm registry after public owner release" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const facade_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try engine.exec.zjs_vm.contextGlobal(js.context);
 
     const entry_realm = try core.JSContext.create(js.runtime, .{});
     var entry_realm_owner = true;
@@ -14314,7 +14276,7 @@ test "dynamic import loader mutates only the enqueue Realm registry after public
 
     entry_realm.destroy();
     entry_realm_owner = false;
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, facade_global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expect(probe.saw_expected_realm);
     try std.testing.expect(probe.active_registry_has_record);
     try std.testing.expect(!probe.facade_registry_has_record);
@@ -14401,7 +14363,7 @@ test "published Promise resolution survives resolver collection through typed FI
     try js.runtime.job_queue.ensureCapacity(1);
     // TGC S4-b: sweep first -- the limit-triggered retry collection can now
     // reclaim storage cells, so the baseline must already be the live size.
-    _ = js.runtime.collectFull(null, .engine_active) catch {};
+    _ = js.runtime.collectFull() catch {};
     js.runtime.setNativeBytesLimitForTest(js.runtime.allocation_diagnostics.allocated_bytes);
     _ = try engine.exec.promise_ops.promiseResolvingFunctionCall(
         js.context,
@@ -14419,14 +14381,14 @@ test "published Promise resolution survives resolver collection through typed FI
     // Neither resolver is needed after publication: the Runtime FIFO owns the
     // target, completion and Realm until the same-runtime retry succeeds.
     resolving_alive = false;
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     js.runtime.setNativeBytesLimitForTest(null);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try std.testing.expectEqual(@as(?i32, 41), promise.promiseResult().?.as(.int));
     try std.testing.expect(!promise.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
 }
 
 test "Promise reaction retains callable Proxy classification after revocation" {
@@ -14469,14 +14431,14 @@ test "job queue keeps symbol arguments rooted until release" {
     defer rt.unregisterRootProvider(provider);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try queue.enqueueFunc(ctx, countJob, &.{symbol_value});
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     queue.deinit();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -14507,18 +14469,18 @@ test "job queue symbol roots preserve weak map values" {
 
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
-    const weak_key = try rt.takeSymbolValue(symbol_atom);
+    const weak_key = try rt.symbolValue(symbol_atom);
     try engine.exec.collection_ops.setWeakMapEntry(rt, weak_map, weak_key, value.value());
 
     const queued_key = weak_key;
     try queue.enqueueFunc(ctx, countJob, &.{queued_key});
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
     try std.testing.expectEqual(value.gcHeader(), weak_map.weakCollectionEntries()[0].value.refHeader().?);
 
     queue.deinit();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expectEqual(@as(usize, 0), weak_map.weakCollectionEntries().len);
 }
@@ -16276,7 +16238,7 @@ test "escaped generator arg aliases retain resident backing across cycle collect
     try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().as(.int));
 
     _ = try js.eval("__argCycleHolder = null;");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     // QuickJS's attached JSVarRef owns the parked async-function state. The
     // escaped arguments object and closures therefore keep this generator
     // frame resident even after its direct global reference is gone.
@@ -16585,11 +16547,11 @@ test "inline calls release lazily materialized arguments state" {
         \\})();
     ;
     _ = try js.eval(exercise);
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval(exercise);
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16609,11 +16571,11 @@ test "inline empty leaf abrupt teardown releases pending operands" {
         \\}
         \\exerciseEmptyLeafThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseEmptyLeafThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16647,11 +16609,11 @@ test "exact-args leaf abrupt teardown releases borrowed args exactly once" {
         \\}
         \\exerciseExactArgsLeafThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseExactArgsLeafThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16680,11 +16642,11 @@ test "missing-argument abrupt teardown releases supplied args and pads exactly o
         \\}
         \\exercisePaddedLeafThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exercisePaddedLeafThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16715,11 +16677,11 @@ test "leaf returns with leftover operands route through general teardown" {
         \\}
         \\exerciseLeafLeftovers();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseLeafLeftovers()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16821,11 +16783,11 @@ test "missing-argument calls read undefined across every entry arm" {
         return error.InvalidFunctionBytecode;
     try std.testing.expect(resolved_arrow.fb.exactArgsLeafKind() == .sloppy);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const baseline_objects = rt.gc.liveCount();
 
     _ = try js.eval("exercisePaddedLeafOutcomes()");
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
@@ -16871,11 +16833,11 @@ test "missing-argument calls on leaf-excluded shapes keep generic-path outcomes"
         try std.testing.expect(resolved.fb.exactArgsLeafKind() == .none);
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const baseline_objects = rt.gc.liveCount();
 
     _ = try js.eval("exercisePaddedExclusions()");
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
@@ -16903,11 +16865,11 @@ test "missing-argument leftover-carrying returns route through general teardown"
         \\}
         \\exercisePaddedLeafLeftovers();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exercisePaddedLeafLeftovers()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -16976,11 +16938,11 @@ test "zero-arg leaf leftover bodies are refused publication and balance rc" {
     try std.testing.expect(resolved_branchy.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(resolved_branchy.fb.smallInlineEligible());
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const baseline_objects = rt.gc.liveCount();
 
     _ = try js.eval("exerciseZeroArgLeftovers()");
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
@@ -17017,11 +16979,11 @@ test "capture leaf abrupt teardown releases operands and keeps borrowed cells" {
         \\}
         \\exerciseCaptureLeafThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseCaptureLeafThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17055,11 +17017,11 @@ test "capture leaf returns with leftover operands route through general teardown
         \\}
         \\exerciseCaptureLeafLeftovers();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseCaptureLeafLeftovers()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17256,11 +17218,11 @@ test "forwarded leaf abrupt completion balances and keeps the native frame" {
         \\}
         \\exerciseForwardedThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseForwardedThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17288,11 +17250,11 @@ test "forwarded leaf returns with leftover operands route through general teardo
         \\}
         \\exerciseForwardedLeftovers();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseForwardedLeftovers()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17322,11 +17284,11 @@ test "method call empty leaf binds receiver as this and balances refcounts" {
         \\}
         \\exerciseMethodEmptyLeaf();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseMethodEmptyLeaf()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17344,11 +17306,11 @@ test "method call empty leaf abrupt teardown releases receiver" {
         \\}
         \\exerciseMethodEmptyLeafThrow();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseMethodEmptyLeafThrow()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17485,11 +17447,11 @@ test "strict empty leaf preserves undefined this across call forms" {
         \\}
         \\exerciseStrictLeafThis();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseStrictLeafThis()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -17522,11 +17484,11 @@ test "strict method empty leaf passes primitive receiver uncoerced" {
         \\}
         \\exerciseStrictMethodLeaf();
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseStrictMethodLeaf()");
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -19244,7 +19206,7 @@ test "forwarded call releases ignored arrow thisArg" {
     try std.testing.expect(!resolved.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(resolved.fb.rawThisInlineEmptyLeaf());
 
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval(
@@ -19252,7 +19214,7 @@ test "forwarded call releases ignored arrow thisArg" {
         \\    strictArrowForCall.call({ marker: i });
         \\}
     );
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
@@ -20450,8 +20412,8 @@ test "escaped closure keeps its compile realm after facade destruction" {
     try std.testing.expectEqual(compile_global, try core.Object.expect(result));
 
     escaped_alive = false;
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.contextForGlobalIncludingConstructing(compile_global) == null);
+    _ = try rt.collectForTest();
+    try std.testing.expect(rt.contexts.forGlobal(compile_global, .include_constructing) == null);
 }
 
 test "standard constructors publish realm class prototype slots" {
@@ -20564,7 +20526,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.hits += 1;
             self.saw_empty_queue = rt.job_queue.jobs.len == 0;
-            _ = rt.collectForTest();
+            _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
             self.reclaimed = !rt.ownsObject(self.canary);
             return false;
         }
@@ -20589,7 +20551,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
         defer roots.deactivate(js.runtime);
         input = switch (kind) {
             0 => core.JSValue.undefinedValue(),
-            1 => try js.runtime.takeSymbolValue(try js.runtime.atoms.newValueSymbol("await-root")),
+            1 => try js.runtime.symbolValue(try js.runtime.atoms.newValueSymbol("await-root")),
             else => (try core.Object.create(js.runtime, core.class.ids.object, null)).value(),
         };
         const expected = input;
@@ -20606,7 +20568,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
         // Collect with only the queued job and returned Promise retaining the
         // suspended execution/value. An unrooted canary proves reclamation ran.
         const canary = try core.Object.create(js.runtime, core.class.ids.object, null);
-        _ = js.runtime.collectForTest();
+        _ = try js.runtime.collectForTest();
         try std.testing.expect(!js.runtime.ownsObject(canary));
         try std.testing.expect(js.runtime.ownsObject(continuation));
         // Force a second actual collection after takeFirst, before the body
@@ -20615,7 +20577,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
         js.runtime.setInterruptHandler(ActiveProbe.run, &active_probe);
         defer js.runtime.setInterruptHandler(null, null);
         js.context.interrupt_counter = 1;
-        try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global));
+        try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(js.context, null));
         try std.testing.expectEqual(@as(usize, 1), active_probe.hits);
         try std.testing.expect(active_probe.saw_empty_queue);
         try std.testing.expect(active_probe.reclaimed);
@@ -20663,7 +20625,7 @@ test "fulfilled await roots its continuation through constructor getter GC" {
         fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.calls += 1;
-            _ = rt.collectForTest();
+            _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
             // Snapshot before await's subsequent allocations can reuse the
             // freed address; a later ownsObject(pointer) cannot prove identity.
             self.reclaimed_canary = !rt.ownsObject(self.canary);
@@ -20711,7 +20673,7 @@ test "fulfilled await roots its continuation through constructor getter GC" {
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     var job = js.runtime.job_queue.takeFirst().?;
     job.deinit();
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
     try std.testing.expect(!js.runtime.ownsObject(continuation));
     try std.testing.expect(!js.runtime.ownsObject(input));
     try std.testing.expect(js.runtime.atoms.name(symbol) == null);
@@ -20903,7 +20865,7 @@ test "generator async and wrapper noncarriers derive cross-realm state across GC
         try std.testing.expectEqual(other_global, generator.generatorFunctionRealmGlobalPtr().?);
     }
 
-    _ = js.runtime.collectForTest();
+    _ = try js.runtime.collectForTest();
 
     for (values[1..]) |value| {
         const object = try core.Object.expect(value);
@@ -20957,7 +20919,7 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     var registry_facade_alive = true;
     defer if (registry_facade_alive) registry_facade.destroy();
     const registry_realm = registry_facade.core;
-    const registry_global = try zjs.globalObjectPtr(registry_facade);
+    _ = try zjs.globalObjectPtr(registry_facade);
 
     const callback_facade = try zjs.JSContext.create(rt, .{});
     var callback_facade_alive = true;
@@ -21017,7 +20979,7 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     // still follows the callback C_FUNCTION's independent RealmRef.
     try std.testing.expectEqual(
         .exception,
-        try engine.exec.promise_ops.drainOnePendingJob(registry_realm, null, registry_global),
+        try engine.exec.promise_ops.drainOnePendingJob(registry_realm, null),
     );
     try std.testing.expectEqual(callback_realm, probe.seen_realm.?);
     try std.testing.expectEqual(callback_global, probe.seen_global.?);
@@ -21043,8 +21005,8 @@ test "event-loop caller reaches external C function with one callee realm view" 
     const caller_value = try loop_global.getProperty(caller_key);
     const callee_global = try core.Object.expect(callee_value);
     const caller_global = try core.Object.expect(caller_value);
-    const callee_realm = js.runtime.contextForGlobalIncludingConstructing(callee_global) orelse return error.TestUnexpectedResult;
-    const caller_realm = js.runtime.contextForGlobalIncludingConstructing(caller_global) orelse return error.TestUnexpectedResult;
+    const callee_realm = js.runtime.contexts.forGlobal(callee_global, .include_constructing) orelse return error.TestUnexpectedResult;
+    const caller_realm = js.runtime.contexts.forGlobal(caller_global, .include_constructing) orelse return error.TestUnexpectedResult;
     try std.testing.expect(callee_realm != caller_realm);
     try std.testing.expect(callee_realm != js.context);
     try std.testing.expect(caller_realm != js.context);
@@ -21459,7 +21421,7 @@ test "dynamic import failures preserve unsupported not-found and host I/O mappin
         "/fixture/main.mjs",
         unsupported_specifier,
     );
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try expectRejectedPromiseNamedError(&js, unsupported, "TypeError", "dynamic import is not supported");
 
     const dir = ".zig-cache/q16-host-errors";
@@ -21492,7 +21454,7 @@ test "dynamic import failures preserve unsupported not-found and host I/O mappin
         main_path,
         missing_specifier,
     );
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     const missing_path = try std.fs.path.resolve(std.testing.allocator, &.{ dir, "missing.mjs" });
     defer std.testing.allocator.free(missing_path);
     const missing_message = try std.fmt.allocPrint(
@@ -21511,7 +21473,7 @@ test "dynamic import failures preserve unsupported not-found and host I/O mappin
         main_path,
         large_specifier,
     );
-    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null)) == .success);
     try expectRejectedPromiseNamedError(&js, too_large, "Error", "could not load module '.zig-cache/q16-host-errors/large.mjs': StreamTooLong");
 }
 
@@ -22264,7 +22226,7 @@ test "Runtime loader keeps same-path TLA continuations and waiters in parent and
     // the second sees that Realm's evaluating record and adds only a waiter.
     // All four dynamic-import jobs precede the Promise reactions they enqueue.
     for (0..4) |_| {
-        try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(child, null, child_global)) == .success);
+        try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(child, null)) == .success);
     }
     try std.testing.expectEqual(@as(usize, 2), state.continuations.items.len);
     try std.testing.expectEqual(@as(usize, 4), state.waiters.items.len);
@@ -22667,7 +22629,7 @@ const ReflectActiveRootSymbolProbe = struct {
         // engine-frames-active trigger: scan conservative so natively held
         // in-flight construction state survives, exactly as the production
         // pollGC(.normal) path behaves.
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
     }
 };
@@ -22712,21 +22674,15 @@ test "reflect construct roots argument list while resolving prototype" {
     const args_object = try core.Object.createArray(rt, null);
     var args_alive = true;
     const symbol_atom = try rt.atoms.newValueSymbol("gc-reflect-construct-argument-root");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try reflectTestSetArrayIndex(rt, args_object, 0, symbol_value);
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = ReflectActiveRootSymbolProbe{
         .rt = rt,
         .atom_id = symbol_atom,
     };
-    rt.gc.heap_budget.probe = ReflectActiveRootSymbolProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = ReflectActiveRootSymbolProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
     _ = try engine.exec.reflect_ops.reflectConstructCall(ctx, null, realm_global, &reflect_args, null, null);
@@ -22737,7 +22693,7 @@ test "reflect construct roots argument list while resolving prototype" {
 
     args_alive = false;
     result_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -23861,6 +23817,38 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
     try std.testing.expect(state.?.specialized);
 }
 
+test "small-function-inlining: CallerState atoms reach the tracer without a runtime hook" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\function batch(n) {
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new Three(1, 2, 3); s = s + p.x; }
+        \\  return s;
+        \\}
+        \\globalThis.__batch = batch;
+        \\batch(16);
+        \\batch(16);
+    );
+    const global = try js.context.globalObject();
+    const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
+    const batch_fb = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?.bytecodeArm().*.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(batch_fb).?;
+    try std.testing.expect(state.inlined_len >= 1);
+    const Recorder = struct {
+        pub const gc_visit_policy: zjs.core.gc_visit.Policy = .partial;
+        want: zjs.core.Atom,
+        seen: bool = false,
+        pub fn visitAtom(self: *@This(), id: zjs.core.Atom) void {
+            if (id == self.want) self.seen = true;
+        }
+    };
+    var recorder = Recorder{ .want = state.inlined[0].callee_name };
+    try zjs.exec.small_inline.traceCallerStateAtoms(batch_fb, &recorder);
+    try std.testing.expect(recorder.seen);
+}
+
 test "small-function-inlining: spec copy keeps simple_inline bits after extra TAKE locals" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -24206,7 +24194,7 @@ const ActiveInvocationRootProbe = struct {
     fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const rt = invocation.realm.runtime;
-        try std.testing.expect(rt.active_invocation != null);
+        try std.testing.expect(rt.execution.active_invocation != null);
 
         const active = inline_calls.activeInvocation(rt) orelse return error.TestUnexpectedResult;
         var seen = std.AutoHashMap(usize, void).init(self.allocator);
@@ -24512,7 +24500,7 @@ const S3MajorAtEveryAllocationProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!self.active) return;
         const before = self.rt.gc.block_heap.mark_epoch;
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
     }
 };
@@ -24532,15 +24520,9 @@ test "TGC S3: JSON.parse object keys stay reachable across majors taken mid-pars
         "{\"zjsS3JsonSimpleKey\":1,\"zjsS3JsonSimpleOther\":2,\"zjsS3JsonSimpleThird\":3}",
     };
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3MajorAtEveryAllocationProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3MajorAtEveryAllocationProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = S3MajorAtEveryAllocationProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     for (sources) |source| {
         var text = (try core.string.String.createAscii(rt, source)).value();
@@ -24649,7 +24631,7 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
             self.armed = false;
             defer self.armed = true;
             self.majors += 1;
-            _ = self.rt.collectFull(null, .engine_active) catch {};
+            _ = self.rt.collectFull() catch {};
             var cached: usize = 0;
             for (self.ids) |id| {
                 if (self.rt.atoms.cachedString(id) != null) cached += 1;
@@ -24658,16 +24640,12 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
             self.peak_cached = @max(self.peak_cached, cached);
         }
     };
-    const saved_fn = rt.gc.heap_budget.probe;
-    const saved_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = Probe{ .rt = rt, .ids = ids[0..] };
-    rt.gc.heap_budget.probe = Probe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
+    const saved_fn = rt.gc.heap_budget.installProbe(.{ .run = Probe.trigger, .context = &probe });
     probe.armed = true;
     const outcome = runFixture(rt, ctx, function.fb);
     probe.armed = false;
-    rt.gc.heap_budget.probe = saved_fn;
-    rt.gc.heap_budget.probe_ctx = saved_ctx;
+    rt.gc.heap_budget.restoreProbe(saved_fn);
     _ = try outcome;
 
     // Guards against a vacuous pass: the window has to have been collected in,
@@ -24678,7 +24656,7 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
     try std.testing.expectEqual(spellings.len - 1, probe.peak_cached);
     try std.testing.expect(!probe.regressed);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 }
 
 // ---------------------------------------------------------------------------
@@ -24712,7 +24690,7 @@ const PublishRootProbe = struct {
         self.armed = false;
         defer self.armed = true;
         self.majors += 1;
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         if (self.rt.atoms.cachedString(self.id) != null) {
             self.seen = true;
         } else if (self.seen) {
@@ -24738,18 +24716,14 @@ fn runUnderPublishProbe(
         try std.testing.expectEqual(@as(i32, 1), warmed.as(.int).?);
     }
 
-    const saved_fn = rt.gc.heap_budget.probe;
-    const saved_ctx = rt.gc.heap_budget.probe_ctx;
     rt.forcePreciseRootScanForTest();
-    rt.gc.heap_budget.probe = PublishRootProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = probe;
+    const saved_fn = rt.gc.heap_budget.installProbe(.{ .run = PublishRootProbe.trigger, .context = probe });
     probe.armed = true;
     var vm = engine.exec.Vm.init(ctx);
     defer vm.deinit();
     const outcome = vm.run(function);
     probe.armed = false;
-    rt.gc.heap_budget.probe = saved_fn;
-    rt.gc.heap_budget.probe_ctx = saved_ctx;
+    rt.gc.heap_budget.restoreProbe(saved_fn);
     rt.restoreDefaultRootScanForTest();
     return outcome;
 }
@@ -24822,7 +24796,7 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
     try std.testing.expect(!probe.regressed);
     try helpers.expectStringValueBytes(result, "zjsH4CallArgVictim");
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 }
 
 test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow allocates" {
@@ -24871,7 +24845,7 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
     try std.testing.expect(!probe.regressed);
     try helpers.expectStringValueBytes(result, "zjsH4PutArrayVictim");
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 }
 
 test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-init resolver allocates" {
@@ -24916,7 +24890,7 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     try std.testing.expect(!probe.regressed);
     try helpers.expectStringValueBytes(result, "zjsH4StrFieldVictim");
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 }
 
 test "an unresolved binding names its identifier in the ReferenceError message (qjs JS_ThrowReferenceErrorNotDefined)" {
@@ -25110,7 +25084,7 @@ test "no-suspend async completion roots survive declared-only GC before and afte
             try std.testing.expect(slot.promise.is(.object));
             if (slot.value.is(.undefined_value)) self.running += 1 else self.completing += 1;
             const old_major = rt.gc.stats.cycle_gc_count;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
             try std.testing.expect(rt.gc.stats.cycle_gc_count > old_major);
             return core.JSValue.undefinedValue();
         }
@@ -25215,7 +25189,7 @@ test "no-suspend async transfers post-body OOM to FIFO without replay" {
     try std.testing.expectEqual(core.jobs.Kind.promise_settlement, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
     js.runtime.setNativeBytesLimitForTest(null);
     js.runtime.suppressLimitCollectionForTest(false);
-    _ = try js.runtime.collectFull(null, .declared_only);
+    _ = try js.runtime.collectForTest();
     try js.runJobs();
     _ = try js.eval(
         \\assert.sameValue(e2OomBodyCount, 1); assert.sameValue(e2OomGetterCount, 1);
@@ -25350,7 +25324,7 @@ test "P-Cap post-handler and post-getter OOM retain FIFO completion without repl
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.calls += 1;
             const rt = invocation.realm.runtime;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
             rt.suppressLimitCollectionForTest(true);
             rt.setNativeBytesLimitForTest(0);
             return core.JSValue.int32(42);
@@ -25382,7 +25356,7 @@ test "P-Cap post-handler and post-getter OOM retain FIFO completion without repl
         try std.testing.expectEqual(core.jobs.Kind.promise_settlement, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
         js.runtime.setNativeBytesLimitForTest(null);
         js.runtime.suppressLimitCollectionForTest(false);
-        _ = try js.runtime.collectFull(null, .declared_only);
+        _ = try js.runtime.collectForTest();
         try js.runJobs();
         try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic_settle);
         _ = try js.eval(if (getter)
@@ -25433,7 +25407,7 @@ test "P-Cap retries reserved reaction phase before then getter without replaying
         try js.runtime.job_queue.enqueueFunc(js.context, Probe.tail, &.{});
     }
     const queued = js.runtime.job_queue.jobs.len;
-    try std.testing.expectError(error.OutOfMemory, ops.drainOnePendingJob(js.context, null, global));
+    try std.testing.expectError(error.OutOfMemory, ops.drainOnePendingJob(js.context, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic);
     try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic_retry);
@@ -25443,7 +25417,7 @@ test "P-Cap retries reserved reaction phase before then getter without replaying
     try std.testing.expectEqual(@as(?i32, 0), (try global.getProperty(getter_key)).as(.int));
     js.runtime.setNativeBytesLimitForTest(null);
     js.runtime.suppressLimitCollectionForTest(false);
-    _ = try js.runtime.collectFull(null, .declared_only);
+    _ = try js.runtime.collectForTest();
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic_settle);
@@ -25492,7 +25466,7 @@ test "fulfilled await preserves the registration and body realms" {
     const job = &js.runtime.job_queue.jobs[0];
     try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(job.payload));
     try std.testing.expectEqual(js.context, job.realm.borrow().?);
-    try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(child, null, child_global));
+    try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(child, null));
     const promise = try core.Object.expect(output);
     try std.testing.expect(!promise.promiseIsRejected());
     const result = try core.Object.expect(promise.promiseResult().?);
@@ -25524,7 +25498,7 @@ test "fulfilled await does not replay a resumed body after allocation failure" {
     roots.activate(js.runtime);
     defer roots.deactivate(js.runtime);
     try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
-    _ = try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global);
+    _ = try engine.exec.promise_ops.drainOnePendingJob(js.context, null);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
     const promise = try core.Object.expect(output);
@@ -25639,7 +25613,7 @@ test "host string boundary writer reentry keeps input alive" {
         }
         fn reenter(self: *@This()) !void {
             self.calls += 1;
-            _ = try self.rt.collectFull(null, .declared_only);
+            _ = try self.rt.collectForTest();
             if (!self.rt.gc.containsHeader(self.input.cycleMarkHeader().?)) return error.LostOutputInput;
             if (self.calls == 1) {
                 var roots = core.runtime.ExactValueRoots(2){};
@@ -25649,7 +25623,7 @@ test "host string boundary writer reentry keeps input alive" {
                 const result = try roots.ref(1);
                 try input.set(self.rt, self.input);
                 try core.string.ensureFlat(self.rt, input.readOnly(), result);
-                _ = try self.rt.collectFull(null, .declared_only);
+                _ = try self.rt.collectForTest();
             }
         }
     };
@@ -27735,7 +27709,7 @@ test "Array species does not confuse a foreign native named Array with the intri
     const foreign_global_atom = try js.runtime.internAtom("__arraySpeciesForeignGlobal");
     const foreign_global_value = try global.getProperty(foreign_global_atom);
     const foreign_global = try core.Object.expect(foreign_global_value);
-    const foreign_realm = js.runtime.contextForGlobalIncludingConstructing(foreign_global) orelse return error.TestUnexpectedResult;
+    const foreign_realm = js.runtime.contexts.forGlobal(foreign_global, .include_constructing) orelse return error.TestUnexpectedResult;
 
     // Before the identity fix this ordinary C_FUNCTION was suppressed solely
     // because its internal dispatch name happened to be "Array". It owns the
@@ -28914,7 +28888,7 @@ test "host map closure releases appended value when entry allocation fails" {
     // TGC S4-b: sweep first -- storage cells are collected carriers, so the
     // limit-triggered retry collection would otherwise drop the account below
     // the captured baseline.
-    _ = rt.collectFull(null, .engine_active) catch {};
+    _ = rt.collectFull() catch {};
     const old_bytes = rt.allocation_diagnostics.allocated_bytes;
     const old_allocations = rt.allocation_diagnostics.allocation_count;
     rt.setNativeBytesLimitForTest(old_bytes + @sizeOf(core.string.String) + "mutated".len);
@@ -28952,7 +28926,7 @@ test "host map closure rolls back appended entry when size update fails" {
     // TGC S4-b: sweep first -- storage cells are collected carriers, so the
     // limit-triggered retry collection would otherwise drop the account below
     // the captured baseline.
-    _ = rt.collectFull(null, .engine_active) catch {};
+    _ = rt.collectFull() catch {};
     const old_bytes = rt.allocation_diagnostics.allocated_bytes;
 
     rt.setNativeBytesLimitForTest(old_bytes + @sizeOf(core.string.String) + "mutated".len);
@@ -29989,7 +29963,7 @@ test "PR0 lock official resolver Get then once self-resolution TypeError and sha
 
         var drained: usize = 0;
         while (drained < 8) : (drained += 1) {
-            const status = try engine.exec.promise_ops.drainOnePendingJob(ctx, null, global);
+            const status = try engine.exec.promise_ops.drainOnePendingJob(ctx, null);
             if (status == .empty) break;
             try std.testing.expectEqual(core.jobs.RunOneStatus.success, status);
         }
@@ -30131,7 +30105,7 @@ test "a native function without a call record throws TypeError whatever its name
 fn nativeMinorGc(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
     // Precise roots only: conservative residue of the caller's native frames
     // must not mask a missing barrier.
-    _ = core.gc_trace_stw.collectMinor(ctx.runtime, null, .declared_only) catch return error.OutOfMemory;
+    _ = core.gc_trace_stw.collectMinor(ctx.runtime, .declared_only) catch return error.OutOfMemory;
     return core.JSValue.undefinedValue();
 }
 
@@ -30279,14 +30253,14 @@ test "unhandled rejection entries of an aged child realm survive minors" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     _ = try js.evalWithOptions("globalThis.otherGlobal = $262.createRealm().global;", .{ .filename = "<repl>" });
     const other_global = helpers.objectFromValue(try global.getProperty(try js.runtime.internAtom("otherGlobal")));
-    const other = js.runtime.contextForGlobalIncludingConstructing(other_global).?;
+    const other = js.runtime.contexts.forGlobal(other_global, .include_constructing).?;
     other.setTrackUnhandledRejections(true);
-    _ = try core.gc_trace_stw.collectMinor(js.runtime, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(js.runtime, .declared_only);
     // The promise slot is held only by the realm's rejection list.
     const promise = try core.Object.createPlainObject(js.runtime, null);
     const promise_header = promise.gcHeader();
     other.recordUnhandledPromiseRejection(promise.value(), core.JSValue.int32(1));
-    _ = try core.gc_trace_stw.collectMinor(js.runtime, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(js.runtime, .declared_only);
     try std.testing.expect(js.runtime.gc.containsHeader(promise_header));
     other.clearUnhandledRejection();
 }
@@ -30373,7 +30347,7 @@ const SingleMajorProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.count += 1;
         if (self.count != self.target) return;
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         self.fired = true;
     }
 };
@@ -30394,15 +30368,11 @@ fn sweepSingleMajor(source: []const u8, mode: core.EvalMode, expected: i32, stri
     var target: usize = 1;
     while (true) : (target += stride) {
         var probe = SingleMajorProbe{ .rt = js.runtime, .target = target };
-        const saved_fn = js.runtime.gc.heap_budget.probe;
-        const saved_ctx = js.runtime.gc.heap_budget.probe_ctx;
-        js.runtime.gc.heap_budget.probe = SingleMajorProbe.trigger;
-        js.runtime.gc.heap_budget.probe_ctx = &probe;
+        const saved_fn = js.runtime.gc.heap_budget.installProbe(.{ .run = SingleMajorProbe.trigger, .context = &probe });
         const filename = try std.fmt.allocPrint(std.testing.allocator, "sweep-{d}.mjs", .{target});
         defer std.testing.allocator.free(filename);
         const evaluated = js.evalWithOptions(source, .{ .filename = filename, .mode = mode });
-        js.runtime.gc.heap_budget.probe = saved_fn;
-        js.runtime.gc.heap_budget.probe_ctx = saved_ctx;
+        js.runtime.gc.heap_budget.restoreProbe(saved_fn);
         const completion = evaluated catch |err| {
             std.debug.print("sweep target {d}: eval error {s} exc={}\n", .{ target, @errorName(err), js.context.hasException() });
             return err;
@@ -32563,7 +32533,7 @@ test "Set union and symmetricDifference rehash receiver keys a minor moved" {
     );
     // An exact minor moves the young keys; the receiver's stored hashes stay
     // stale until its next lookup, so the copies must rehash.
-    _ = try core.gc_trace_stw.collectMinor(js.runtime, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(js.runtime, .declared_only);
     const result = try js.eval(
         \\const other = { size: 0, has() { return false; }, keys() { return [].values(); } };
         \\const lost = [s.union(other), s.symmetricDifference(other)].map((r) => objs.filter((o) => !r.has(o)).length);
@@ -32580,12 +32550,12 @@ test "repeated WeakRef deref keeps each target once" {
     _ = try js.eval("globalThis.refs = [{}, {}, Symbol('s')].map((t) => new WeakRef(t))");
     const global = try zjs.exec.zjs_vm.contextGlobal(js.context);
     const array = core.value_semantics.objectFromValue(try global.getProperty(try js.runtime.internAtom("refs"))).?;
-    core.jobs.clearKeptAlive(js.runtime);
+    js.runtime.microtasks.clearKeptObjects(js.runtime.nativeAllocator());
     for (0..1000) |_| {
         for (0..3) |index| _ = try core.value_semantics.objectFromValue(try array.getProperty(core.Atom.taggedInt(@intCast(index)))).?.weakRefDeref(js.runtime);
     }
-    try std.testing.expectEqual(@as(usize, 3), js.runtime.weakref_kept_alive.items.len);
-    core.jobs.clearKeptAlive(js.runtime);
+    try std.testing.expectEqual(@as(usize, 3), js.runtime.microtasks.weakref_kept_alive.items.len);
+    js.runtime.microtasks.clearKeptObjects(js.runtime.nativeAllocator());
 }
 
 test "RegExp String Iterator follows its generator shape" {

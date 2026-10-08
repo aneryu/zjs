@@ -66,7 +66,7 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     realm.cached_function_proto = function_proto;
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -107,7 +107,7 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     const stored = promise.promiseResult() orelse return error.TypeError;
     try std.testing.expect(stored.same(result_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -126,8 +126,4 @@ fn promiseObject(value: core.JSValue) ?*core.Object {
 pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (!promise.promiseIsRejected()) return;
     ctx.removeUnhandledPromiseRejection(promise.value());
-}
-
-pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {
-    try ctx.runtime.job_queue.enqueueFunc(ctx, job, args);
 }

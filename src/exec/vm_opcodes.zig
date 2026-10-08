@@ -798,11 +798,7 @@ pub const CallDepthGuard = struct {
     planned_stack_bytes: usize,
 
     pub fn deinit(self: CallDepthGuard) void {
-        const rt = self.ctx.runtime;
-        std.debug.assert(rt.stack.bytecode_bytes >= self.planned_stack_bytes);
-        rt.stack.bytecode_bytes -= self.planned_stack_bytes;
-        rt.stack.call_depth -= 1;
-        rt.stack.native_call_depth -= 1;
+        self.ctx.runtime.stack.leaveNativeFrame(self.planned_stack_bytes);
     }
 };
 pub fn enterCallDepth(
@@ -819,9 +815,7 @@ pub fn enterCallDepth(
         _ = try exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow");
         return error.StackOverflow;
     }
-    rt.stack.bytecode_bytes += planned_stack_bytes;
-    rt.stack.call_depth += 1;
-    rt.stack.native_call_depth += 1;
+    rt.stack.enterNativeFrame(planned_stack_bytes);
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
@@ -862,12 +856,7 @@ inline fn bytecodeStackBudgetWouldOverflow(
     rt: *const core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
-    return admissionCeilingsReject(
-        rt,
-        rt.stack.call_depth,
-        rt.stack.bytecode_bytes +% planned_stack_bytes,
-        planned_stack_bytes,
-    );
+    return rt.stack.wouldReject(planned_stack_bytes);
 }
 
 /// Logical call depth and planned VM-frame bytes are separate ceilings, even
@@ -878,8 +867,7 @@ pub inline fn callBudgetWouldOverflow(
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    return depth >= rt.stack.limit or accumulated < planned_stack_bytes or
-        accumulated > rt.stack.limit;
+    return rt.stack.budgetRejects(depth, accumulated, planned_stack_bytes);
 }
 
 /// Add the actual native stack-address guard to the VM budget predicate.
@@ -889,8 +877,7 @@ inline fn admissionCeilingsReject(
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    return callBudgetWouldOverflow(rt, depth, accumulated, planned_stack_bytes) or
-        @frameAddress() < rt.stack.native_limit;
+    return rt.stack.rejects(depth, accumulated, planned_stack_bytes);
 }
 
 /// Byte-priced variants: constructors that already hold the planned frame
@@ -909,10 +896,7 @@ pub inline fn commitInlineCallDepthBytes(
     ctx: *core.JSContext,
     planned_stack_bytes: usize,
 ) void {
-    const rt = ctx.runtime;
-    std.debug.assert(std.math.maxInt(usize) - rt.stack.bytecode_bytes >= planned_stack_bytes);
-    rt.stack.bytecode_bytes += planned_stack_bytes;
-    rt.stack.call_depth += 1;
+    ctx.runtime.stack.enterFrame(planned_stack_bytes);
 }
 
 /// Admit and charge a leaf frame in one step. If later Entry or arena setup
@@ -926,9 +910,8 @@ pub inline fn tryCommitInlineCallDepthBytesRt(
     const depth = rt.stack.call_depth;
     const bytes = rt.stack.bytecode_bytes;
     const accumulated = bytes +% planned_stack_bytes;
-    if (admissionCeilingsReject(rt, depth, accumulated, planned_stack_bytes)) return false;
-    rt.stack.bytecode_bytes = accumulated;
-    rt.stack.call_depth = depth + 1;
+    if (rt.stack.rejects(depth, accumulated, planned_stack_bytes)) return false;
+    rt.stack.commitFrame(depth, accumulated);
     return true;
 }
 
@@ -970,9 +953,7 @@ pub inline fn leaveInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) void {
-    std.debug.assert(rt.stack.bytecode_bytes >= planned_stack_bytes);
-    rt.stack.bytecode_bytes -= planned_stack_bytes;
-    rt.stack.call_depth -= 1;
+    rt.stack.leaveFrame(planned_stack_bytes);
 }
 
 /// Preflight for a tail-call frame replacement. QuickJS's OP_tail_call enters
@@ -1579,7 +1560,7 @@ const native_reentry_margin: usize = 64 * 1024;
 /// 4 KiB. Without a limit, the count is the only guard left.
 fn nativeReentryWouldOverflow(ctx: *const core.JSContext) bool {
     const rt = ctx.runtime;
-    if (rt.stack.native_limit != 0) return rt.checkNativeStackOverflow(@min(native_reentry_margin, rt.stack.native_size / 4));
+    if (rt.stack.native_limit != 0) return rt.stack.checkNativeOverflow(@min(native_reentry_margin, rt.stack.native_size / 4));
     return rt.stack.native_call_depth >= @max(@as(usize, 16), ctx.stackLimit() / 16384);
 }
 
@@ -2968,20 +2949,20 @@ pub noinline fn dispatchNativeCall(
 /// reservation. Everything else takes `dispatch`.
 pub inline fn managedInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
     if (entry.kind != .managed or entry.flags.needs_env or entry.flags.forwards_call) return false;
-    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+    return !rt.stack.checkNativeOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
 }
 
 /// Same preflight for the W1 `.native_getter` arm: an untyped managed
 /// getter without an environment is one `bl` from the field tail.
 pub inline fn getterInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
     if (entry.kind != .getter or entry.sig != .none or entry.flags.needs_env) return false;
-    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+    return !rt.stack.checkNativeOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
 }
 
 /// Same preflight for the K2 `method_managed` arm of the method handler.
 pub inline fn methodManagedInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
     if (entry.kind != .method_managed) return false;
-    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+    return !rt.stack.checkNativeOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
 }
 
 /// Cold leg: drop the call region and route the pending error to the
@@ -3137,7 +3118,7 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     const value = value: {
         const fresh_atom = try ctx.runtime.atoms.newSymbol(name, .private);
         errdefer ctx.runtime.atoms.abandonUnpublishedSymbol(fresh_atom);
-        break :value try ctx.runtime.takeSymbolValue(fresh_atom);
+        break :value try ctx.runtime.symbolValue(fresh_atom);
     };
     stack.pushOwnedAssumeCapacity(value);
 }
@@ -3554,13 +3535,13 @@ test "push private symbol creates a fresh runtime atom per execution" {
         try std.testing.expectEqual(@as(usize, 3), countLivePrivateAtomsNamed(rt, template_name));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
     template_roots.deactivate(rt);
     template_atom_released = true;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
@@ -3613,7 +3594,7 @@ test "push private symbol stack failure does not retain transient private atom" 
     // calibration atom exists to warm one recyclable slot, so it has to be
     // collected before the measurement.
     _ = try rt.atoms.newSymbol(template_name, .private);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const allocated_before = rt.allocation_diagnostics.allocated_bytes;
     try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
     try std.testing.expectEqual(allocated_before, rt.allocation_diagnostics.allocated_bytes);
@@ -3621,7 +3602,7 @@ test "push private symbol stack failure does not retain transient private atom" 
 
     template_roots.deactivate(rt);
     template_atom_released = true;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
@@ -3650,11 +3631,11 @@ test "push private symbol releases fresh atom on allocation failure" {
 
     // Warm one recyclable atom-table slot and measure the exact transient
     // description allocation. The following limit then admits newSymbol but
-    // rejects the first symbol-body allocation in takeSymbolValue.
+    // rejects the first symbol-body allocation in symbolValue.
     _ = try rt.atoms.newSymbol(template_name, .private);
     const allocated_with_atom = rt.allocation_diagnostics.allocated_bytes;
     // TGC S3-c: `free` no longer retires an entry -- a major does.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const allocated_before = rt.allocation_diagnostics.allocated_bytes;
     try std.testing.expect(allocated_with_atom > allocated_before);
     const atom_allocation_bytes = allocated_with_atom - allocated_before;

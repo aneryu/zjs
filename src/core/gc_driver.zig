@@ -1,22 +1,32 @@
-//! Poll routing, growth-threshold reset, and doomed-destruction completion.
+//! Collection orchestration: full collections, poll routing, allocation
+//! triggers, the heap-limit retry, growth-threshold reset, and doomed-
+//! destruction completion.
 //!
-//! `JSRuntime.pollGC` checks the owner thread and tracing reentry. This
-//! module owns the minor/major decision, the threshold write, and finishing
-//! an interrupted destruction. `gc.hot.collecting` stays separate from `phase`.
+//! Every entry checks the owner thread and tracing reentry itself; the
+//! `JSRuntime` methods of the same names are aliases. Full collection, an
+//! ordinary poll, and the heap-limit retry keep their own scan and error
+//! contracts. `gc.hot.collecting` stays separate from `phase`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc = @import("gc.zig");
+const gc_scope = @import("gc_scope.zig");
 const runtime_mod = @import("../runtime.zig");
+const native_allocation = runtime_mod.native_allocation;
 const JSRuntime = runtime_mod.JSRuntime;
 const PollMode = gc.PollMode;
 const ValueRootFrame = runtime_mod.ValueRootFrame;
 
-pub fn continuePoll(
-    self: *JSRuntime,
-    roots: ?*const ValueRootFrame,
-    mode: PollMode,
-) gc.CollectionError!gc.CollectionResult {
+/// Service pending collection requests at a poll of `mode`: a minor when
+/// the young set warrants one, then a major when the scheduler says so.
+pub fn pollGC(self: *JSRuntime, mode: PollMode) gc.CollectionError!gc.CollectionResult {
+    self.assertOwnerThread();
     self.assertGCAllowed();
+    if (self.roots.isTracing()) @panic("collection reentry during tracing");
+    // A minor clears dead weak slots too (`processWeak`). Registered first so
+    // it runs last, after the minor's `collecting` window has closed; the
+    // major path's own drain makes this a no-op there.
+    defer self.roots.runWeakCallbacks(self);
     // Is the whole-heap threshold already crossed? The crossing decides
     // the ORDER of the two collections below, and it is asked TWICE: once
     // here, and again on the account a minor leaves behind.
@@ -82,67 +92,22 @@ pub fn continuePoll(
     // The crossing also asks a different SIZE question of the young set --
     // see `Registry.shouldTryMinorBeforeMajor`.
     const offer_minor = if (crossing)
-        self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
+        pollScansConservatively(self, mode) and self.gc.shouldTryMinorBeforeMajor()
     else
         mode.acceptsMinor() and self.gc.shouldTryMinor();
     if (offer_minor and !self.gc.hot.collecting) {
         self.gc.hot.collecting = true;
         defer self.gc.hot.collecting = false;
-        self.sampleAllocationPeak();
+        native_allocation.samplePeakAtCollection(self);
         const started = self.diagnosticNanos();
-        if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
-            self.gc.stats.collections += 1;
+        if (@import("gc_trace_stw.zig").collectMinor(self, mode.rootScan()) catch null) |freed| {
             const ended = self.diagnosticNanos();
-            const elapsed = if (ended > started) ended - started else 0;
-            // Tracked separately from the major distribution: a minor
-            // is judged on being short, and averaging it with
-            // whole-heap pauses hides exactly that.
-            //
-            // Counted whether or not it reclaimed anything. A minor
-            // that frees nothing is the EXPENSIVE case, not a
-            // non-event: it walked its roots and every remembered
-            // owner and came back empty. Pricing those at zero made
-            // the panel report `minor pause mean 0 ns, max 0 ns` for a
-            // run that performed 320 of them, which is precisely the
-            // shape anyone optimising the minor needs to see.
-            self.gc.generation.recordMinorPause(
-                gc.Registry.markQueueAllocator(),
-                elapsed,
-                @import("gc_trace_stw.zig").detailed_reports,
-            );
-            // TGC S2-h1 (2). The aged-decommit policy used to be
-            // driven from major boundaries alone. S2-g took pdfjs
-            // from 908 majors to 24, so the block decommit and the
-            // empty-medium-superblock release stopped being offered
-            // ~884 times per run and maxrss rose 31% (raytrace 33%)
-            // on a live set that had FALLEN -- a superblock high
-            // water mark, not retained garbage.
-            //
-            // A minor is now the same boundary: cells and medium
-            // extents are exactly what it frees. Nothing about the
-            // policy changes -- `releaseFreeBlockPages` keeps its own
-            // 100 ms period gate and both idle gates
-            // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
-            // -- so this only stops the offers from being withheld.
-            // Placed after `elapsed` is taken, like the major call
-            // sites: the release is not part of the pause it reports.
-            // It also advances `Heap.clock_ns`, which is what makes
-            // the idle gates measure real idleness again instead of
-            // ageing against a clock that only ticked 24 times.
-            _ = self.gc.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
             const result: gc.CollectionResult = .{
                 .freed_objects = freed,
-                .duration_ns = elapsed,
+                .duration_ns = if (ended > started) ended - started else 0,
             };
-            // NOT `recordSuccess`: that would push a minor's duration
-            // into the major pause ring and count it as a whole-heap
-            // cycle. The minor's own pause accounting is the
-            // `generation.stats` update just above. This holds on the
-            // fall-through below too -- a minor that precedes a major
-            // in the same poll contributes its reclaim to the freed
-            // account but never its time to the major's pause ring.
-            if (freed > 0) self.gc.recordMinorSuccess(result);
-            // Deliberately NOT `resetThreshold()`. That sets the
+            self.gc.recordMinor(result);
+            // Deliberately NOT `resetGrowthThreshold()`. That sets the
             // major threshold to 1.5x the CURRENT footprint and
             // clears the allocation debt, and a minor has no claim
             // to either: it did not look at the old generation, so
@@ -178,70 +143,210 @@ pub fn continuePoll(
             }
         }
     }
-    if (self.collectorBusy()) return .{};
-    const scheduler_point: gc.SchedulerPoint = switch (mode) {
-        .normal => .allocation_slow_path,
-        .callback_boundary => .callback_boundary,
-        .idle => .idle,
-        .safepoint => .safepoint,
-        .urgent => .urgent,
-    };
-    const over_collection_threshold = over_threshold;
-    const run_major = self.gc.scheduler.shouldRunMajorAt(scheduler_point, over_collection_threshold);
-    if (!run_major) return .{};
-
-    const major_request = self.gc.scheduler.pendingMajorRequest();
-    if (major_request != null) _ = self.gc.scheduler.clearMajorRequest();
-    const reason = if (major_request) |request|
+    if (self.gc.isBusy()) return .{};
+    if (!self.gc.scheduler.shouldRunMajorAt(mode, over_threshold)) return .{};
+    const reason = if (self.gc.scheduler.clearMajorRequest()) |request|
         request.reason
-    else if (over_collection_threshold)
+    else if (over_threshold)
         gc.RequestReason.allocation_threshold
     else
         gc.RequestReason.manual;
-    self.gc.scheduler.beginMajorCycle(reason);
-    return try self.collectFull(null, mode.rootScan());
+    return collectMajor(self, reason, mode.rootScan());
 }
 
-pub fn resetThreshold(self: *JSRuntime) void {
-    // qjs's rule (js_trigger_gc after JS_RunGC, quickjs.c) is
-    // threshold = malloc_size + (malloc_size >> 1). The tracer uses 2x, and
-    // the divergence is deliberate: qjs's 1.5x governs a CYCLE collector
-    // running over a heap where refcounting has already freed every acyclic
-    // object, so each round handles residue. A tracer must trace the whole
-    // live set to free anything at all -- the cost of a collection is
-    // proportional to what survives, not to what dies -- so the same
-    // constant buys far less allocation per whole-heap trace (splay paid ~41
-    // whole-heap majors at 1.5x).
-    // JSC's precedent for a full-tracing heap is a growth factor of 2 on
-    // small heaps (smallHeapGrowthFactor, OptionsList.h:219; "small" is
-    // heap < 25% of RAM). The factor here was 1.75 while §1.3 capped
-    // cycle peak/live at 1.8; the owner renegotiated that cap to 2.0 on
-    // 2026-08-29 (ABBA n=16 pricing: splay cycles -7.25%, six-benchmark
-    // geomean 0.9867, peak RSS +10-13%).
-    // Steady-state cycle peak/live equals this factor by construction,
-    // so the constant and the §1.3 cap must move together.
-    const live_now = self.gc.heap_budget.bytes;
-    const grown = std.math.add(usize, live_now, live_now) catch std.math.maxInt(usize);
-    // ...plus room for one nursery. Half of a small live set is less than
-    // a nursery, and since the threshold is tested before a minor is
-    // offered, such a threshold would be crossed first every time and
-    // every collection would be a major. raytrace lives in 288KB, so the
-    // qjs rule alone gives it 144KB of headroom to fill a nursery that
-    // wants an order of magnitude more.
-    const headroom = gc.small_heap_major_headroom_bytes;
-    const floored = std.math.add(usize, self.gc.heap_budget.bytes, headroom) catch std.math.maxInt(usize);
-    self.gc.heap_budget.gc_threshold = @max(grown, floored);
-    // Both rules add to the live set, so the threshold can never sit below
-    // it: a threshold under the heap budget would make the very next
-    // heap allocation trigger a collection.
-    std.debug.assert(self.gc.heap_budget.gc_threshold >= self.gc.heap_budget.bytes);
-    // Which rule set the cadence. Without this the claim "raytrace's
-    // majors are paced by the floor, not by growth" stays an inference
-    // from arithmetic; with it, it is a reading.
-    if (floored > grown) {
-        self.gc.stats.threshold_floor_hits +|= 1;
-    } else {
-        self.gc.stats.threshold_growth_hits +|= 1;
+/// Stop-the-world full collection for an engine-internal trigger: the
+/// caller's native frames are live, so the scan is `.engine_active`.
+pub fn collectFull(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
+    return collectMajor(self, .manual, .engine_active);
+}
+
+/// Precise full collection at Runtime teardown. Errors leave the remaining
+/// graph to `gc.deinit`.
+pub fn collectForTeardown(self: *JSRuntime) usize {
+    const result = collectMajor(self, .manual, .declared_only) catch return 0;
+    return result.freed_objects;
+}
+
+/// Host-requested full collection. `roots` names one more frame of host
+/// values for this collection; it is linked like any `ValueRootFrame`.
+pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+    self.assertOwnerThread();
+    var extra: ValueRootFrame = if (roots) |frame| .{
+        .slices = frame.slices,
+        .values = frame.values,
+        .objects = frame.objects,
+        .headers = frame.headers,
+        .atoms = frame.atoms,
+    } else .{};
+    if (roots != null) extra.activate(self);
+    defer if (roots != null) extra.deactivate(self);
+    self.gc.requestGC(.manual, .urgent);
+    return pollGC(self, .urgent);
+}
+
+/// Test builds: a full collection under an explicit root-scan class.
+pub fn collectWithScanForTest(self: *JSRuntime, scan: gc.RootScan) gc.CollectionError!gc.CollectionResult {
+    if (!builtin.is_test) @compileError("test-only collection helper");
+    return collectMajor(self, .manual, scan);
+}
+
+fn collectMajor(self: *JSRuntime, reason: gc.RequestReason, scan: gc.RootScan) gc.CollectionError!gc.CollectionResult {
+    self.assertOwnerThread();
+    self.assertGCAllowed();
+    if (self.roots.isTracing()) @panic("collection reentry during tracing");
+    // Registered first so it runs last, after `collecting` is cleared.
+    defer self.roots.runWeakCallbacks(self);
+    // A collection or collector phase already on the stack (a destructor
+    // that allocates, for one) leaves the request pending rather than
+    // nesting a second collection or touching its morgue and cycle.
+    if (self.gc.isBusy()) return .{};
+    if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
+    if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
+    defer if (builtin.mode == .Debug) {
+        self.gc.verifyIntrusiveList() catch unreachable;
+        self.gc.verifyHeapAccounting(self) catch unreachable;
+    };
+    self.gc.hot.collecting = true;
+    defer self.gc.hot.collecting = false;
+
+    // The cycle's high-water is the account right now, at trigger time.
+    native_allocation.samplePeakAtCollection(self);
+    const start_ns = self.diagnosticNanos();
+
+    self.gc.scheduler.beginMajorCycle(reason);
+    const freed = @import("gc_trace_stw.zig").collectCycles(self, scan) catch |err| {
+        const mapped: gc.CollectionError = switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.PayloadMarkFailed => error.PayloadMarkFailed,
+        };
+        self.gc.failMajor(mapped);
+        return mapped;
+    };
+    self.gc.scheduler.setMajorPhase(.sweep);
+
+    const elapsed = self.diagnosticElapsedSince(start_ns);
+    // Charge the census to whoever asked for it, not to the pause. The
+    // walks run inside this region and are enabled by the same
+    // `--gc-stats` that prints the distribution, so leaving them in makes
+    // the only pause instrument inflate its own subject by ~40%.
+    const census = self.gc.last_census_ns;
+    const result = gc.CollectionResult{
+        .freed_objects = freed,
+        .duration_ns = elapsed -| census,
+    };
+    self.gc.completeMajor(result);
+    return result;
+}
+
+/// Does a collection started at this poll decide liveness with the
+/// conservative pass over the mutator's native frames?
+///
+/// A collection destroys synchronously, so running one from an arbitrary
+/// allocation boundary is only sound while the scan covers the Zig locals the interrupted caller is holding -- the
+/// shape `Object.create` acquires before its own boundary, for one. That
+/// is exactly the promise `gc.PollMode.rootScan` makes for the engine
+/// triggers, and exactly what `test_root_scan_override` withdraws: pacing
+/// tests declare their frame quiescent so reclamation is deterministic,
+/// which an allocation boundary in the middle of a constructor is not.
+/// Those polls run a major without a preceding minor.
+fn pollScansConservatively(self: *const JSRuntime, mode: gc.PollMode) bool {
+    const scan = if (comptime builtin.is_test)
+        self.test_root_scan_override orelse mode.rootScan()
+    else
+        mode.rootScan();
+    return scan == .engine_active;
+}
+
+inline fn prospectiveAllocationTotal(self: *const JSRuntime, size: usize) usize {
+    return self.gc.heap_budget.bytes +| size;
+}
+
+/// Queue an allocation-threshold request and return the exact prospective
+/// total used for that decision. Object allocation immediately consumes
+/// the same total to retire a stale threshold request; returning it keeps
+/// `gc.requestGC`'s writes from forcing a second allocated-bytes load and
+/// overflow-checked add on every object construction.
+inline fn requestGCForAllocationTotal(self: *JSRuntime, size: usize) usize {
+    if (comptime builtin.is_test) {
+        if (self.gc.heap_budget.runProbe(size)) return prospectiveAllocationTotal(self, size);
     }
-    self.gc.resetAllocationDebt();
+    // Destructors may allocate, but starting a nested collection from
+    // inside a running one is not allowed.
+    if (self.gc.isBusy()) return prospectiveAllocationTotal(self, size);
+    if (comptime native_allocation.force_gc_on_allocation_enabled) {
+        if (self.gc.heap_budget.suspend_alloc_notify) return prospectiveAllocationTotal(self, size);
+        // A no-GC scope's native allocations (atom interning, for one)
+        // never collect in a normal build; the synthetic collection
+        // must not start inside one either.
+        if (comptime gc_scope.checks_enabled) {
+            if (self.active_no_gc_scope != null) return prospectiveAllocationTotal(self, size);
+        }
+        // The force-GC build option is diagnostic instrumentation, not a
+        // scheduling-policy change. Preserve an explicitly configured
+        // threshold across the synthetic pre-allocation collection.
+        const saved_threshold = self.gc.heap_budget.gc_threshold;
+        defer self.gc.heap_budget.gc_threshold = saved_threshold;
+        _ = forceGC(self, null) catch {};
+        return prospectiveAllocationTotal(self, size);
+    }
+    // The growth bar is the heap budget, not the mixed native account.
+    const total = prospectiveAllocationTotal(self, size);
+    if (total > self.gc.heap_budget.gc_threshold) {
+        self.gc.requestGC(.allocation_threshold, .soon);
+    }
+    return total;
+}
+
+pub inline fn requestGCForAllocation(self: *JSRuntime, size: usize) void {
+    _ = requestGCForAllocationTotal(self, size);
+}
+
+/// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering
+/// the allocator. Object construction uses this stronger boundary instead
+/// of merely leaving a pending request for post-registration service: a
+/// memory-limit check must be allowed to reuse space from reclaimable
+/// cycles before rejecting the replacement object.
+pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) align(64) void {
+    const prospective = requestGCForAllocationTotal(self, size);
+    // Scratch allocation can cross the threshold and queue a request, then
+    // fall back below it before the next qjs-style object boundary. The
+    // threshold condition is level-triggered: discard only that ordinary
+    // stale request. Registry request coalescing preserves manual/external/
+    // pressure reasons so they cannot be cancelled here.
+    if (prospective <= self.gc.heap_budget.gc_threshold) {
+        _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
+    }
+    // §8.6: allocation debt buys bounded slices of the collector's work.
+    // The time budget bounds one slice; the byte interval below also
+    // bounds how many allocation-boundary slices one burst can concatenate
+    // into a mutator-visible operation. Scheduler/callback/idle polls call
+    // pollGC directly and remain unpaced.
+    if (self.gc.isBusy()) return;
+    if (!self.gc.hasPendingMajorRequest()) return;
+    return pollGCBeforeObjectAllocation(self);
+}
+
+/// Cold tail that owns `pollGC`'s error-union return area. The common
+/// below-threshold allocation path can then remain a leaf with no saved
+/// registers or stack frame.
+noinline fn pollGCBeforeObjectAllocation(self: *JSRuntime) void {
+    _ = pollGC(self, .normal) catch {};
+}
+
+pub const HeapLimitRetry = struct {
+    rt: *JSRuntime,
+
+    /// The mutator's native frames are live here, so the scan stays
+    /// `.engine_active`. A collection already running is the same exit as
+    /// `Budget.retrying`.
+    pub fn collect(self: HeapLimitRetry) void {
+        if (self.rt.gc.heap_budget.retry_override) |override| return override.collect(override.context);
+        if (self.rt.gc.isBusy()) return;
+        _ = collectFull(self.rt) catch return;
+    }
+};
+
+/// Admit `bytes` against the JS heap limit, collecting at most once.
+pub fn admitHeapCharge(self: *JSRuntime, bytes: usize) error{OutOfMemory}!void {
+    return self.gc.heap_budget.admit(bytes, HeapLimitRetry{ .rt = self });
 }

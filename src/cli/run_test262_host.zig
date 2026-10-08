@@ -310,7 +310,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     const allocator = test262PageAllocator();
     const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
     defer rt.destroy();
-    rt.can_block = true;
+    rt.host_wait.can_block = true;
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
 
     {
@@ -957,7 +957,7 @@ fn test262CreateRealm(
     _ = args;
     const realm_value = try ctx.createRealm();
     const realm_global = try ctx.realmGlobalObject(realm_value);
-    const realm_context = ctx.runtimePtr().contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidBuiltinRegistry;
+    const realm_context = ctx.runtimePtr().contexts.forGlobal(realm_global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
     runtime_layer.file_modules.install(realm_context);
     try runtime_layer.globals.install(realm_context, realm_global);
     const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
@@ -986,7 +986,7 @@ fn test262Gc(
     _ = output;
     _ = global;
     _ = args;
-    _ = try ctx.runtimePtr().collectFull(null, .engine_active);
+    _ = try ctx.runtimePtr().collectFull();
     return zjs.JSValue.undefinedValue();
 }
 
@@ -1080,7 +1080,7 @@ test "test262 globals do not retain local namespace object reference" {
 
     try std.testing.expect(weak.isAlive());
     try std.testing.expect(try ctx.deleteProperty(global.value(), "$262"));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(!weak.isAlive());
 }
 

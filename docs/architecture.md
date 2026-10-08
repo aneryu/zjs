@@ -56,7 +56,10 @@ It must not import CLI.
 ## Core — `src/core/`
 
 Values, atoms, strings, objects, shapes, properties, arrays, and GC.
-`src/runtime.zig` coordinates per-runtime state across the core modules.
+`src/runtime.zig` is the stable-address resource owner and lifecycle
+coordinator: it embeds each subsystem's state, aggregates the built-in strong
+roots, and orders teardown. Algorithms live with their state's owner, and
+Runtime methods of the same name are aliases where the signature allows.
 
 | Enter here | Owns |
 | --- | --- |
@@ -74,6 +77,15 @@ Values, atoms, strings, objects, shapes, properties, arrays, and GC.
 | `gc_incremental.zig` | Mark epoch and per-kind morgue buckets (the incremental major it is named for is retired) |
 | `gc_nursery.zig` | Opt-in copying nursery (`ZJS_GC_NURSERY=1`; off by default) |
 | `gc_trace_stw.zig` | The collector: stop-the-world minor and major, condemnation and sweep |
+| `gc_driver.zig` | Collection orchestration: full/teardown/forced collection, poll routing, allocation triggers, the static heap-limit retry |
+| `roots.zig` | Handles, root providers, stack `ValueRootFrame`s and their scope helpers |
+| `jobs.zig` | Job FIFO, microtask checkpoint (drain guard, WeakRef [[KeptAlive]]), and the thread-local active-job root chain |
+| `execution.zig` | `JSRuntime.execution`: typed invocation / native-call records with enter/leave, backtrace chain, small-inline budget |
+| `property_state.zig` | `JSRuntime.property_tables`: AutoInit pool, borrowed holders, weak-cleanup batch |
+| `gc_weak.zig` | Weak identities (`Identity` encoding, retain/release, liveness) and the weak-holder chain |
+| `interrupt.zig` | `JSRuntime.interrupt` (handler, termination, poll countdowns) and `JSRuntime.host_wait` |
+| `vm_stack.zig` | `StackBudget` (call depth, frame bytes, native stack guard) and `VmStackArena` |
+| `context_registry.zig` | Live/constructing realm lists, their iterator and `forGlobal` lookup |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
 
 Lifetime model: a generational (sticky mark bit) stop-the-world tracing
@@ -82,11 +94,13 @@ on the heap and no concurrent collector; it is non-moving except for the
 opt-in copying nursery. Ordinary object death is a bitmap operation; only the
 `needs_finalizer` population runs a destructor. VM operand stacks and locals are carved from
 a `VmStackArena` and released with the frame; they are not individually linked
-as per-frame roots. The exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
-windows without teaching core the VM layout; in production only
+as per-frame roots. The exec-owned `ActiveInvocation` records published on `JSRuntime.execution`
+expose those semantic live windows through `engine_services`, so core does
+not learn the VM layout; in production only
 container/window value-root frames are linked
-(`value_root_link_containers_only`) and the scalar arms are compiled out. The same gated path snapshots `Atomics.waitAsync` waiter
-Promises through `trace_atomics_wait_async`. Host values that outlive a call
+(`value_root_link_containers_only`) and the scalar arms are compiled out. The same root walk snapshots `Atomics.waitAsync` waiter
+Promises through `engine_services`, once the Runtime's `wait_async_used`
+flag shows it has linked a waiter. Host values that outlive a call
 must use public handles, not a raw `JSValue`.
 
 `JSValue` has a single representation: an 8-byte NaN-boxed word. Its layout
@@ -339,7 +353,7 @@ Main entry points:
 
 - `src/exec/frame.zig`: `Frame`, `FrameSlab`, and frame-owned windows;
 - `src/exec/stack.zig`: operand stack;
-- `src/runtime.zig`: `JSRuntime` and per-runtime `VmStackArena`;
+- `src/core/vm_stack.zig`: per-runtime `VmStackArena` and `StackBudget`;
 - `src/exec/inline_calls.zig`: same-loop `Machine` frame push/pop;
 - `src/exec/tailcall_dispatch.zig`: threaded/tail-called opcode handlers;
 - `src/exec/call_runtime.zig`: call/eval/generator/Atomics shared runtime

@@ -111,7 +111,7 @@ pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, n
     // A standard error kind takes the realm's intrinsic prototype (e.g.
     // %TypeError.prototype%), never whatever `globalThis.TypeError` holds now.
     if (nativeErrorKindFromName(name)) |kind| {
-        if (rt.contextForGlobalIncludingConstructing(global)) |realm| {
+        if (rt.contexts.forGlobal(global, .include_constructing)) |realm| {
             if (realm.nativeErrorPrototypeObject(kind)) |prototype| {
                 return buildErrorObjectWithPrototype(rt, prototype, message);
             }
@@ -119,7 +119,7 @@ pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, n
     }
     const ctor_key = try rt.internAtom(name);
     const ctor_value = try global.getProperty(ctor_key);
-    const error_prototype = if (rt.contextForGlobalIncludingConstructing(global)) |realm|
+    const error_prototype = if (rt.contexts.forGlobal(global, .include_constructing)) |realm|
         realm.nativeErrorPrototypeObject(.error_)
     else
         null;
@@ -220,7 +220,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");
-    const ctor_value = try rt.takeSymbolValue(symbol_atom);
+    const ctor_value = try rt.symbolValue(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -251,7 +251,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
         try std.testing.expect(stored.isString());
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -314,7 +314,7 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
     const rt = ctx.runtime;
     // %AggregateError.prototype% of the realm, never whatever
     // `globalThis.AggregateError` holds now.
-    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
     const prototype = realm.nativeErrorPrototypeObject(.aggregate_error) orelse return error.InvalidBuiltinRegistry;
     const object = try core.Object.create(rt, core.class.ids.error_, prototype);
     const aggregate_error = object.value();
@@ -434,10 +434,10 @@ pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
 /// allocates, so poll where the loop could already allocate or call user
 /// code (its head), never mid-update.
 pub inline fn pollNativeLoop(ctx: *core.JSContext, global: *core.Object) !void {
-    ctx.runtime.pollNativeWork() catch return throwInterrupted(ctx, global);
+    ctx.runtime.interrupt.pollNativeWork() catch return throwInterrupted(ctx, global);
 }
 
-/// Gives a bare `error.Interrupted` from `JSRuntime.pollNativeWork` its
+/// Gives a bare `error.Interrupted` from `interrupt.State.pollNativeWork` its
 /// uncatchable InternalError before a JavaScript catch can see the sentinel;
 /// an interrupt the VM already raised keeps its pending error. Seams that
 /// call code which polls without a Realm (the parser and compiler) route
@@ -974,12 +974,12 @@ pub const StackSkip = union(enum) {
 };
 
 fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip: StackSkip) !core.JSValue {
-    if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip);
+    if (ctx.runtime.execution.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip);
 
     if (try errorPrepareStackTrace(global)) |prepare| {
         const sites = try buildCallSiteArray(ctx, global, skip);
-        ctx.runtime.formatting_error_stack = true;
-        defer ctx.runtime.formatting_error_stack = false;
+        ctx.runtime.execution.beginErrorStackFormatting();
+        defer ctx.runtime.execution.endErrorStackFormatting();
         return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
             if (pendingExceptionMatchesError(ctx, err)) {
                 _ = ctx.takeException();
@@ -1001,11 +1001,11 @@ fn formatCapturedErrorStackValue(
     sites_value: core.JSValue,
     site_count: usize,
 ) !core.JSValue {
-    if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
+    if (ctx.runtime.execution.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 
     if (try errorPrepareStackTrace(global)) |prepare| {
-        ctx.runtime.formatting_error_stack = true;
-        defer ctx.runtime.formatting_error_stack = false;
+        ctx.runtime.execution.beginErrorStackFormatting();
+        defer ctx.runtime.execution.endErrorStackFormatting();
         return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_value }, null, null) catch |err| {
             if (pendingExceptionMatchesError(ctx, err)) {
                 _ = ctx.takeException();

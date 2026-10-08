@@ -319,7 +319,7 @@ fn stringReplaceCoreRooted(
     var end_of_last_match: usize = 0;
     var is_first = true;
     while (true) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const sp_data = core.string.asFlat(try source.get(rt)).?.resolveData();
         const search_data = core.string.asFlat(try search_root.get(rt)).?.resolveData();
         const maybe_pos: ?usize = if (search_len == 0) blk: {
@@ -1969,12 +1969,12 @@ pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), val
     while (iterator.next()) |data| {
         switch (data) {
             .latin1 => |bytes| for (bytes) |byte| {
-                try rt.pollNativeWork();
+                try rt.interrupt.pollNativeWork();
                 try out.append(rt.nativeAllocator(), byte);
             },
             .utf16 => |units| {
                 try out.appendSlice(rt.nativeAllocator(), units);
-                try rt.pollNativeBulkWork(units.len * 2);
+                try rt.interrupt.pollNativeBulkWork(units.len * 2);
             },
         }
     }
@@ -2491,7 +2491,7 @@ pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32),
     try appendStringValueUnits(rt, &units, value);
     var index: usize = 0;
     while (index < units.items.len) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const unit = units.items[index];
         if (isHighSurrogateUnit(unit) and index + 1 < units.items.len and isLowSurrogateUnit(units.items[index + 1])) {
             try out.append(rt.nativeAllocator(), combinedSurrogateCodePoint(unit, units.items[index + 1]));
@@ -2829,9 +2829,9 @@ pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index:
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
-    var owner_pin = try core.runtime.pinHeaderForNative(rt, object.gcHeader());
+    var owner_pin = try core.runtime.NativePin.initHeader(rt, object.gcHeader());
     defer owner_pin.deinit();
-    var value_pin = try core.runtime.pinValueForNative(rt, value);
+    var value_pin = try core.runtime.NativePin.initValue(rt, value);
     defer if (value_pin) |*held| held.deinit();
     const atom_id = core.Atom.taggedInt(index);
     if (try object.appendDenseArrayDefineIndex(rt, index, atom_id, value)) return;
@@ -3783,7 +3783,7 @@ fn stringPadRooted(
 
     var remaining = pad_count;
     while (remaining > 0) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const chunk = @min(remaining, fill_len);
         try buffer.appendStringPrefix(rt, try fill.get(rt), chunk);
         remaining -= chunk;
@@ -3831,7 +3831,7 @@ pub fn stringNormalize(
     try appendUtf32FromStringValue(ctx.runtime, &input, values[1]);
     const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.nativeAllocator(), input.items, form);
     defer ctx.runtime.nativeAllocator().free(normalized_slice);
-    try ctx.runtime.pollNativeBulkWork(input.items.len * @sizeOf(u32));
+    try ctx.runtime.interrupt.pollNativeBulkWork(input.items.len * @sizeOf(u32));
 
     var out = std.ArrayList(u16).empty;
     defer out.deinit(ctx.runtime.nativeAllocator());
@@ -3862,7 +3862,7 @@ pub fn stringLocaleCompare(
     defer lhs_nfc.deinit();
     const rhs_nfc = try normalizedUtf32(ctx.runtime, values[2], .nfc);
     defer rhs_nfc.deinit();
-    try ctx.runtime.pollNativeBulkWork((lhs_nfc.slice.len + rhs_nfc.slice.len) * @sizeOf(u32));
+    try ctx.runtime.interrupt.pollNativeBulkWork((lhs_nfc.slice.len + rhs_nfc.slice.len) * @sizeOf(u32));
 
     const result: i32 = switch (std.mem.order(u32, lhs_nfc.slice, rhs_nfc.slice)) {
         .lt => -1,
@@ -4889,10 +4889,10 @@ fn trimStringValue(rt: *core.JSRuntime, string_value: core.JSValue, mode: TrimMo
     var start: usize = 0;
     var end = core.string.stringValueLenUnchecked(string_value);
     if (mode == .start or mode == .both) {
-        while (start < end and isTrimCodeUnit(core.string.stringValueCodeUnitAtUnchecked(string_value, start))) : (start += 1) try rt.pollNativeWork();
+        while (start < end and isTrimCodeUnit(core.string.stringValueCodeUnitAtUnchecked(string_value, start))) : (start += 1) try rt.interrupt.pollNativeWork();
     }
     if (mode == .end or mode == .both) {
-        while (end > start and isTrimCodeUnit(core.string.stringValueCodeUnitAtUnchecked(string_value, end - 1))) : (end -= 1) try rt.pollNativeWork();
+        while (end > start and isTrimCodeUnit(core.string.stringValueCodeUnitAtUnchecked(string_value, end - 1))) : (end -= 1) try rt.interrupt.pollNativeWork();
     }
     return stringSliceValue(rt, string_value, start, end - start);
 }
@@ -4986,7 +4986,7 @@ fn splitStringRooted(rt: *core.JSRuntime, string_value: core.JSValue, args: []co
     if (sep_len == 0) {
         var index: usize = 0;
         while (index < source_len and out_index < limit) : (index += 1) {
-            try rt.pollNativeWork();
+            try rt.interrupt.pollNativeWork();
             try element.set(rt, try codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(try source.get(rt), index)));
             try defineValueElement(rt, objectFromValue(try output.get(rt)).?, out_index, try element.get(rt));
             out_index += 1;
@@ -4996,7 +4996,7 @@ fn splitStringRooted(rt: *core.JSRuntime, string_value: core.JSValue, args: []co
 
     var start: usize = 0;
     while (out_index < limit) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const found = found: {
             var borrow = core.runtime.NoGcScope{};
             borrow.activate(rt);
@@ -5082,7 +5082,7 @@ fn unicodeCaseRootedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lowe
     const slen = core.string.stringValueLenUnchecked(primitive);
     if (slen == 0) return primitive;
     if (try core.string.String.createValueAsciiCaseMapped(rt, try source.get(rt), to_lower)) |mapped| {
-        try rt.pollNativeBulkWork(slen);
+        try rt.interrupt.pollNativeBulkWork(slen);
         return mapped.value();
     }
     try core.string.ensureFlat(rt, source.readOnly(), source);
@@ -5102,7 +5102,7 @@ fn unicodeCaseRootedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lowe
 
     var index: usize = 0;
     while (index < slen) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const span = codePointAtResolved(data, slen, index);
         index = span.end;
 
@@ -5295,13 +5295,13 @@ fn repeatString(rt: *core.JSRuntime, string_value: core.JSValue, args: []const c
         while (buffer.wide.items.len < total) {
             const count_to_copy = @min(buffer.wide.items.len, total - buffer.wide.items.len, copy_step);
             buffer.wide.appendSliceAssumeCapacity(buffer.wide.items[0..count_to_copy]);
-            try rt.pollNativeBulkWork(count_to_copy * 2);
+            try rt.interrupt.pollNativeBulkWork(count_to_copy * 2);
         }
     } else {
         while (buffer.latin1.items.len < total) {
             const count_to_copy = @min(buffer.latin1.items.len, total - buffer.latin1.items.len, copy_step);
             buffer.latin1.appendSliceAssumeCapacity(buffer.latin1.items[0..count_to_copy]);
-            try rt.pollNativeBulkWork(count_to_copy);
+            try rt.interrupt.pollNativeBulkWork(count_to_copy);
         }
     }
     borrow.deactivate();
@@ -5347,7 +5347,7 @@ fn flatStringSearchRooted(rt: *core.JSRuntime, source_value: core.JSValue, args:
     else
         try stringSearchStart(rt, hlen, pos_value);
     // A loop of searches over a long string polls as its scans add up.
-    try rt.pollNativeBulkWork(hlen);
+    try rt.interrupt.pollNativeBulkWork(hlen);
     var borrow = core.runtime.NoGcScope{};
     borrow.activate(rt);
     defer borrow.deactivate();
@@ -5440,7 +5440,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -5457,7 +5457,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

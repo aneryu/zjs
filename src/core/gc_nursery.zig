@@ -114,6 +114,18 @@ pub const Nursery = struct {
     };
 
     /// Was `addr` on a page the previous collection reclaimed?
+    /// Allocate in the old generation until `restoreSuspension`; returns
+    /// the state to restore. Used for objects that must never move.
+    pub fn suspendAllocation(self: *Nursery) bool {
+        const previous = self.suspended;
+        self.suspended = true;
+        return previous;
+    }
+
+    pub fn restoreSuspension(self: *Nursery, previous: bool) void {
+        self.suspended = previous;
+    }
+
     pub fn wasReclaimed(self: *const Nursery, addr: usize) bool {
         if (comptime !std.debug.runtime_safety) return false;
         for (self.recently_reclaimed[0..self.recently_reclaimed_len]) |base| {

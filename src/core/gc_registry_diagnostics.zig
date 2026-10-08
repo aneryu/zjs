@@ -16,6 +16,7 @@ const std = @import("std");
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 const gc = @import("gc.zig");
+const gc_trace_stw = @import("gc_trace_stw.zig");
 const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
 const object = @import("object.zig");
@@ -291,35 +292,122 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
     }
 }
 
-pub fn recordFailure(self: *Registry, err: CollectionError) void {
-    self.stats.failed_collections += 1;
-    self.stats.last_failure = switch (err) {
-        error.OutOfMemory => .out_of_memory,
-        error.PayloadMarkFailed => .payload_mark_failed,
-    };
+/// Account a completed minor. Never `completeMajor`: a minor neither enters
+/// the major pause ring nor resets the growth threshold.
+pub fn recordMinor(self: *Registry, result: CollectionResult) void {
+    self.stats.collections += 1;
+    // Tracked separately from the major distribution: a minor
+    // is judged on being short, and averaging it with
+    // whole-heap pauses hides exactly that.
+    //
+    // Counted whether or not it reclaimed anything. A minor
+    // that frees nothing is the EXPENSIVE case, not a
+    // non-event: it walked its roots and every remembered
+    // owner and came back empty. Pricing those at zero made
+    // the panel report `minor pause mean 0 ns, max 0 ns` for a
+    // run that performed 320 of them, which is precisely the
+    // shape anyone optimising the minor needs to see.
+    self.generation.recordMinorPause(
+        Registry.markQueueAllocator(),
+        result.duration_ns,
+        gc_trace_stw.detailed_reports,
+    );
+    // TGC S2-h1 (2). The aged-decommit policy used to be
+    // driven from major boundaries alone. S2-g took pdfjs
+    // from 908 majors to 24, so the block decommit and the
+    // empty-medium-superblock release stopped being offered
+    // ~884 times per run and maxrss rose 31% (raytrace 33%)
+    // on a live set that had FALLEN -- a superblock high
+    // water mark, not retained garbage.
+    //
+    // A minor is now the same boundary: cells and medium
+    // extents are exactly what it frees. Nothing about the
+    // policy changes -- `releaseFreeBlockPages` keeps its own
+    // 100 ms period gate and both idle gates
+    // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
+    // -- so this only stops the offers from being withheld.
+    // The caller measured `duration_ns` before this call, so
+    // the release is not part of the pause it reports. It also advances `Heap.clock_ns`, which is what makes
+    // the idle gates measure real idleness again instead of
+    // ageing against a clock that only ticked 24 times.
+    _ = self.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
+    // A minor that precedes a major in the same poll contributes
+    // its reclaim to the freed account but never its time to the
+    // major's pause ring.
+    if (result.freed_objects > 0) {
+        self.stats.last_failure = .none;
+        self.stats.freed_objects +|= result.freed_objects;
+    }
 }
 
-pub fn recordSuccess(self: *Registry, result: CollectionResult) void {
+/// Close a successful major: pause accounting, cycle end, the next growth
+/// threshold, and the aged-decommit offer (explicit, urgent and small-heap
+/// floor collections would otherwise age free blocks forever).
+pub fn completeMajor(self: *Registry, result: CollectionResult) void {
     self.stats.last_failure = .none;
     self.stats.last_collection_time_ns = result.duration_ns;
     self.stats.cycle_gc_count +|= 1;
     self.stats.cycle_gc_time_ns +|= result.duration_ns;
     self.stats.freed_objects +|= result.freed_objects;
     recordPauseSample(self, result.duration_ns);
+    self.scheduler.endMajorCycle();
+    self.resetGrowthThreshold();
+    _ = self.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
 }
 
-/// Credit a MINOR collection without putting its pause in the major ring.
-///
-/// The two populations differ by more than an order of magnitude -- a minor
-/// is judged on being short, a major on bounding the whole heap -- so
-/// mixing them makes the percentile panel report the wrong thing entirely.
-/// A run doing 90% minors printed a p50 of 758us against a true major
-/// median of 16.45ms, and the target it is checked against
-/// is a major target. The minor's own
-/// distribution lives in `generation.stats`.
-pub fn recordMinorSuccess(self: *Registry, result: CollectionResult) void {
-    self.stats.last_failure = .none;
-    self.stats.freed_objects +|= result.freed_objects;
+/// Close a failed major and ask for a retry.
+pub fn failMajor(self: *Registry, err: CollectionError) void {
+    self.stats.failed_collections += 1;
+    self.stats.last_failure = switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.PayloadMarkFailed => .payload_mark_failed,
+    };
+    self.scheduler.endMajorCycle();
+    self.requestGC(.collection_failed, .soon);
+}
+
+pub fn resetGrowthThreshold(self: *Registry) void {
+    // qjs's rule (js_trigger_gc after JS_RunGC, quickjs.c) is
+    // threshold = malloc_size + (malloc_size >> 1). The tracer uses 2x, and
+    // the divergence is deliberate: qjs's 1.5x governs a CYCLE collector
+    // running over a heap where refcounting has already freed every acyclic
+    // object, so each round handles residue. A tracer must trace the whole
+    // live set to free anything at all -- the cost of a collection is
+    // proportional to what survives, not to what dies -- so the same
+    // constant buys far less allocation per whole-heap trace (splay paid ~41
+    // whole-heap majors at 1.5x).
+    // JSC's precedent for a full-tracing heap is a growth factor of 2 on
+    // small heaps (smallHeapGrowthFactor, OptionsList.h:219; "small" is
+    // heap < 25% of RAM). The factor here was 1.75 while §1.3 capped
+    // cycle peak/live at 1.8; the owner renegotiated that cap to 2.0 on
+    // 2026-08-29 (ABBA n=16 pricing: splay cycles -7.25%, six-benchmark
+    // geomean 0.9867, peak RSS +10-13%).
+    // Steady-state cycle peak/live equals this factor by construction,
+    // so the constant and the §1.3 cap must move together.
+    const live_now = self.heap_budget.bytes;
+    const grown = std.math.add(usize, live_now, live_now) catch std.math.maxInt(usize);
+    // ...plus room for one nursery. Half of a small live set is less than
+    // a nursery, and since the threshold is tested before a minor is
+    // offered, such a threshold would be crossed first every time and
+    // every collection would be a major. raytrace lives in 288KB, so the
+    // qjs rule alone gives it 144KB of headroom to fill a nursery that
+    // wants an order of magnitude more.
+    const headroom = gc.small_heap_major_headroom_bytes;
+    const floored = std.math.add(usize, self.heap_budget.bytes, headroom) catch std.math.maxInt(usize);
+    self.heap_budget.gc_threshold = @max(grown, floored);
+    // Both rules add to the live set, so the threshold can never sit below
+    // it: a threshold under the heap budget would make the very next
+    // heap allocation trigger a collection.
+    std.debug.assert(self.heap_budget.gc_threshold >= self.heap_budget.bytes);
+    // Which rule set the cadence. Without this the claim "raytrace's
+    // majors are paced by the floor, not by growth" stays an inference
+    // from arithmetic; with it, it is a reading.
+    if (floored > grown) {
+        self.stats.threshold_floor_hits +|= 1;
+    } else {
+        self.stats.threshold_growth_hits +|= 1;
+    }
+    self.resetAllocationDebt();
 }
 
 fn recordPauseSample(self: *Registry, duration_ns: u64) void {

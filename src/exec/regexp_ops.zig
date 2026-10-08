@@ -475,7 +475,7 @@ fn regexpCompileErrorMessage(err: regexp_lib.CompileError, part: enum { flags, p
 
 fn throwRegExpSyntaxError(rt: *core.JSRuntime, global: ?*core.Object, message: []const u8) !noreturn {
     if (global) |g| {
-        if (rt.contextForGlobal(g) orelse rt.contextForGlobalIncludingConstructing(g)) |ctx| {
+        if (rt.contexts.forGlobal(g, .include_constructing)) |ctx| {
             _ = try exception_ops.throwSyntaxErrorMessage(ctx, g, message);
         }
     } else if (rt.contexts.live_head) |ctx| {

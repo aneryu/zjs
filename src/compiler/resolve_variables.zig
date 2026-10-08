@@ -1641,7 +1641,7 @@ const Resolver = struct {
         const interrupt_runtime = self.ctx.function.interrupt_runtime;
         var position: u32 = 0;
         while (position < self.input.code_len) {
-            if (interrupt_runtime) |rt| try rt.pollNativeWork();
+            if (interrupt_runtime) |rt| try rt.interrupt.pollNativeWork();
             try self.passSideEventsThrough(position);
 
             if (try self.pendingTailRewriteAt(position)) |rewrite_index| {

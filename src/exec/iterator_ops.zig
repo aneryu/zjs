@@ -188,7 +188,7 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const next_method = core.JSValue.functionBytecode(&fb.header);
     test_async_from_sync_next_method = next_method;
@@ -213,7 +213,7 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
     try std.testing.expect(stored.same(next_method));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1039,7 +1039,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
     const target = try core.Object.createArray(rt, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try target.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, .all));
     target.setArrayLength(1);
 
@@ -1056,7 +1056,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1077,7 +1077,7 @@ pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
     // prototype is already in the realm's class-prototype table. Reading it
     // there costs no new state — an extra `cached_values` slot would have
     // grown JSContext and shifted every field after it.
-    if (rt.contextForGlobalIncludingConstructing(global)) |realm| {
+    if (rt.contexts.forGlobal(global, .include_constructing)) |realm| {
         if (realm.classPrototypeObject(core.class.ids.iterator)) |proto| return proto;
     }
     const iterator_key = core.atom.ids.Iterator;
@@ -1318,7 +1318,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const iterator_method = core.JSValue.functionBytecode(&fb.header);
     test_iterator_concat_method = iterator_method;
@@ -1346,7 +1346,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
         try std.testing.expect(stored_method.same(iterator_method));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1740,7 +1740,7 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const stored_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -1757,7 +1757,7 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
     }
 
     _ = try object.deleteProperty(rt, core.Atom.taggedInt(0));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1772,7 +1772,7 @@ test "iteratorZipStoreIndex roots direct symbol value while defining property" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try iteratorZipStoreIndex(rt, object, 0, symbol_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -1782,7 +1782,7 @@ test "iteratorZipStoreIndex roots direct symbol value while defining property" {
     }
 
     _ = try object.deleteProperty(rt, core.Atom.taggedInt(0));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2427,7 +2427,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -2453,7 +2453,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const stored = helper.iteratorCallback() orelse return error.TypeError;
     try std.testing.expect(stored.same(callback));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3396,7 +3396,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -3414,7 +3414,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

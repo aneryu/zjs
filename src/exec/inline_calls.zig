@@ -195,7 +195,7 @@ pub inline fn resolveInlineFunctionFromObject(global: *core.Object, function_obj
 pub fn resolveNoSuspendAsync(ctx: *core.JSContext, global: *core.Object, func: core.JSValue) ?InlineTarget {
     // The first prototype preserves the legacy multi-entry interrupt contract
     // whenever a host callback can observe its cadence.
-    if (ctx.runtime.mayInterrupt()) return null;
+    if (ctx.runtime.interrupt.mayInterrupt()) return null;
     const obj = object_ops.objectFromValue(func) orelse return null;
     if (obj.class_id != core.class.ids.async_function) return null;
     const data = obj.bytecodeFunctionStoragePtr();
@@ -990,16 +990,11 @@ fn nativeBacktraceSnapshot(function_value: core.JSValue) core.ActiveBacktraceSna
     };
 }
 
-/// Exec-owned authority published through JSRuntime.active_invocation for the
-/// lifetime of one `runWithArgsState`. Runtime stores only an opaque borrowed
-/// pointer; callback routing must recover this type rather than deriving
-/// execution authority from the observable backtrace chain.
-///
-/// The first field is the core-known `ActiveInvocationTrace` prefix so
-/// `traceActiveRoots` can invoke the exec callback without importing this
-/// type.
+/// Exec-owned authority published through `JSRuntime.execution.active_invocation`
+/// for the lifetime of one `runWithArgsState`. Callback routing recovers it
+/// from there rather than deriving execution authority from the observable
+/// backtrace chain; the root walk reaches it through `engine_services`.
 pub const ActiveInvocation = struct {
-    header: core.runtime.ActiveInvocationTrace = undefined,
     machine: *Machine,
     current_backtrace_view: *MachineBacktraceView,
     previous: ?*ActiveInvocation = null,
@@ -1022,8 +1017,7 @@ pub inline fn copyValueSlotPinned(dst: *core.JSValue, src: *const core.JSValue) 
 }
 
 pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
-    const invocation_ptr = rt.active_invocation orelse return null;
-    return @ptrCast(@alignCast(invocation_ptr));
+    return rt.execution.active_invocation;
 }
 
 const NativeBoundaryValidation = if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) struct {
@@ -1097,8 +1091,7 @@ pub const NativeBoundaryScope = struct {
             .data = &self.view,
             .resolver = resolveMachineBacktraceView,
         };
-        self.frame.previous = self.rt.current_backtrace_frame;
-        self.rt.current_backtrace_frame = &self.frame;
+        self.rt.execution.pushBacktrace(&self.frame);
         self.invocation.current_backtrace_view = &self.view;
     }
 
@@ -1166,13 +1159,12 @@ pub const NativeBoundaryScope = struct {
             // permanently. Avoid clearing dead fields on the ReleaseFast hot
             // leg; the next freeze overwrites `frozen_top`, and a live view
             // never reads it.
-            std.debug.assert(self.rt.current_backtrace_frame == &self.frame);
-            self.rt.current_backtrace_frame = self.frame.previous;
+            self.rt.execution.popBacktrace(&self.frame);
             self.invocation.current_backtrace_view = self.outer_view;
             self.outer_view.live = true;
         } else {
             const machine = self.invocation.machine;
-            machine.ctx.popActiveBacktraceFrame(&self.frame);
+            machine.ctx.runtime.execution.popBacktrace(&self.frame);
             self.invocation.current_backtrace_view = self.outer_view;
             self.outer_view.thaw();
         }
@@ -2256,8 +2248,7 @@ pub const Machine = struct {
         const chunk = arena.chunks[active];
         if (chunk.len - used < total) return null;
 
-        rt.stack.bytecode_bytes = accumulated;
-        rt.stack.call_depth = rt.stack.call_depth + 1;
+        rt.stack.commitFrame(rt.stack.call_depth, accumulated);
         arena.used[active] = used + total;
         const slab_values = chunk[used .. used + total];
 
@@ -4910,10 +4901,7 @@ pub const Machine = struct {
         else
             dying.deinit(self.ctx);
         vm_opcodes.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
-        std.debug.assert(self.ctx.runtime.stack.call_depth >= chain_budget.extra_depth);
-        std.debug.assert(self.ctx.runtime.stack.bytecode_bytes >= chain_budget.planned_stack_bytes);
-        self.ctx.runtime.stack.call_depth -= chain_budget.extra_depth;
-        self.ctx.runtime.stack.bytecode_bytes -= chain_budget.planned_stack_bytes;
+        self.ctx.runtime.stack.releaseFrames(chain_budget.extra_depth, chain_budget.planned_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
         self.endPendingCallRegion();
@@ -4994,10 +4982,7 @@ pub const Machine = struct {
         else
             dying.deinitReturned(self.ctx);
         vm_opcodes.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
-        std.debug.assert(rt.stack.call_depth >= chain_budget.extra_depth);
-        std.debug.assert(rt.stack.bytecode_bytes >= chain_budget.planned_stack_bytes);
-        rt.stack.call_depth -= chain_budget.extra_depth;
-        rt.stack.bytecode_bytes -= chain_budget.planned_stack_bytes;
+        rt.stack.releaseFrames(chain_budget.extra_depth, chain_budget.planned_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
         self.endPendingCallRegion();
@@ -5380,21 +5365,16 @@ test "no-suspend async overflow allocation failure leaves published roots intact
 }
 
 // ----- Active-invocation root tracing -----
-// Exec-owned no-fail root walk for `JSRuntime.active_invocation`.
-//
-// Core only sees `ActiveInvocationTrace` at offset 0 of the published record.
+// Exec-owned no-fail root walk for `JSRuntime.execution.active_invocation`,
+// reached through `engine_services.traceActiveInvocations`.
 //
 // Live windows only: typed Frame slices, Stack `top_ptr` prefix, VarRef
 // cells that are present, and Entry.native_caller when that slot is a
 // JSValue. Unused slab/stack capacity is not visited.
 const RootTraceError = core.runtime.RootTraceError;
 const RootVisitor = core.runtime.RootVisitor;
-comptime {
-    std.debug.assert(@offsetOf(ActiveInvocation, "header") == 0);
-}
-
-pub fn traceRoots(invocation_ptr: *anyopaque, visitor: *RootVisitor) RootTraceError!void {
-    var current: ?*ActiveInvocation = @ptrCast(@alignCast(invocation_ptr));
+pub fn traceRoots(innermost: *ActiveInvocation, visitor: *RootVisitor) RootTraceError!void {
+    var current: ?*ActiveInvocation = innermost;
     while (current) |invocation| {
         try traceMachine(invocation.machine, visitor);
         current = invocation.previous;

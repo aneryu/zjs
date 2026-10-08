@@ -501,7 +501,7 @@ fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.Arra
         var high: ?u16 = null;
         while (iterator.next()) |chunk| {
             for (0..chunk.len()) |index| {
-                try rt.pollNativeWork();
+                try rt.interrupt.pollNativeWork();
                 const unit: u16 = switch (chunk) {
                     .latin1 => |bytes| bytes[index],
                     .utf16 => |units| units[index],
@@ -590,7 +590,7 @@ fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(
     const rt = ctx.runtime;
     var index: usize = 0;
     while (index < bytes.len) {
-        try ctx.runtime.pollNativeWork();
+        try ctx.runtime.interrupt.pollNativeWork();
         if (bytes[index] != '%') {
             try out.append(rt.nativeAllocator(), bytes[index]);
             index += 1;
@@ -663,7 +663,7 @@ fn decodeBytesInto(ctx: *core.JSContext, global: ?*core.Object, dest: []u8, byte
     var index: usize = 0;
     var len: usize = 0;
     while (index < bytes.len) {
-        try ctx.runtime.pollNativeWork();
+        try ctx.runtime.interrupt.pollNativeWork();
         if (bytes[index] != '%') {
             dest[len] = bytes[index];
             len += 1;

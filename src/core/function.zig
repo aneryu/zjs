@@ -244,7 +244,7 @@ pub fn nativeDataFunctionWithPrototype(
 }
 
 pub fn nativeFunctionForGlobal(rt: *JSRuntime, global: *Object, name: []const u8, length: i32) !JSValue {
-    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
     const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
     return nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, 2);
 }

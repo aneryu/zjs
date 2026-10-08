@@ -1039,17 +1039,11 @@ test "typedArraySetCall roots typed array snapshot while reading source" {
     const function_object = try core.Object.create(rt, core.class.ids.object, null);
     const args = [_]core.JSValue{source_value};
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = ActiveRootValueProbe{
         .rt = rt,
     };
-    rt.gc.heap_budget.probe = ActiveRootValueProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = ActiveRootValueProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     _ = (try typedArraySetCall(ctx, null, global, target_value, function_object, &args, null, null)) orelse return error.TypeError;
 
@@ -2428,7 +2422,7 @@ pub noinline fn arrayFillCall(
         while (slice_start < capped_final) {
             const slice_end = @min(capped_final, slice_start + typed_array_fill_slice);
             try core.typed_array.typedArrayFillRange(ctx.runtime, object, @intCast(slice_start), @intCast(slice_end), value);
-            try ctx.runtime.pollNativeBulkWork(slice_end - slice_start);
+            try ctx.runtime.interrupt.pollNativeBulkWork(slice_end - slice_start);
             slice_start = slice_end;
         }
         return receiver_object_value;
@@ -4649,7 +4643,7 @@ pub fn flattenIntoArray(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
-    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     var target_index = start;
     var source_index: usize = 0;
     while (source_index < source_length) : (source_index += 1) {
@@ -5405,7 +5399,7 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-create-array-from-args-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const arg_value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{arg_value};
@@ -5423,7 +5417,7 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
         try std.testing.expect(stored.same(arg_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -5568,7 +5562,7 @@ pub noinline fn arrayJoinCall(
     // bounds this at the JS_CallInternal stack guard reached via JS_ToString
     // (InternalError "stack overflow"); zjs's native join loop needs its own check
     // at the entry to match instead of crashing.
-    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.NullishToObject;
     const object_value = if (this_value.is(.object)) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = core.value_semantics.objectFromValue(object_value) orelse return null;
@@ -5634,7 +5628,7 @@ pub fn fastDensePrimitiveArrayJoin(
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.nativeAllocator());
     for (0..length) |index| {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         const item = elements[index];
         if (!canFastJoinPrimitive(item)) return null;
         if (index != 0) try bytes.appendSlice(rt.nativeAllocator(), separator.items);
@@ -5706,7 +5700,7 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     const key = try rt.internAtom("entry");
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-object-entry-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, .all));
 
     const old_threshold = rt.gcThreshold();
@@ -5722,7 +5716,7 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -5736,7 +5730,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     const key = try rt.internAtom("value");
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-object-values-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, .all));
 
     const args = [_]core.JSValue{source.value()};
@@ -5753,7 +5747,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -6491,7 +6485,7 @@ test "array iteratorResult roots direct function bytecode value while creating r
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -6508,7 +6502,7 @@ test "array iteratorResult roots direct function bytecode value while creating r
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -6517,7 +6511,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const element_value = core.JSValue.functionBytecode(&fb.header);
     const values = [_]core.JSValue{element_value};
@@ -6535,7 +6529,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
         try std.testing.expect(stored.same(element_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

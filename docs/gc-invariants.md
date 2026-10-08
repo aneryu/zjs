@@ -251,8 +251,8 @@ continue to use scoped frames and require stable source storage.
 
 Precise roots: `pin_entries`, value root frames, active jobs, interpreter
 frames and operand stack (`inline_calls.zig` `traceMachine`),
-`runtime.traceRoots`, root providers. **In production only container/window
-value-root frames are linked** (`runtime.zig`); scalar `rootValues`/`rootObjects` are compiled
+`JSRuntime.traceActiveRoots`, root providers. **In production only container/window
+value-root frames are linked** (`core/roots.zig`); scalar `rootValues`/`rootObjects` are compiled
 out, and the conservative native stack/register scan (`gc_conservative.zig`)
 is the net for every Zig local that holds a heap reference across an
 allocation. Until lane R1 lands, deleting or narrowing the conservative scan

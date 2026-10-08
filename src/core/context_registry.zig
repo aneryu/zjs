@@ -25,6 +25,52 @@ pub const Lists = struct {
     /// root-provider traversal until publication.
     constructing_head: ?*JSContext = null,
     constructing_tail: ?*JSContext = null,
+
+    pub const Scope = enum { live_only, include_constructing };
+
+    /// Published realms first, then (for `.include_constructing`) realms
+    /// under construction. Borrowed: the walk must not destroy a realm.
+    pub const Iterator = struct {
+        current: ?*JSContext,
+        constructing: ?*JSContext,
+        in_live: bool = true,
+
+        pub fn next(self: *Iterator) ?*JSContext {
+            while (true) {
+                if (self.current) |ctx| {
+                    self.current = if (self.in_live) ctx.runtime_next else ctx.construction_next;
+                    return ctx;
+                }
+                if (!self.in_live) return null;
+                self.in_live = false;
+                self.current = self.constructing;
+            }
+        }
+    };
+
+    pub fn iterator(self: *const Lists, scope: Scope) Iterator {
+        return .{
+            .current = self.live_head,
+            .constructing = if (scope == .include_constructing) self.constructing_head else null,
+        };
+    }
+
+    /// The realm whose global object is `global`; live realms are searched
+    /// before constructing ones.
+    /// Two plain loops rather than `iterator`: this lookup sits on native
+    /// call paths, where the iterator's list-switch state costs measurably.
+    pub fn forGlobal(self: *const Lists, global: *const Object, comptime scope: Scope) ?*JSContext {
+        var live = self.live_head;
+        while (live) |ctx| : (live = ctx.runtime_next) {
+            if (ctx.global == global) return ctx;
+        }
+        if (comptime scope == .live_only) return null;
+        var constructing = self.constructing_head;
+        while (constructing) |ctx| : (constructing = ctx.construction_next) {
+            if (ctx.global == global) return ctx;
+        }
+        return null;
+    }
 };
 
 pub fn linkLive(rt: *JSRuntime, ctx: *JSContext) void {
@@ -93,43 +139,14 @@ pub fn unlinkLive(rt: *JSRuntime, ctx: *JSContext) void {
 
 pub fn assertNoHostRealmRefs(rt: *JSRuntime) void {
     if (comptime !std.debug.runtime_safety) return;
-    var current = rt.contexts.live_head;
-    while (current) |ctx| : (current = ctx.runtime_next) {
-        std.debug.assert(ctx.host_api_release_consumed);
-    }
-    var constructing = rt.contexts.constructing_head;
-    while (constructing) |ctx| : (constructing = ctx.construction_next) {
-        std.debug.assert(ctx.host_api_release_consumed);
-    }
-}
-
-pub fn liveForGlobal(rt: *const JSRuntime, global: *const Object) ?*JSContext {
-    var current = rt.contexts.live_head;
-    while (current) |ctx| : (current = ctx.runtime_next) {
-        if (ctx.global == global) return ctx;
-    }
-    return null;
-}
-
-pub fn anyForGlobal(rt: *const JSRuntime, global: *const Object) ?*JSContext {
-    if (liveForGlobal(rt, global)) |ctx| return ctx;
-    var current = rt.contexts.constructing_head;
-    while (current) |ctx| : (current = ctx.construction_next) {
-        if (ctx.global == global) return ctx;
-    }
-    return null;
+    var realms = rt.contexts.iterator(.include_constructing);
+    while (realms.next()) |ctx| std.debug.assert(ctx.host_api_release_consumed);
 }
 
 pub fn invalidateStandardArrayPrototype(rt: *JSRuntime, object_prototype: *Object) void {
     rt.assertOwnerThread();
-    var live = rt.contexts.live_head;
-    while (live) |ctx| : (live = ctx.runtime_next) {
-        invalidateOneStandardArrayPrototype(ctx, object_prototype);
-    }
-    var constructing = rt.contexts.constructing_head;
-    while (constructing) |ctx| : (constructing = ctx.construction_next) {
-        invalidateOneStandardArrayPrototype(ctx, object_prototype);
-    }
+    var realms = rt.contexts.iterator(.include_constructing);
+    while (realms.next()) |ctx| invalidateOneStandardArrayPrototype(ctx, object_prototype);
 }
 
 fn invalidateOneStandardArrayPrototype(ctx: *JSContext, object_prototype: *Object) void {
@@ -142,8 +159,9 @@ fn invalidateOneStandardArrayPrototype(ctx: *JSContext, object_prototype: *Objec
 }
 
 pub fn initialArrayShape(rt: *const JSRuntime, prototype: ?*const Object) ?*shape.Shape {
-    var current = rt.contexts.live_head;
-    while (current) |ctx| : (current = ctx.runtime_next) {
+    // Plain loops, like `Lists.forGlobal`: array creation reaches this.
+    var live = rt.contexts.live_head;
+    while (live) |ctx| : (live = ctx.runtime_next) {
         const initial = ctx.array_shape orelse continue;
         if (initial.proto == prototype) return initial;
     }
@@ -155,6 +173,8 @@ pub fn initialArrayShape(rt: *const JSRuntime, prototype: ?*const Object) ?*shap
     return null;
 }
 
+/// Reserve a prototype slot in every realm before a class id is published.
+/// The lists are indexes; `RealmRef` keeps each realm alive across growth.
 pub fn ensureClassPrototypeCapacity(rt: *JSRuntime, class_id: class.ClassId) !void {
     try rt.requireOwnerThread();
     var current_owner = if (rt.contexts.live_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};

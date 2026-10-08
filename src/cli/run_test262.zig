@@ -651,7 +651,7 @@ fn runEmbeddedEngine(
     }
     const global_obj = try zjs.globalObjectPtr(ctx);
     try installTest262Globals(rt, ctx, global_obj);
-    rt.can_block = can_block;
+    rt.host_wait.can_block = can_block;
     // Install the file-loader dynamic import (mirrors the CLI src/cli/zjs.zig
     // and qjs's run-test262 providing the module loader): [async] dynamic-import
     // tests are SCRIPTS, so import() must work in script mode. The state must

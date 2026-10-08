@@ -1000,7 +1000,7 @@ pub const JSContext = struct {
         if (options.finalize != null and options.state == null) return error.InvalidEngineState;
         const realm_global_value = options.realm_global orelse try self.globalObject();
         const realm_global = try Object.expect(realm_global_value);
-        const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
+        const realm = rt.contexts.forGlobal(realm_global, .include_constructing) orelse return error.InvalidEngineState;
         const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
         const spec = specFrom(spec_or_fn);
         var template = spec.template;

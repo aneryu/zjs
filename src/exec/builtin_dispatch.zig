@@ -294,8 +294,7 @@ pub const NativeCall = struct {
 };
 
 pub inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
-    const opaque_ptr = ctx.runtime.active_native_call orelse return null;
-    return @ptrCast(@alignCast(opaque_ptr));
+    return ctx.runtime.execution.active_native_call;
 }
 
 /// Recover the current exec environment while preserving the QJS-style typed
@@ -402,13 +401,13 @@ pub const NativeBacktraceScope = struct {
             .data = &self.data,
             .resolver = resolveNativeBacktrace,
         };
-        self.ctx.pushActiveBacktraceFrame(&self.frame);
+        self.ctx.runtime.execution.pushBacktrace(&self.frame);
         self.active = true;
     }
 
     pub fn deinit(self: *NativeBacktraceScope) void {
         if (!self.active) return;
-        self.ctx.popActiveBacktraceFrame(&self.frame);
+        self.ctx.runtime.execution.popBacktrace(&self.frame);
         self.active = false;
     }
 };
@@ -438,7 +437,7 @@ inline fn preflightCFunctionStack(
         formal_length,
         @sizeOf(core.JSValue),
     ) catch return throwCFunctionStackOverflow(caller_ctx, caller_global);
-    if (!caller_ctx.runtime.checkNativeStackOverflow(planned_stack_bytes)) return;
+    if (!caller_ctx.runtime.stack.checkNativeOverflow(planned_stack_bytes)) return;
     return throwCFunctionStackOverflow(caller_ctx, caller_global);
 }
 
@@ -475,7 +474,7 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
     // An interrupt keeps the VM's prebuilt uncatchable InternalError (a
     // native -> bytecode callback returns it through this seam; rebuilding
     // it would expose it to the suspended outer catch); a native loop's
-    // bare poll result (`JSRuntime.pollNativeWork`) gets one.
+    // bare poll result (`interrupt.State.pollNativeWork`) gets one.
     if (@as(anyerror, err) == error.Interrupted) {
         exception_ops.raiseBareInterrupt(ctx, error_global, err);
         return;
@@ -627,9 +626,8 @@ inline fn callInternalRecordDirectWithEnvironment(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = view.ctx.runtime.active_native_call;
-    view.ctx.runtime.active_native_call = &native_env;
-    defer view.ctx.runtime.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.execution.enterNativeCall(&native_env);
+    defer view.ctx.runtime.execution.leaveNativeCall(previous_native_call);
 
     return callTypedInternalRecordDirect(view.ctx, this_value, record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);
@@ -660,7 +658,7 @@ pub inline fn callRecordFromVmInRealm(
     // with the arg_buf reservation): `length` is a u8, so the byte count
     // cannot overflow -- no checked multiply.
     const planned_stack_bytes: usize = @as(usize, record.arity) * @sizeOf(core.JSValue);
-    if (ctx.runtime.checkNativeStackOverflow(planned_stack_bytes)) {
+    if (ctx.runtime.stack.checkNativeOverflow(planned_stack_bytes)) {
         throwCFunctionStackOverflow(ctx, global) catch |err| return nativeFromHostError(ctx, global, err);
         return nativeFromHostError(ctx, global, error.StackOverflow);
     }
@@ -670,8 +668,8 @@ pub inline fn callRecordFromVmInRealm(
     // flag): the qjs `sf` link of js_call_c_function.
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{ .data = &bt_data, .resolver = resolveNativeBacktrace };
-    realm.pushActiveBacktraceFrame(&bt_frame);
-    defer realm.popActiveBacktraceFrame(&bt_frame);
+    realm.runtime.execution.pushBacktrace(&bt_frame);
+    defer realm.runtime.execution.popBacktrace(&bt_frame);
     // K2 prim-self leaf (lane K): receiver-taking typed arm; a miss (or a
     // K1 leaf whose tags missed in the handler) takes the fallback below.
     if (record.kind == .method_leaf) {
@@ -708,13 +706,12 @@ pub inline fn callManagedFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.current_backtrace_frame = &bt_frame;
+    rt.execution.pushBacktrace(&bt_frame);
     const result = entry.managed()(realm, this_value, args.ptr, @intCast(args.len), entry, func_obj);
-    rt.current_backtrace_frame = bt_frame.previous;
+    rt.execution.popBacktrace(&bt_frame);
     return result;
 }
 
@@ -731,13 +728,12 @@ pub inline fn callGetterFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.current_backtrace_frame = &bt_frame;
+    rt.execution.pushBacktrace(&bt_frame);
     const result = entry.getter()(realm, receiver, entry);
-    rt.current_backtrace_frame = bt_frame.previous;
+    rt.execution.popBacktrace(&bt_frame);
     return result;
 }
 
@@ -755,13 +751,12 @@ pub inline fn callMethodManagedFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.current_backtrace_frame = &bt_frame;
+    rt.execution.pushBacktrace(&bt_frame);
     const result = entry.methodManaged()(realm, self_ptr, this_value, args.ptr, @intCast(args.len), entry);
-    rt.current_backtrace_frame = bt_frame.previous;
+    rt.execution.popBacktrace(&bt_frame);
     return result;
 }
 
@@ -787,9 +782,8 @@ noinline fn callRecordWithEnvironment(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = realm.runtime.active_native_call;
-    realm.runtime.active_native_call = &native_env;
-    defer realm.runtime.active_native_call = previous_native_call;
+    const previous_native_call = realm.runtime.execution.enterNativeCall(&native_env);
+    defer realm.runtime.execution.leaveNativeCall(previous_native_call);
     const result = invokeEntry(realm, this_value, record, args, func_obj) catch |err| {
         return nativeFromHostError(realm, realm_global, err);
     };
@@ -1377,9 +1371,8 @@ fn callConstructRecordImpl(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = view.ctx.runtime.active_native_call;
-    view.ctx.runtime.active_native_call = &native_env;
-    defer view.ctx.runtime.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.execution.enterNativeCall(&native_env);
+    defer view.ctx.runtime.execution.leaveNativeCall(previous_native_call);
 
     return callTypedInternalRecordDirect(view.ctx, core.JSValue.undefinedValue(), record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);

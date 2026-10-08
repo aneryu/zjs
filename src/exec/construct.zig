@@ -47,7 +47,7 @@ test "weakRefWithPrototype roots direct symbol target while creating weak ref" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const weak_ref_value = try weakRefWithPrototype(rt, symbol_value, null);
     const weak_ref = try expectObject(weak_ref_value);
 
@@ -56,9 +56,9 @@ test "weakRefWithPrototype roots direct symbol target while creating weak ref" {
         try std.testing.expect(live.same(symbol_value));
     }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.clearWeakRefKeptAlive();
+    rt.microtasks.clearKeptObjects(rt.nativeAllocator());
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect((try weak_ref.weakRefDeref(rt)).is(.undefined_value));
 }
@@ -84,7 +84,7 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const wrapper_value = try constructPrimitiveWrapper(rt, core.class.ids.symbol, null, symbol_value);
     const wrapper = try expectObject(wrapper_value);
 
@@ -92,7 +92,7 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

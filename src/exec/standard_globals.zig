@@ -710,10 +710,10 @@ fn defineLazyNativeAccessorPairAtom(
 }
 
 fn bootstrapPropertyRealm(rt: *core.JSRuntime, target: *core.Object, explicit_global: ?*core.Object) !*core.RealmContext {
-    if (explicit_global) |global| return rt.contextForGlobalIncludingConstructing(global) orelse error.InvalidBuiltinRegistry;
+    if (explicit_global) |global| return rt.contexts.forGlobal(global, .include_constructing) orelse error.InvalidBuiltinRegistry;
     if (target.nativeFunctionRealm()) |realm| return realm;
     if (target.bytecodeFunctionRealmContext()) |realm| return realm;
-    return rt.contextForGlobalIncludingConstructing(target) orelse error.InvalidBuiltinRegistry;
+    return rt.contexts.forGlobal(target, .include_constructing) orelse error.InvalidBuiltinRegistry;
 }
 
 /// Bulk builtin-install path for a `Method[]` table. Caller must guarantee
@@ -1041,7 +1041,7 @@ fn defineConstructor(
     static_methods: []const Method,
     prototype_methods: []const Method,
 ) !core.JSValue {
-    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
     const constructor_value = try core.function.nativeFunctionWithPrototypeAndCapacity(
         realm,
         constructor_parent,
@@ -1238,12 +1238,12 @@ fn installStandardConstructorWithPrototype(
     constructors[@intFromEnum(kind)] = constructor;
 
     if (constructorClassPrototypeId(kind)) |class_id| {
-        const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+        const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
         try realm.setClassPrototype(class_id, prototype);
     }
     if (nativeErrorKind(kind)) |error_kind| {
-        const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+        const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
         realm.setNativeErrorPrototype(error_kind, prototype);
     }
@@ -1345,7 +1345,7 @@ fn installStandardConstructors(
     global: *core.Object,
     constructors: *[constructor_kind_count]?*core.Object,
 ) !void {
-    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
 
     // QuickJS basic-object bootstrap: Object.prototype exists first with a
     // null prototype, then Function.prototype is constructed as a true C

@@ -19,7 +19,7 @@ const MajorPhase = gc.MajorPhase;
 const Request = gc.Request;
 const RequestReason = gc.RequestReason;
 const RequestUrgency = gc.RequestUrgency;
-const SchedulerPoint = gc.SchedulerPoint;
+const PollMode = gc.PollMode;
 
 pub const Scheduler = struct {
     policy: Policy = .{},
@@ -92,11 +92,13 @@ pub const Scheduler = struct {
         return true;
     }
 
-    pub fn shouldRunMajorAt(self: Scheduler, point: SchedulerPoint, over_threshold: bool) bool {
-        if (point == .urgent or over_threshold) return true;
+    /// Whether a poll of `mode` runs the major now. A crossed heap threshold
+    /// always does; otherwise only a pending request the mode serves.
+    pub fn shouldRunMajorAt(self: Scheduler, mode: PollMode, over_threshold: bool) bool {
+        if (mode == .urgent or over_threshold) return true;
         const pending = self.pendingMajorRequest() orelse return false;
-        return switch (point) {
-            .allocation_slow_path, .idle => true,
+        return switch (mode) {
+            .normal => true,
             // Atom growth allocates nothing on the heap, so no allocation
             // boundary may follow it; the interpreter's safepoint serves it.
             .callback_boundary => pending.urgency == .urgent,
@@ -119,16 +121,8 @@ pub const Scheduler = struct {
         self.major_phase = phase;
     }
 
-    pub fn activeMajorReason(self: Scheduler) ?RequestReason {
-        return self.major_reason;
-    }
-
-    pub fn abortMajorCycle(self: *Scheduler) void {
-        self.major_phase = .idle;
-        self.major_reason = null;
-    }
-
-    pub fn finishMajorCycle(self: *Scheduler) void {
+    /// Close the major cycle, whether it completed or failed.
+    pub fn endMajorCycle(self: *Scheduler) void {
         self.major_phase = .idle;
         self.major_reason = null;
     }

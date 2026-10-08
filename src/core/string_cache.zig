@@ -64,7 +64,7 @@ pub inline fn singleByte(rt: *JSRuntime, byte: u8) !*string.String {
     return createSingleByte(rt, byte);
 }
 
-pub noinline fn createSingleByte(rt: *JSRuntime, byte: u8) !*string.String {
+noinline fn createSingleByte(rt: *JSRuntime, byte: u8) !*string.String {
     const created = try string.String.createLatin1(rt, &.{byte});
     rt.strings.single_byte[byte] = created;
     return created;

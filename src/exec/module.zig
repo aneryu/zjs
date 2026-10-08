@@ -1478,13 +1478,10 @@ pub const DynamicImportState = struct {
     pub fn runJobs(self: *DynamicImportState, facade_context: *core.JSContext) !void {
         try self.runtime.requireOwnerThread();
         std.debug.assert(facade_context.runtime == self.runtime);
-        const checkpoint = &self.runtime.microtasks;
-        if (checkpoint.reporting) return error.MicrotaskReentry;
-        if (checkpoint.running or checkpoint.scope_depth != 0) return;
-        checkpoint.running = true;
-        defer checkpoint.running = false;
+        const drain = (try self.runtime.microtasks.beginDrain()) orelse return;
+        defer drain.leave();
         try drainModuleJobLoop(self, facade_context, self.output);
-        self.runtime.clearWeakRefKeptAlive();
+        drain.complete(self.runtime.nativeAllocator());
     }
 
     /// Announce the scheduling lists to the tracer. Called from
@@ -1956,7 +1953,7 @@ pub fn evalModuleGraph(
     // measures against a precise base. The construction-time baseline already
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
-    if (context.runtime.stack.call_depth == 0) runtime.updateNativeStackTop();
+    if (context.runtime.stack.call_depth == 0) runtime.stack.captureNativeTop();
     const normalized_filename = resolveModuleSource(context, allocator, null, filename, .entry) catch |err| switch (err) {
         error.ModuleNotFound => {
             try throwCouldNotLoadModule(context, filename);
@@ -2702,7 +2699,7 @@ fn drainModuleJobLoop(state: *DynamicImportState, context: *core.JSContext, outp
             }
         }
         if (try drainOneModuleQueuedOrHostJob(runtime, context, output)) continue;
-        if (!runtime.microtasks.running) runtime.clearWeakRefKeptAlive();
+        runtime.microtasks.endStandaloneJob(runtime.nativeAllocator());
         return;
     }
 }

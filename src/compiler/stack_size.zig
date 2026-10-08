@@ -230,7 +230,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
     var stack_len_max: u16 = 0;
 
     while (pending_len != 0) {
-        if (options.interrupt_runtime) |rt| try rt.pollNativeWork();
+        if (options.interrupt_runtime) |rt| try rt.interrupt.pollNativeWork();
         pending_len -= 1;
         const pos = pending_pc[pending_len];
         var stack_len = stack_level_tab[pos];

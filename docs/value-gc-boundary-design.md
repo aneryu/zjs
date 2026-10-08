@@ -243,7 +243,7 @@ V2 先保留这个内部编码协议，以 RefKind 验证真实对象；是否�
 | slices.mutable / windowed | 从 slice header／实时 live_len 取得实际元素 | 保留可增长容器的重新取址规则 |
 | slices.borrowed | constValues 逐元素走只读根策略 | 生产收集器预先保留目标页；不写只读数组，不允许先搬迁后补 pin |
 | slices.cells / borrowed_cells | constHeader 访问 VarRef 身份 | 当前载体地址稳定；不再将临时 JSValue 当作可更新根 |
-| Runtime.current_exception、handles、weakref_kept_alive | 实际字段／RootSlot.value | 可回写；kept-alive 期间是强边，不等于弱 handle |
+| Runtime.current_exception、handles、microtasks.weakref_kept_alive | 实际字段／RootSlot.value | 可回写；kept-alive 期间是强边，不等于弱 handle |
 | RootSet providers、ValueRootBuffer | provider 回调；buffer 稳定 backing 中的实际槽 | 注册失败、容器增长及撤销生命周期另审 |
 | Runtime strings / AtomTable | stringSlot/stringField；atom body 装箱后显式写回 | 已有正确的回写适配，不删除它们 |
 | Job queue、active job、active invocation | 分别委托 traceRoots | 参数为实际槽；realm 按 Header 访问；外部回调协议需明确能否保留 slot 地址 |
@@ -284,10 +284,10 @@ V3-B 的新增职责是生产 visitor 完整性与 manual 边语义，不重写�
 
 | 入口 | 已核对行为 | 借用契约影响 |
 | --- | --- | --- |
-| Registry.requestGC / Runtime.triggerGCOnAllocation | 设置请求；trigger 调用 requestGCForAllocation | 请求不是立刻收集，不能把每次通知误标成 GC |
+| Registry.requestGC / gc_driver.requestGCForAllocation | 设置请求；分配通知直接调用 requestGCForAllocation | 请求不是立刻收集，不能把每次通知误标成 GC |
 | collectBeforeObjectAllocation | 可能 pollGC(.normal) | 潜在 GC 点 |
-| retryHeapLimitOnce | collectFull(.engine_active) | 限额重试是潜在 GC 点，即使外层返回 void |
-| pollGC | owner 检查、gc_driver.continuePoll | 驱动路径可收集 |
+| gc_driver.HeapLimitRetry | collectFull()（.engine_active） | 限额重试是潜在 GC 点，即使外层返回 void |
+| pollGC | gc_driver.pollGC（owner 检查、minor/major 路由） | 驱动路径可收集 |
 | forceGC | 进入 urgent poll | 显式 GC 边界 |
 | collectFull | 处理未完成 destruction、abort 旧 cycle、collectCycles | guard 防递归不等于通用禁止 GC 契约 |
 | collectCycles / collectMinor | 直接进入 Collector；minor 有代状态门槛 | 禁止 GC 检查需要覆盖底层入口，避免直接调用绕过 |
@@ -326,7 +326,7 @@ nursery_enabled 仍为 false；这些显式启用 nursery 的用例不授权改�
 **先区分分配入口**：[runtime_alloc.zig](../src/runtime_alloc.zig) 的 nativeAllocator 在生产直接使用 backing allocator，
 诊断构建的 diagnosticAlloc 也调用 NoTrigger 路径；普通 ArrayList.append 不会由这层自动进入 GC。
 allocNative / probedAllocator 则可能调用 noteAllocationProbe：测试安装的 probe 可执行额外动作，
-owner_notify 是否执行收集由具体回调决定，默认 triggerGCOnAllocation 只请求 GC。
+分配通知（gc_driver.requestGCForAllocation）只请求 GC，不直接收集。
 因此既不能把所有分配都当作 GC，也不能把有 probe 的注册过程当作无条件无重入。
 旧注释中“原生数组增长就是 GC 点”的表述不能替代上述当前实现。
 
@@ -704,7 +704,7 @@ check/test 13/13 步及 2145/2145 测试通过，Debug／ReleaseFast 契约程�
 退出检查 LIFO 和原始地址，拒绝重复激活；非测试 Release 构建抹除 scope 和 Runtime 链字段。
 它不充当根或 pin，不阻止显式修改原生缓冲，也不延长借用生命周期。
 
-collectFull、pollGC、gc_driver.continuePoll、
+collectFull、pollGC（均在 gc_driver）、
 collectCycles、collectMinor、destroyDoomedSlice、finishPendingDestruction
 均在 collector 状态变更及提前返回之前检查；Runtime 销毁检查仍活动的 scope。
 违规请求直接 panic，不用静默跳过回收维护表面的安全。

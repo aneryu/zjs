@@ -627,7 +627,7 @@ fn divRemByLimbInPlace(limbs: []Limb, divisor: Limb, interrupt: anytype) error{I
     var remainder: Limb = if (shift == 0) 0 else limbs[limbs.len - 1] >> @intCast(limb_bits - @as(u7, shift));
     var index = limbs.len;
     while (index > 0) {
-        if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.pollNativeWork();
+        if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.interrupt.pollNativeWork();
         index -= 1;
         // `limbs[index - 1]` is read before its own step overwrites it.
         var low = limbs[index] << shift;
@@ -1099,7 +1099,7 @@ fn parseDigitChunks(allocator: std.mem.Allocator, digits: []const u8, base: u32,
         chunk = chunk * radix + digit;
         chunk_scale *= radix;
         if (chunk_scale > std.math.maxInt(Limb) / radix) {
-            if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.pollNativeBulkWork(out.limbs.len * @sizeOf(Limb));
+            if (@TypeOf(interrupt) != @TypeOf(null)) try interrupt.interrupt.pollNativeBulkWork(out.limbs.len * @sizeOf(Limb));
             try mulSmallInPlace(&out, chunk_scale);
             try addSmallInPlace(&out, chunk);
             chunk = 0;

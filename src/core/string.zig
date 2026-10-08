@@ -216,7 +216,7 @@ pub const StringRope = struct {
     /// memory and retries once; a second failure is fatal.
     pub fn flattenInfallible(self: *StringRope) *String {
         return self.flatten() catch {
-            _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
+            _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
             return self.flatten() catch @panic("zjs: out of memory while flattening string rope");
         };
     }
@@ -695,7 +695,7 @@ pub const String = struct {
                     while (rest.len != 0) {
                         const slice = rest[0..@min(rest.len, ascii_case_slice)];
                         for (slice) |unit| if (unit >= 0x80) return null;
-                        try rt.pollNativeBulkWork(slice.len);
+                        try rt.interrupt.pollNativeBulkWork(slice.len);
                         rest = rest[slice.len..];
                     }
                 },
@@ -718,7 +718,7 @@ pub const String = struct {
                         out[offset] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
                         offset += 1;
                     }
-                    try rt.pollNativeBulkWork(slice.len);
+                    try rt.interrupt.pollNativeBulkWork(slice.len);
                     rest = rest[slice.len..];
                 }
             },
@@ -2499,7 +2499,7 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     try std.testing.expect(fixed.eqlBytes("abc"));
     try std.testing.expectEqual(fixed_allocations + 1, rt.allocation_diagnostics.allocation_count);
     dropGcPtr(&fixed);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(fixed_allocations, rt.allocation_diagnostics.allocation_count);
 
     const growable_allocations = rt.allocation_diagnostics.allocation_count;
@@ -2610,20 +2610,14 @@ test "string materialization keeps graph alive across allocation probe collectio
         fn collect(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
             };
         }
     };
     var probe = Probe{ .rt = rt };
-    const saved_fn = rt.gc.heap_budget.probe;
-    const saved_ctx = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.collect;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_fn;
-        rt.gc.heap_budget.probe_ctx = saved_ctx;
-    }
+    const saved_fn = rt.gc.heap_budget.installProbe(.{ .run = Probe.collect, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_fn);
     try ensureFlat(rt, input.readOnly(), output);
     if (probe.failure) |err| return err;
     try std.testing.expect(probe.calls > 0);
@@ -2719,7 +2713,7 @@ fn testReentrantTailCopy(mode: enum { flatten, concat, slice, suffix, lower, upp
             };
             // Linearization dropped the old buffer edge. Reclaim it before
             // the outer materialization resumes its copy.
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
                 return;
             };
@@ -2747,14 +2741,8 @@ fn testReentrantTailCopy(mode: enum { flatten, concat, slice, suffix, lower, upp
         .buffer_capacity = old_buffer.capacity,
         .once = mode == .append or mode == .append_wide,
     };
-    const saved_fn = rt.gc.heap_budget.probe;
-    const saved_ctx = rt.gc.heap_budget.probe_ctx;
-    rt.gc.heap_budget.probe = Probe.run;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_fn;
-        rt.gc.heap_budget.probe_ctx = saved_ctx;
-    }
+    const saved_fn = rt.gc.heap_budget.installProbe(.{ .run = Probe.run, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_fn);
     switch (mode) {
         .concat => {
             var parts = [_]JSValue{ try input.get(rt), try input.get(rt), JSValue.int32(123) };

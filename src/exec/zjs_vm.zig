@@ -375,7 +375,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         // Runtime teardown and host-explicit cycle removal keep the
         // declared-roots contract; this exit seam is the engine-active case.
         if (env.break_var_ref_cycles_on_exit)
-            _ = env.ctx.runtime.collectFull(null, .engine_active) catch {};
+            _ = env.ctx.runtime.collectFull() catch {};
     }
     defer {
         if (env.generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
@@ -406,18 +406,15 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         .data = &root_backtrace_view,
         .resolver = inline_calls.resolveMachineBacktraceView,
     };
-    env.ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
-    defer env.ctx.popActiveBacktraceFrame(&active_backtrace_frame);
+    env.ctx.runtime.execution.pushBacktrace(&active_backtrace_frame);
+    defer env.ctx.runtime.execution.popBacktrace(&active_backtrace_frame);
 
     var invocation = inline_calls.ActiveInvocation{
         .machine = &machine,
         .current_backtrace_view = &root_backtrace_view,
     };
-    invocation.header = .{ .traceRoots = inline_calls.traceRoots };
-    invocation.previous = inline_calls.activeInvocation(env.ctx.runtime);
-    const previous_invocation = env.ctx.runtime.active_invocation;
-    env.ctx.runtime.active_invocation = &invocation;
-    defer env.ctx.runtime.active_invocation = previous_invocation;
+    invocation.previous = env.ctx.runtime.execution.enterInvocation(&invocation);
+    defer env.ctx.runtime.execution.leaveInvocation(invocation.previous);
     // Register last so inline frames are drained while both the invocation
     // authority and its backtrace view remain observable.
     defer machine.deinit();

@@ -10,7 +10,7 @@ const parser = zjs.parser;
 const parser_tests = @import("../parser/tests.zig");
 
 fn reclaimNow(rt: *core.JSRuntime) void {
-    _ = rt.collectForTest();
+    _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
 }
 
 test "bytecode owns its code and a module record its metadata" {
@@ -145,7 +145,7 @@ test "bytecode module record add failure releases duplicated atom references" {
     try std.testing.expectEqual(@as(usize, 0), record.imports.len);
 
     name_roots.deactivate(rt);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expect(rt.atoms.name(import_name) == null);
     try std.testing.expect(rt.atoms.name(local_name) == null);
@@ -944,7 +944,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     value_roots.activate(rt);
     _ = try fd.appendCpool(borrowed_value);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
 
     fd.deinit(rt);
@@ -952,7 +952,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     borrowed_value = core.JSValue.undefinedValue();
     value_roots.deactivate(rt);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) == null);
 }
 
@@ -967,7 +967,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     defer if (fd_alive) fd.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-owned-symbol");
-    var owned_value = try rt.takeSymbolValue(owned_symbol);
+    var owned_value = try rt.symbolValue(owned_symbol);
     // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
     // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
     // (that gap is tracked with the compile-time cpool roots), so the test
@@ -976,7 +976,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     value_roots.activate(rt);
     _ = try fd.appendCpoolOwned(owned_value);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
 
     fd.deinit(rt);
@@ -984,7 +984,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     owned_value = core.JSValue.undefinedValue();
     value_roots.deactivate(rt);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(owned_symbol) == null);
 }
 
@@ -1192,7 +1192,7 @@ test "resolve_labels converges for a large branch topology" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    rt.updateNativeStackTop();
+    rt.stack.captureNativeTop();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 

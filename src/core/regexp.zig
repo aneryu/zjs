@@ -9,7 +9,7 @@ const JSRuntime = @import("../runtime.zig").JSRuntime;
 pub fn libraryHost(rt: *JSRuntime) regexp_lib.Host {
     return .{
         .context = rt,
-        .interrupt_counter = &rt.regexp_interrupt_counter,
+        .interrupt_counter = &rt.interrupt.regexp_countdown,
         .checkStackOverflow = checkRuntimeStackOverflow,
         .checkTimeout = checkRuntimeTimeout,
     };
@@ -17,10 +17,10 @@ pub fn libraryHost(rt: *JSRuntime) regexp_lib.Host {
 
 fn checkRuntimeStackOverflow(context: ?*anyopaque, alloca_size: usize) bool {
     const rt: *JSRuntime = @ptrCast(@alignCast(context orelse return false));
-    return rt.checkNativeStackOverflow(alloca_size);
+    return rt.stack.checkNativeOverflow(alloca_size);
 }
 
 fn checkRuntimeTimeout(context: ?*anyopaque) bool {
     const rt: *JSRuntime = @ptrCast(@alignCast(context orelse return false));
-    return rt.runInterruptHandler();
+    return rt.interrupt.poll();
 }

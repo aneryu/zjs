@@ -133,7 +133,7 @@ fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []con
 }
 
 fn globalGc(ctx: *core.JSContext, global: ?*core.Object) HostError!core.JSValue {
-    _ = ctx.runtime.collectFull(null, .engine_active) catch |err| switch (err) {
+    _ = ctx.runtime.collectFull() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.PayloadMarkFailed => return try hostResult(exception_ops.throwInternalErrorMessage(ctx, global orelse ctx.global orelse return error.InvalidBuiltinRegistry, "GC payload marking failed")),
     };

@@ -192,38 +192,27 @@ fn setBorrowedRealm(fb: *FunctionBytecode, realm: ?*core.JSContext) void {
     std.mem.writeInt(usize, hot._ctor_alloc_pad[borrowed_realm_off..][0..@sizeOf(usize)], raw, .little);
 }
 
-fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
+/// Release the `CallerState` hanging off `fb`'s hot pad. FunctionBytecode
+/// teardown calls this through `engine_services` before clearing the code
+/// pointer; a function that never built one returns at the pad read.
+pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     const state = callerState(fb) orelse return;
     setCallerState(fb, null);
     setBorrowedRealm(fb, null);
     rt.nativeAllocator().destroy(state);
 }
 
-fn destroyCallerStateOpaque(rt: *JSRuntime, fb_ptr: *anyopaque) void {
-    const fb: *FunctionBytecode = @ptrCast(@alignCast(fb_ptr));
-    destroyCallerState(rt, fb);
-}
-
 /// TGC S3 §2.2 edge H: report the atom ids an `InlinedSite` holds to the
 /// tracer while the FunctionBytecode is being traced. (`destroyCallerState`
-/// has no mirror release — the tracer owns these edges outright.) Registered
-/// next to `small_inline.destroy` so a runtime that never built a CallerState
-/// pays nothing.
-fn traceCallerStateAtoms(
-    rt: *JSRuntime,
-    fb_ptr: *anyopaque,
-    ctx: *anyopaque,
-    visit: *const fn (ctx: *anyopaque, id: core.Atom) void,
-) void {
-    _ = rt;
-    const fb: *FunctionBytecode = @ptrCast(@alignCast(fb_ptr));
+/// has no mirror release — the tracer owns these edges outright.)
+pub fn traceCallerStateAtoms(fb: *const FunctionBytecode, visitor: anytype) !void {
     const state = callerState(fb) orelse return;
     var i: u8 = 0;
     while (i < state.inlined_len) : (i += 1) {
-        visit(ctx, state.inlined[i].callee_name);
-        visit(ctx, state.inlined[i].callee_file);
+        try core.gc_visit.atom(visitor, state.inlined[i].callee_name);
+        try core.gc_visit.atom(visitor, state.inlined[i].callee_file);
         const fwd = state.apply_forward[i];
-        if (fwd.method_atom != core.atom.null_atom) visit(ctx, fwd.method_atom);
+        if (fwd.method_atom != core.atom.null_atom) try core.gc_visit.atom(visitor, fwd.method_atom);
     }
 }
 
@@ -238,7 +227,6 @@ fn fillDefaultCallerState(state: *CallerState) void {
 }
 
 fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
-    core.execution.installSmallInlineHooks(rt, destroyCallerStateOpaque, traceCallerStateAtoms);
     if (callerState(fb)) |existing| return existing;
     const state = rt.nativeAllocator().create(CallerState) catch return null;
     fillDefaultCallerState(state);
@@ -260,10 +248,10 @@ fn hasTrailingAfterReturn(code: []const u8) bool {
 }
 
 fn budgetRemaining(rt: *const JSRuntime) usize {
-    const published = rt.small_inline.published_bytes;
+    const published = rt.execution.small_inline.published_bytes;
     const frac = published / budget_fraction_den * budget_fraction_num;
     const cap = @min(@max(frac, budget_floor_bytes), budget_cap_bytes);
-    return cap -| rt.small_inline.specialized_bytes;
+    return cap -| rt.execution.small_inline.specialized_bytes;
 }
 
 pub fn findInlinedSite(fb: *const FunctionBytecode, call_pc: u32) ?*const InlinedSite {
@@ -1290,7 +1278,7 @@ fn cloneAndExpand(
 
     owned = false;
     rt.gc.addInitializedWithSizeNoFail(&spec.header, spec.heapByteSize());
-    rt.small_inline.specialized_bytes +|= new_len;
+    rt.execution.small_inline.specialized_bytes +|= new_len;
     return spec;
 }
 

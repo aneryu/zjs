@@ -2234,15 +2234,6 @@ pub const AtomTable = struct {
         return JSValue.symbol(hdr);
     }
 
-    /// JSValue for a symbol the caller is handing over to its JS holders (the
-    /// creation path: `newSymbolValue`, private names). TGC S3-c: identical to
-    /// `symbolValue` now that there is no ID count to give back; both names
-    /// survive because the call sites read differently.
-    pub fn takeSymbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
-        const body = try self.ensureSymbolBody(rt, atom_id);
-        return JSValue.symbol(body.header());
-    }
-
     /// Retire a symbol interned in this call that never became a JSValue.
     /// No-op if the entry was already swept, has a body, or still has pins.
     pub fn abandonUnpublishedSymbol(self: *AtomTable, atom_id: Atom) void {
@@ -2308,7 +2299,7 @@ pub const AtomTable = struct {
     /// step later. The mark is the only authority that is correct in both
     /// windows, so consult it exactly in the window where the binding is not.
     fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *Symbol) bool {
-        if (rt.gc.hot.phase != .tracer_destroy) return true;
+        if (!rt.gc.inTracerDestroy()) return true;
         return rt.gc.headerMarked(body.header());
     }
 
@@ -2928,10 +2919,10 @@ test "atom table interns predefined dynamic and integer atoms" {
         var roots = @import("../runtime.zig").rootAtoms(.{&first});
         roots.activate(rt);
         defer roots.deactivate(rt);
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(second) != null);
     }
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(second) == null);
 }
 
@@ -3011,10 +3002,10 @@ test "registered symbol index ignores unique symbols and private names" {
         var registry_roots = @import("../runtime.zig").rootAtoms(.{&registered});
         registry_roots.activate(rt);
         defer registry_roots.deactivate(rt);
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.isRegisteredSymbol(registered_again));
     }
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.atoms.isRegisteredSymbol(registered_again));
     try std.testing.expect(rt.atoms.name(unique) != null);
     try std.testing.expect(rt.atoms.name(private) != null);
@@ -3079,7 +3070,7 @@ test "atom table retains its cached string until the atom dies" {
     // TGC S3-c: the first major that cannot reach the entry retires it
     // together with its cached string.
     atom_roots.deactivate(rt);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(atom_id) == null);
     atom_roots.activate(rt);
 }

@@ -1044,7 +1044,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
     const func_value = core.JSValue.functionBytecode(&fb.header);
 
     const arg_atom = try rt.atoms.newValueSymbol("gc-call-value-inline-arg-root");
-    const arg_value = try rt.takeSymbolValue(arg_atom);
+    const arg_value = try rt.symbolValue(arg_atom);
     const args = [_]core.JSValue{arg_value};
 
     const Trigger = struct {
@@ -1056,7 +1056,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.collectFull(null, .engine_active) catch {
+            _ = self.rt.collectFull() catch {
                 self.trace_failed = true;
                 return;
             };
@@ -1064,18 +1064,12 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         }
     };
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_id = arg_atom,
     };
-    rt.gc.heap_budget.probe = Trigger.trigger;
-    rt.gc.heap_budget.probe_ctx = &trigger;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = Trigger.trigger, .context = &trigger });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     _ = try callValueOrBytecodeRoot(
         ctx,
@@ -1087,13 +1081,12 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         null,
         null,
     );
-    rt.gc.heap_budget.probe = saved_trigger_fn;
-    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_arg);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
@@ -1133,7 +1126,7 @@ pub fn ordinaryHasInstance(
         if (constructor_object.class_id == core.class.ids.bound_function) {
             // Step 2: InstanceofOperator(O, BC), which consults BC's own
             // @@hasInstance. A bound chain recurses once per level.
-            if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+            if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
             const target = constructor_object.boundTarget() orelse return error.TypeError;
             return instanceofValue(ctx, output, global, value, target, caller_function, caller_frame);
         }
@@ -1764,7 +1757,7 @@ fn constructValueOrBytecodeInEnvironment(
     }
     if (object_ops.callableObjectFromValue(func)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
-            if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+            if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
             const target = function_object.boundTarget() orelse return error.TypeError;
             var combined = try boundFunctionArgs(ctx.runtime, function_object, args);
             defer freeArgs(ctx.runtime, combined);
@@ -1866,7 +1859,7 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const weak_ref_value = try object_ops.constructWeakRefWithPrototype(rt, symbol_value, null);
     const weak_ref = object_ops.objectFromValue(weak_ref_value) orelse return error.TypeError;
 
@@ -1875,9 +1868,9 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
         try std.testing.expect(live.same(symbol_value));
     }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.clearWeakRefKeptAlive();
+    rt.microtasks.clearKeptObjects(rt.nativeAllocator());
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect((try weak_ref.weakRefDeref(rt)).is(.undefined_value));
 }
@@ -1892,7 +1885,7 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const cleanup_callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -1907,7 +1900,7 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
     const stored = registry.finalizationRegistryCleanupCallback() orelse return error.TypeError;
     try std.testing.expect(stored.same(cleanup_callback));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1917,15 +1910,15 @@ test "finalizationRegistryAppendCell roots direct symbol fields while allocating
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     const target_atom = try rt.atoms.newValueSymbol("gc-finalization-target-symbol");
-    const target_value = try rt.takeSymbolValue(target_atom);
+    const target_value = try rt.symbolValue(target_atom);
     const held_atom = try rt.atoms.newValueSymbol("gc-finalization-held-symbol");
-    const held_value = try rt.takeSymbolValue(held_atom);
+    const held_value = try rt.symbolValue(held_atom);
     const token_atom = try rt.atoms.newValueSymbol("gc-finalization-token-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const token_value = try rt.takeSymbolValue(token_atom);
+    const token_value = try rt.symbolValue(token_atom);
     try builtin_glue.finalizationRegistryAppendCell(
         rt,
         registry,
@@ -1945,7 +1938,7 @@ test "finalizationRegistryAppendCell roots direct symbol fields while allocating
         cell.unregister_token_identity,
     );
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(target_atom) == null);
     try std.testing.expect(rt.atoms.name(held_atom) == null);
     try std.testing.expect(rt.atoms.name(token_atom) == null);
@@ -2537,7 +2530,7 @@ pub fn indirectEval(
 
     const EvalResult = @typeInfo(@TypeOf(indirectEval)).@"fn".return_type.?;
     const result: EvalResult = blk: {
-        const compile_realm = ctx.runtime.contextForGlobalIncludingConstructing(eval_global) orelse break :blk error.InvalidBuiltinRegistry;
+        const compile_realm = ctx.runtime.contexts.forGlobal(eval_global, .include_constructing) orelse break :blk error.InvalidBuiltinRegistry;
         // PerformEval: eval code runs with the caller's ScriptOrModule, so a
         // dynamic import() in it resolves against the calling module.
         const script_or_module = if (caller_function) |outer_function| outer_function.scriptOrModule() else null;
@@ -2620,7 +2613,7 @@ pub const ActiveRootValueProbe = struct {
     pub fn trigger(context: ?*anyopaque, size: usize) void {
         _ = size;
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
+        _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
     }
 };
 
@@ -2638,7 +2631,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
     const source = try core.Object.create(rt, core.class.ids.object, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-args-from-array-like-prefix-root");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, .all));
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), .method));
     try source.defineAutoInitPropertyWithRealm(
@@ -2659,7 +2652,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.collectFull(null, .engine_active) catch {
+            _ = self.rt.collectFull() catch {
                 self.trace_failed = true;
                 return;
             };
@@ -2667,18 +2660,12 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
         }
     };
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = Probe{
         .rt = rt,
         .atom_id = symbol_atom,
     };
-    rt.gc.heap_budget.probe = Probe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = Probe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     const args = try array_ops.argsFromArrayLike(ctx, null, global, source.value(), null, null);
     var args_alive = true;
@@ -2690,7 +2677,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     freeArgs(rt, args);
     args_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3194,7 +3181,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const next_method = core.JSValue.functionBytecode(&fb.header);
 
@@ -3209,12 +3196,12 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
     try std.testing.expect(stored.same(next_method));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 pub fn pollGCSafePoint(ctx: *core.JSContext) !void {
-    _ = ctx.runtime.pollGC(null, .safepoint) catch |err| switch (err) {
+    _ = ctx.runtime.pollGC(.safepoint) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.PayloadMarkFailed => return error.OutOfMemory,
     };
@@ -3243,7 +3230,7 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     ctx.global = global;
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -3261,7 +3248,7 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3409,7 +3396,7 @@ pub fn callBoundFunction(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // Each level of a bound chain is a native call frame.
-    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     const target = object.boundTarget() orelse return error.TypeError;
     const bound_this = object.boundThis() orelse return error.TypeError;
     const combined = try boundFunctionArgs(ctx.runtime, object, args);

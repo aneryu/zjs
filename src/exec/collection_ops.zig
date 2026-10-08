@@ -483,7 +483,7 @@ fn iteratorRealm(
     explicit_global: ?*core.Object,
 ) !IteratorRealm {
     if (explicit_global) |global| {
-        const context = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+        const context = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         return .{ .context = context, .global = global };
     }
     const context = current_context orelse return error.InvalidBuiltinRegistry;
@@ -633,7 +633,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -651,7 +651,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -665,7 +665,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     const callback = core.JSValue.undefinedValue();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-map-groupby-symbol-key");
-    const item = try rt.takeSymbolValue(symbol_atom);
+    const item = try rt.symbolValue(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -679,7 +679,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expect(map.collectionEntries()[0].key.same(item));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1329,7 +1329,7 @@ fn setCloneReceiver(ctx: *core.JSContext, receiver: *core.Object) !core.JSValue 
     const result = core.value_semantics.objectFromValue(result_value).?;
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
-        try ctx.runtime.pollNativeWork();
+        try ctx.runtime.interrupt.pollNativeWork();
         const entry = receiver.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
         try core.collection.appendStrongEntryOwned(ctx.runtime, result, .{ .key = entry.key, .value = entry.value });
@@ -1357,14 +1357,14 @@ test "set difference snapshot key root exposes dynamic key slice" {
 
     var keys = try rt.nativeAllocator().alloc(core.JSValue, 1);
     const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
-    keys[0] = try rt.takeSymbolValue(first_atom);
+    keys[0] = try rt.symbolValue(first_atom);
     defer freeValueList(rt, keys);
 
     var keys_root = ValueListRoot{};
     keys_root.init(rt, &keys);
     defer keys_root.deinit();
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
 }
 

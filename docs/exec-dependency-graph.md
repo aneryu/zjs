@@ -82,7 +82,7 @@ zjs_vm.runWithCallEnv
         │  interrupt poll, stack budget, realm switch
         ▼
  inline_calls.Machine  +  frame.Frame  +  stack.Stack
-        │  ActiveInvocation on JSRuntime.active_invocation
+        │  ActiveInvocation on JSRuntime.execution.active_invocation
         ▼
  tailcall_dispatch.runDispatchLoop
         │  (pc, sp, var_buf, *Vm)  always_tail

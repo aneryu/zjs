@@ -228,7 +228,7 @@ test "embedding cookbook strings and bytes examples compile and run" {
     try std.testing.expectEqualSlices(u8, &.{ 9, 2, 3, 4 }, bytes.slice());
     try std.testing.expectEqual(@as(usize, 0), bytes_state.calls);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), bytes_state.calls);
 }
 
@@ -336,7 +336,7 @@ test "embedding destroy of one context keeps auto_init-bearing objects from that
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
     ctx_b.destroy();
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
 }
 
@@ -387,7 +387,7 @@ test "embedding createRealm leftover is collected without JSContext.destroy on t
     try ctx.defineDataProperty(global, "stolenProto", proto, .{});
 
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
 
     ctx.destroy();
@@ -863,11 +863,11 @@ test "callFunction drops the cached lean frame when its callee is unpinned" {
     _ = try ctx.callFunction(f.get(), &.{zjs.Value.int32(7)}, .{});
     const abs = try ctx.eval("Math.abs", .{});
     _ = try ctx.callFunction(abs, &.{zjs.Value.int32(-1)}, .{});
-    const invocation: *zjs.exec.call_site.HostInvocation = @ptrCast(@alignCast(rt.host_invocation.?.ptr));
+    const invocation: *zjs.exec.call_site.HostInvocation = @ptrCast(@alignCast(rt.execution.host_invocation.?.ptr));
     try std.testing.expect(!invocation.lean_valid);
     f.deinit();
-    _ = rt.collectForTest();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
+    _ = try rt.collectForTest();
 
     const g = try ctx.eval("(function (a) { return a * (a + (a * (a + 1))); })", .{});
     const result = try ctx.callFunction(g, &.{ zjs.Value.int32(2), zjs.Value.int32(5), zjs.Value.int32(9) }, .{});

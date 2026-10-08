@@ -380,7 +380,7 @@ pub fn publishExecutionFlags(fb: *FunctionBytecode, facts: ExecutionFacts) void 
     // bodies never enter noteMonomorphic. Not a shape special case.
     const small_inline_eligible = scanSmallInlineEligible(fb, facts) and leaf_returns_balanced;
     if (fb.realmContext()) |realm| {
-        realm.runtime.small_inline.published_bytes +|= entry_code.len;
+        realm.runtime.execution.small_inline.published_bytes +|= entry_code.len;
     }
 
     call_facts.execution = .{

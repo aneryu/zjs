@@ -1,15 +1,22 @@
-//! Strong and weak value handles, handle scopes, native pins, and the
-//! runtime's root-provider storage.
+//! Strong and weak value handles, handle scopes, native pins, the
+//! runtime's root-provider storage, and stack-local `ValueRootFrame`s with
+//! their scope helpers and frame walk.
 //!
 //! `JSRuntime` embeds one `RootSet` and is the only tracer that aggregates
-//! strong roots. Weak slots are identity records, not value roots. Stack
-//! `ValueRootFrame`s stay on the runtime. Inline provider views are derived
-//! on access, so an empty RootSet needs no address binding.
+//! strong roots. Weak slots are identity records, not value roots. The
+//! `ValueRootFrame` chain head stays on the runtime (`active_value_roots`).
+//! Inline provider views are derived on access, so an empty RootSet needs no
+//! address binding.
 
 const std = @import("std");
+const gc_weak = @import("gc_weak.zig");
+const builtin = @import("builtin");
+const atom = @import("atom.zig");
+const var_ref_mod = @import("var_ref.zig");
 const gc = @import("gc.zig");
 const gc_roots = @import("gc_roots.zig");
 const object_mod = @import("object.zig");
+const Object = object_mod.Object;
 const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -31,6 +38,13 @@ pub const RootSlot = struct {
     value: JSValue = JSValue.undefinedValue(),
 };
 
+/// Why an exact root scope could not be activated.
+pub const RootActivateError = error{
+    RootAlreadyActive,
+    RootMutationDuringCollection,
+    RootGenerationExhausted,
+};
+
 pub const RootReferenceError = error{
     WrongRuntime,
     InactiveRoot,
@@ -45,13 +59,13 @@ const ExactValueRootFrame = struct {
     previous: ?*ExactValueRootFrame = null,
     generation: u64 = 0,
     values: []JSValue = &.{},
-    slices: [1]runtime_mod.ValueRootSlice = undefined,
-    frame: runtime_mod.ValueRootFrame = .{},
+    slices: [1]ValueRootSlice = undefined,
+    frame: ValueRootFrame = .{},
 
-    fn activate(self: *@This(), rt: *JSRuntime, values: []JSValue) !void {
+    fn activate(self: *@This(), rt: *JSRuntime, values: []JSValue) RootActivateError!void {
         rt.assertOwnerThread();
         if (self.runtime != null) return error.RootAlreadyActive;
-        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.isCollecting() or rt.roots.isTracing()) return error.RootMutationDuringCollection;
         const generation = std.math.add(u64, rt.roots.exact_root_generation, 1) catch return error.RootGenerationExhausted;
         // A deactivated scope can contain pointers reclaimed since its last
         // use. Never publish that old storage on reactivation.
@@ -70,7 +84,7 @@ const ExactValueRootFrame = struct {
     fn deactivate(self: *@This()) void {
         const rt = self.runtime orelse return;
         rt.assertOwnerThread();
-        if (rt.gc.hot.collecting) @panic("exact root mutation during collection");
+        if (rt.gc.isCollecting()) @panic("exact root mutation during collection");
         rt.roots.assertMutable();
         if (rt.roots.active_exact_roots != self or rt.active_value_roots != &self.frame)
             @panic("exact roots must deactivate in root-frame LIFO order");
@@ -122,12 +136,12 @@ pub const MutableRootedValueRef = struct {
     /// Check an output before a fallible operation, without changing its value.
     pub fn validate(self: @This(), rt: *JSRuntime) RootReferenceError!void {
         _ = try self.reference.slot(rt);
-        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.isCollecting() or rt.roots.isTracing()) return error.RootMutationDuringCollection;
     }
 
     pub fn set(self: @This(), rt: *JSRuntime, value: JSValue) RootReferenceError!void {
         const destination = try self.reference.slot(rt);
-        if (rt.gc.hot.collecting or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        if (rt.gc.isCollecting() or rt.roots.isTracing()) return error.RootMutationDuringCollection;
         destination.* = value;
     }
 
@@ -146,7 +160,7 @@ pub fn ExactValueRoots(comptime count: usize) type {
         storage: [count]JSValue = @splat(JSValue.undefinedValue()),
         registration: ExactValueRootFrame = .{},
 
-        pub fn activate(self: *@This(), rt: *JSRuntime) !void {
+        pub fn activate(self: *@This(), rt: *JSRuntime) RootActivateError!void {
             try self.registration.activate(rt, &self.storage);
         }
 
@@ -195,7 +209,7 @@ pub const RootSet = struct {
     /// Slots the last major cleared whose callbacks have not run yet. Weak
     /// processing runs inside the collection, where a callback that releases
     /// a handle or allocates would corrupt the collector; the callbacks run
-    /// once it returns (`JSRuntime.runPendingWeakCallbacks`). Capacity always
+    /// once it returns (`runWeakCallbacks`). Capacity always
     /// covers `weak_root_slots`, so queueing never allocates.
     weak_notify_queue: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
     weak_notify_draining: bool = false,
@@ -339,10 +353,8 @@ pub const RootSet = struct {
         callback_context: ?*anyopaque,
     ) !*WeakRootSlot {
         self.assertMutable();
-        const budget = &rt.gc.heap_budget;
-        const saved_suspend = budget.suspend_alloc_notify;
-        budget.suspend_alloc_notify = true;
-        defer budget.suspend_alloc_notify = saved_suspend;
+        const saved_suspend = rt.gc.heap_budget.suspendAllocNotify();
+        defer rt.gc.heap_budget.restoreAllocNotify(saved_suspend);
 
         const slot = try rt.createNative(WeakRootSlot);
         errdefer rt.destroyNative(WeakRootSlot, slot);
@@ -365,10 +377,8 @@ pub const RootSet = struct {
     }
 
     fn createStrong(rt: *JSRuntime, value: JSValue, slots: *std.ArrayListUnmanaged(*RootSlot)) !*RootSlot {
-        const budget = &rt.gc.heap_budget;
-        const saved_suspend = budget.suspend_alloc_notify;
-        budget.suspend_alloc_notify = true;
-        defer budget.suspend_alloc_notify = saved_suspend;
+        const saved_suspend = rt.gc.heap_budget.suspendAllocNotify();
+        defer rt.gc.heap_budget.restoreAllocNotify(saved_suspend);
 
         const slot = try rt.createNative(RootSlot);
         errdefer rt.destroyNative(RootSlot, slot);
@@ -378,10 +388,24 @@ pub const RootSet = struct {
         return slot;
     }
 
+    /// Run the callbacks of weak handles a finished collection cleared. A
+    /// callback may release any weak handle, including its own, and may
+    /// allocate; a collection it triggers queues further callbacks for this
+    /// same loop instead of nesting one.
+    pub fn runWeakCallbacks(self: *RootSet, rt: *JSRuntime) void {
+        if (rt.gc.isCollecting() or self.isTracing() or self.weak_notify_draining) return;
+        self.weak_notify_draining = true;
+        defer self.weak_notify_draining = false;
+        while (self.weak_notify_queue.pop()) |slot| {
+            slot.notify_pending = false;
+            if (slot.callback) |callback| callback(rt, slot.callback_context);
+        }
+    }
+
     pub fn destroyWeak(self: *RootSet, rt: *JSRuntime, slot: *WeakRootSlot) void {
         self.assertMutable();
         self.removeWeak(rt, slot);
-        rt.clearWeakRootSlot(slot);
+        gc_weak.clearSlot(rt, &slot.identity);
         slot.* = .{};
         rt.destroyNative(WeakRootSlot, slot);
     }
@@ -566,7 +590,7 @@ pub const WeakPersistentValue = struct {
         runtime.roots.assertMutable();
         const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
         const slot = try runtime.roots.createWeak(runtime, identity, callback, callback_context);
-        runtime.retainWeakIdentity(identity);
+        gc_weak.retain(runtime, identity);
         return .{
             .runtime = runtime,
             .slot = slot,
@@ -577,14 +601,14 @@ pub const WeakPersistentValue = struct {
         const runtime = self.runtime orelse return JSValue.undefinedValue();
         const slot = self.slot orelse return JSValue.undefinedValue();
         const identity = slot.identity orelse return JSValue.undefinedValue();
-        return runtime.valueFromWeakIdentity(identity);
+        return gc_weak.toValue(runtime, identity);
     }
 
     pub fn isAlive(self: WeakPersistentValue) bool {
         const runtime = self.runtime orelse return false;
         const slot = self.slot orelse return false;
         const identity = slot.identity orelse return false;
-        return runtime.weakIdentityIsCurrentlyLive(identity);
+        return gc_weak.isLive(runtime, identity);
     }
 
     pub fn deinit(self: *WeakPersistentValue) void {
@@ -600,6 +624,22 @@ pub const NativePin = struct {
     runtime: ?*JSRuntime = null,
     header: ?*gc.Header = null,
 
+    /// Pin the cell `value` names so it neither dies nor moves until
+    /// `deinit`; null for a value that names no cell.
+    pub fn initValue(runtime: *JSRuntime, value: JSValue) !?NativePin {
+        const header = value.refHeader() orelse value.functionBytecodeHeader() orelse return null;
+        return try initHeader(runtime, header);
+    }
+
+    pub fn initHeader(runtime: *JSRuntime, header: *gc.Header) !NativePin {
+        runtime.roots.assertMutable();
+        try runtime.gc.pinHeader(header);
+        return .{
+            .runtime = runtime,
+            .header = header,
+        };
+    }
+
     pub fn deinit(self: *NativePin) void {
         const runtime = self.runtime orelse return;
         const header = self.header orelse return;
@@ -609,20 +649,6 @@ pub const NativePin = struct {
         runtime.gc.unpinHeader(header);
     }
 };
-
-pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
-    const header = value.refHeader() orelse value.functionBytecodeHeader() orelse return null;
-    return try pinHeaderForNative(runtime, header);
-}
-
-pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
-    runtime.roots.assertMutable();
-    try runtime.gc.pinHeader(header);
-    return .{
-        .runtime = runtime,
-        .header = header,
-    };
-}
 
 /// Fixed-length native copy whose values are strong roots until deinit.
 /// Owns its backing block; assignment does not duplicate ownership. Moving
@@ -661,8 +687,8 @@ pub const ValueRootBuffer = struct {
         if (source.len == 0) return .{};
         const payload_bytes = std.math.mul(usize, source.len, @sizeOf(JSValue)) catch return error.OutOfMemory;
         const total_bytes = std.math.add(usize, slots_offset, payload_bytes) catch return error.OutOfMemory;
-        var slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = source }};
-        var frame = runtime_mod.ValueRootFrame{ .slices = &slices };
+        var slices = [_]ValueRootSlice{.{ .borrowed = source }};
+        var frame = ValueRootFrame{ .slices = &slices };
         frame.activate(rt);
         defer frame.deactivate(rt);
 
@@ -700,3 +726,319 @@ pub const ValueRootBuffer = struct {
         rt.freeNativeAlignedBytes(bytes[0..total_bytes], block_alignment);
     }
 };
+
+// Stack-local root frames.
+
+pub const ValueRootSlice = union(enum) {
+    mutable: *const []JSValue,
+    /// Borrowed values whose backing storage is stable for the root frame's
+    /// lifetime. The visitor traces copies and never mutates caller-owned
+    /// slots; useful when a resident frame will take its own copy before the
+    /// call returns.
+    borrowed: []const JSValue,
+    /// A register-resident operand window. `values` supplies the stack buffer
+    /// pointer (so reallocations made by delegated handlers are visible), while
+    /// `live_len` points at the dispatcher's register-resident operand depth.
+    /// The GC traces `values.*.ptr[0..live_len.*]`, mirroring QuickJS scanning
+    /// `[stack_buf, cur_sp)` without making the slice header the hot-path
+    /// operand-depth authority.
+    windowed: struct { values: *const []JSValue, live_len: *const usize },
+    /// A var-ref cell slice under construction. VarRef carriers keep stable
+    /// addresses; their binding values are traced through actual cell slots.
+    cells: *const []*var_ref_mod.VarRef,
+    /// Borrowed counterpart of `cells`; keeps the referenced cell/value graph
+    /// live without taking temporary per-cell references.
+    borrowed_cells: []const *var_ref_mod.VarRef,
+};
+
+/// A GC header (Shape, Module, VarRef, FunctionBytecode, realm) named as a
+/// root for a mutation or construction window. Tracing does not treat a Zig
+/// `*Shape` local as a root unless it is named here.
+/// A non-rewritable root for a stable-address carrier (for example Shape or
+/// FunctionBytecode). Movable values must use writable value/object slots.
+pub const HeaderRootValue = struct {
+    header: *gc.Header,
+};
+
+/// TGC S3 §4 class B: an atom id held by a native frame.
+///
+/// An `atom.Atom` is a bare `u32`. Neither a `*JSValue` (there is no
+/// JSValue) nor the conservative stack scan (an integer is not a pointer into
+/// the heap) can report it, so a native frame that holds an id across a point
+/// where JS can run or the allocator can collect must name it here.
+pub const AtomRootSlot = union(enum) {
+    /// One `atom.Atom` local, read through its address so a re-assignment
+    /// inside the window is visible to the tracer.
+    single: *const atom.Atom,
+    /// A native `[]Atom` array under construction. The pointer is to the
+    /// slice header, not to its bytes, so `AtomListBuilder` reallocation
+    /// mid-build stays covered and the partially filled array is traced at its
+    /// current length.
+    list: *const []atom.Atom,
+    /// Fixed immutable key snapshot. Atom identities never relocate.
+    borrowed: []const atom.Atom,
+};
+
+/// Production (non-test) does not list-link scalar Zig locals; those wait for
+/// conservative stack/register capture. Tests link every activate.
+pub const value_root_link_containers_only = !builtin.is_test;
+
+/// Scalar scope helpers exist only when scalar frames can actually be linked.
+/// In production tracing builds the policy above rejects them, so keeping their
+/// storage and frame would preserve stack/TLS work without adding a root.
+const value_root_scalar_scopes_enabled = !value_root_link_containers_only;
+
+pub const ValueRootFrame = struct {
+    previous: ?*const ValueRootFrame = null,
+    slices: []const ValueRootSlice = &.{},
+    values: []const *JSValue = &.{},
+    objects: []const *?*Object = &.{},
+    headers: []const HeaderRootValue = &.{},
+    /// TGC S3 §4 class B atom-id roots; see `AtomRootSlot`.
+    atoms: []const AtomRootSlot = &.{},
+    /// Whether `activate` linked this frame. Only the container-only policy
+    /// skips frames, so only it needs to remember which ones it linked.
+    linked: if (value_root_link_containers_only) bool else void =
+        if (value_root_link_containers_only) false else {},
+
+    /// True when this frame roots a native JSValue/cell array or window.
+    /// Conservative scanning of the C stack sees the backing pointer, not the
+    /// values stored behind it, so these must stay precise-rooted. Scalar
+    /// `.values` / `.objects` slots that point at Zig locals can wait for a
+    /// register/stack scanner (design §7.1).
+    ///
+    /// A frame without any window is not linked in production, whatever its
+    /// `.values` pointers name, so heap-backed values must be rooted through
+    /// `.slices` (see `RootedValueCopies`).
+    inline fn hasNativeWindow(self: *const ValueRootFrame) bool {
+        return self.slices.len != 0;
+    }
+
+    /// Atom ids can never be recovered by the conservative scanner, so a
+    /// frame naming any must link even in the container-only production
+    /// policy that drops scalar JSValue frames.
+    inline fn hasAtomRoots(self: *const ValueRootFrame) bool {
+        return self.atoms.len != 0;
+    }
+
+    inline fn hasHeaderRoots(self: *const ValueRootFrame) bool {
+        return self.headers.len != 0;
+    }
+
+    /// Activate this frame at its final stack address. The matching
+    /// `deactivate` must run before the frame or any referenced root storage
+    /// leaves scope. Production skips ordinary scalar value/object frames;
+    /// native windows, atom roots and stable header roots always link.
+    pub inline fn activate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        rt.roots.assertMutable();
+        if (comptime value_root_link_containers_only) {
+            if (!self.hasNativeWindow() and !self.hasAtomRoots() and !self.hasHeaderRoots()) {
+                return;
+            }
+            self.linked = true;
+        }
+        std.debug.assert(rt.active_value_roots != self);
+        self.previous = rt.active_value_roots;
+        rt.active_value_roots = self;
+    }
+
+    /// Visit every frame of the chain starting at `head`. The caller holds
+    /// the trace window.
+    pub fn traceChain(head: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
+        var frame = head;
+        while (frame) |current| {
+            for (current.objects) |root| {
+                try visitor.optionalObject(root);
+            }
+            for (current.headers) |root| {
+                try visitor.constHeader(root.header);
+            }
+            for (current.values) |root| {
+                try visitor.value(root);
+            }
+            if (visitor.visit_atom != null) {
+                for (current.atoms) |root| switch (root) {
+                    .single => |slot| try visitor.atomRoot(slot.*),
+                    // Read the slice header now: the frame may have been
+                    // linked before the array had any element at all.
+                    .list => |list| for (list.*) |id| try visitor.atomRoot(id),
+                    .borrowed => |ids| for (ids) |id| try visitor.atomRoot(id),
+                };
+            }
+            for (current.slices) |root| {
+                switch (root) {
+                    .mutable => |values| try visitor.values(values.*),
+                    .borrowed => |values| try visitor.constValues(values),
+                    .windowed => |w| try visitor.values(w.values.*.ptr[0..w.live_len.*]),
+                    .cells => |cells| {
+                        for (cells.*) |cell| try visitor.constHeader(&cell.header);
+                    },
+                    .borrowed_cells => |cells| {
+                        for (cells) |cell| try visitor.constHeader(&cell.header);
+                    },
+                }
+            }
+            frame = current.previous;
+        }
+    }
+
+    /// Restore the frame that was active before `activate`. Root frames are a
+    /// strict LIFO stack; the assertion localizes mismatched scope teardown at
+    /// the registration seam. A frame the container-only policy never linked
+    /// is a no-op; a linked frame that is not the head is a teardown-order bug
+    /// that would leave a dead frame on the chain.
+    pub inline fn deactivate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        rt.roots.assertMutable();
+        if (comptime value_root_link_containers_only) {
+            if (!self.linked) return;
+            self.linked = false;
+        }
+        if (rt.active_value_roots != self) @panic("ValueRootFrame deactivated out of LIFO order");
+        rt.active_value_roots = self.previous;
+        self.previous = null;
+    }
+};
+
+/// A `ValueRootFrame` plus the storage it points at, held in one local.
+///
+/// The manual spelling of this — declare a `[_]*JSValue` array, declare
+/// a frame whose `.values` points at it, activate, defer deactivate — was
+/// written out at every rooting site in the tree. `rootValues` collapses the
+/// declarations, leaving the two operations that carry meaning:
+///
+///     var roots = core.runtime.rootValues(.{ &receiver, &argument });
+///     roots.activate(rt);
+///     defer roots.deactivate(rt);
+///
+/// Activation stays a separate step on purpose. The frame links itself into
+/// the runtime BY ADDRESS, so it must be linked once it sits in its final
+/// stack slot — not in the temporary a returning constructor builds it in.
+pub fn ValueRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: if (value_root_scalar_scopes_enabled) [count]*JSValue else void =
+            if (value_root_scalar_scopes_enabled) undefined else {},
+        frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
+            if (value_root_scalar_scopes_enabled) .{} else {},
+
+        /// Point the frame at this scope's own storage, then link it. The
+        /// slice is taken here rather than in `rootValues` for the same
+        /// reason the link is: `storage` only has its final address now.
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_scalar_scopes_enabled) {
+                self.frame.values = &self.storage;
+                self.frame.activate(rt);
+            }
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_scalar_scopes_enabled) self.frame.deactivate(rt);
+        }
+    };
+}
+
+/// Build an inactive `ValueRootScope` over `slots`, a tuple of `*JSValue`.
+/// The caller activates it; see `ValueRootScope`.
+pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
+    if (comptime value_root_scalar_scopes_enabled) {
+        var scope: ValueRootScope(slots.len) = .{};
+        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
+        return scope;
+    }
+    return .{};
+}
+
+/// A `ValueRootFrame` over `*?*Object` slots, same activate discipline as
+/// `rootValues`. Tracing does not treat a Zig `*Object` local as a root
+/// unless it is named here.
+pub fn ObjectRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: if (value_root_scalar_scopes_enabled) [count]*?*Object else void =
+            if (value_root_scalar_scopes_enabled) undefined else {},
+        frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
+            if (value_root_scalar_scopes_enabled) .{} else {},
+
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_scalar_scopes_enabled) {
+                self.frame.objects = &self.storage;
+                self.frame.activate(rt);
+            }
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_scalar_scopes_enabled) self.frame.deactivate(rt);
+        }
+    };
+}
+
+pub inline fn rootObjects(slots: anytype) ObjectRootScope(slots.len) {
+    if (comptime value_root_scalar_scopes_enabled) {
+        var scope: ObjectRootScope(slots.len) = .{};
+        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
+        return scope;
+    }
+    return .{};
+}
+
+comptime {
+    if (!value_root_scalar_scopes_enabled) {
+        if (@sizeOf(ValueRootScope(1)) != 0) @compileError("disabled ValueRootScope must stay zero-sized");
+        if (@sizeOf(ObjectRootScope(1)) != 0) @compileError("disabled ObjectRootScope must stay zero-sized");
+    }
+}
+
+/// A `ValueRootFrame` carrying only `AtomRootSlot` storage, with the same
+/// declare/activate/deactivate discipline as `rootValues` (TGC S3 §4 class B).
+///
+///     var atom_roots = core.runtime.rootAtoms(.{&key});
+///     atom_roots.activate(rt);
+///     defer atom_roots.deactivate(rt);
+///
+/// Unlike `ValueRootScope`, this is never compiled out by
+/// `value_root_link_containers_only`: the conservative scanner cannot stand in
+/// for it, so dropping the frame in production would drop the root itself.
+pub fn AtomRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: [count]AtomRootSlot = undefined,
+        frame: ValueRootFrame = .{},
+
+        /// Bind the frame to this scope's storage at its final stack address,
+        /// then link it — same reason as `ValueRootScope.activate`.
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            self.frame.atoms = &self.storage;
+            self.frame.activate(rt);
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            self.frame.deactivate(rt);
+        }
+    };
+}
+
+/// Build an inactive `AtomRootScope` over `slots`, a tuple of `*const Atom`
+/// (or `*Atom`). The caller activates it; see `AtomRootScope`.
+pub inline fn rootAtoms(slots: anytype) AtomRootScope(slots.len) {
+    var scope: AtomRootScope(slots.len) = .{};
+    inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .single = slot };
+    return scope;
+}
+
+/// Root a native `[]Atom` array through its slice header, so appends and the
+/// reallocations they cause stay covered for the whole build window.
+pub inline fn rootAtomList(list: *const []atom.Atom) AtomRootScope(1) {
+    var scope: AtomRootScope(1) = .{};
+    scope.storage[0] = .{ .list = list };
+    return scope;
+}
+
+/// Root several `[]Atom` arrays (and/or single ids) with one frame.
+pub inline fn rootAtomSlots(slots: anytype) AtomRootScope(slots.len) {
+    var scope: AtomRootScope(slots.len) = .{};
+    inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
+    return scope;
+}

@@ -176,7 +176,7 @@ fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous
 /// head nothing and are left for the caller to scan past as a plain token.
 pub fn skipFunctionInPredeclareScan(s: *State, before_keyword: ?tok.Kind) Error!void {
     if (s.runtime) |rt| {
-        if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+        if (rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
     }
     if (before_keyword) |previous| {
         if (previous == .dot or previous == .question_mark_dot) return;
@@ -223,7 +223,7 @@ pub fn skipFunctionInPredeclareScan(s: *State, before_keyword: ?tok.Kind) Error!
 pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
     // Nested substitutions recurse; bound the native stack like `advance`.
     if (s.runtime) |rt| {
-        if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+        if (rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
     }
     const first_part = first.payload.str.template orelse return Error.ParserInvariant;
     switch (first_part) {

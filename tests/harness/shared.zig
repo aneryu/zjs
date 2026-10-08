@@ -151,7 +151,7 @@ pub fn sharedTestEngine() *TestEngine {
                 shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
             }
         }
-        _ = eng.runtime.collectForTest();
+        _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
         shared_engine_baseline_allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
         shared_engine_baseline_allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
         shared_engine_baseline_module_count = eng.context.modules.count();
@@ -275,8 +275,8 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
     // tests that schedule a promise via `Promise.resolve(...)` and
     // return without awaiting would otherwise leak the job into the
     // next test.
-    if (eng.context.global) |global| {
-        while (true) switch (exec.promise_ops.drainOnePendingJob(eng.context, null, global) catch break) {
+    if (eng.context.global != null) {
+        while (true) switch (exec.promise_ops.drainOnePendingJob(eng.context, null) catch break) {
             .empty, .exception => break,
             .success => {},
         };
@@ -341,5 +341,5 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
             ) catch unreachable;
         }
     }
-    _ = eng.runtime.collectForTest();
+    _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
 }

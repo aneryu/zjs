@@ -730,7 +730,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     // large operands polls (contract C8).
     switch (op) {
         bytecode.opcode.op.mul, bytecode.opcode.op.div, bytecode.opcode.op.mod, bytecode.opcode.op.pow => {
-            try rt.pollNativeBulkWork(heapBigIntLimbCount(a) * heapBigIntLimbCount(b) * @sizeOf(bignum.Limb));
+            try rt.interrupt.pollNativeBulkWork(heapBigIntLimbCount(a) * heapBigIntLimbCount(b) * @sizeOf(bignum.Limb));
         },
         else => {},
     }

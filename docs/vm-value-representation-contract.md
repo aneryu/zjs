@@ -263,8 +263,8 @@ rememberOwnerForBulkWrite(owner: *Header)
 ### 4.1 精确根
 
 `JSRuntime.traceActiveRoots`(`runtime.zig`):`ValueRootFrame` 链
-(`active_value_roots`)、活动 job 根、`ActiveInvocationTrace`(解释器帧与
-操作数栈)、Atomics.waitAsync 等待者、`runtime.traceRoots` 的 root
+(`active_value_roots`)、活动 job 根、`execution.active_invocation`(经
+`engine_services.traceActiveInvocations` 遍历解释器帧与操作数栈)、Atomics.waitAsync 等待者、`traceActiveRoots` 中的 root
 provider、pin 账本(§4.3);minor 另加 `atoms.traceYoungSymbolBodies`。
 
 `ValueRootFrame`(`runtime.zig:ValueRootFrame`)= `{ previous, slices,

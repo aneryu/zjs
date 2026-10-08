@@ -1879,7 +1879,7 @@ const Resolver = struct {
         const interrupt_runtime = self.function.interrupt_runtime;
         var position: u32 = 0;
         while (position < self.product.code_len) {
-            if (interrupt_runtime) |rt| try rt.pollNativeWork();
+            if (interrupt_runtime) |rt| try rt.interrupt.pollNativeWork();
             try self.processBindsAt(position);
             self.absorbSources(position + 1);
             const instruction = try decodeInstruction(self.code, position);

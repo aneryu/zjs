@@ -1216,9 +1216,9 @@ pub const State = struct {
         // `next_token` and turns pathological nesting into
         // a catchable SyntaxError instead of a native stack overflow.
         if (self.runtime) |rt| {
-            if (rt.checkNativeStackOverflow(0)) return self.failHere(error.StackOverflow);
+            if (rt.stack.checkNativeOverflow(0)) return self.failHere(error.StackOverflow);
             // A huge source parses for seconds; poll per token (C8).
-            try rt.pollNativeWork();
+            try rt.interrupt.pollNativeWork();
         }
         // `lex.pos` is the end of the current token until nextInto starts
         // skipping trivia, matching QuickJS's `last_ptr = buf_ptr`.
@@ -1965,7 +1965,7 @@ pub const State = struct {
         // Nested substitutions recurse. Out of native stack, answer the
         // conservative "may contain eval" (the reference form stays correct).
         if (s.runtime) |rt| {
-            if (rt.checkNativeStackOverflow(0)) return true;
+            if (rt.stack.checkNativeOverflow(0)) return true;
         }
         const first_part = first.payload.str.template orelse return false;
         switch (first_part) {

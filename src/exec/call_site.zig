@@ -585,7 +585,7 @@ inline fn resolveRoute(
 // until it pops (`runSyncInlineRouteCopiedArgs`).
 //
 // Lifetime rules:
-// - The machine is published as `rt.active_invocation` only for the
+// - The machine is published as `rt.execution.active_invocation` only for the
 // duration of a call. Idle, it is invisible to the GC, to backtraces and
 // to the runtime-destroy invariants; the embedder never sees a
 // half-published root.
@@ -675,7 +675,6 @@ pub const HostInvocation = struct {
             .machine = &self.machine,
             .current_backtrace_view = &self.root_view,
         };
-        self.invocation.header = .{ .traceRoots = inline_calls.traceRoots };
         self.invocation.previous = null;
         return self;
     }
@@ -692,7 +691,7 @@ pub const HostInvocation = struct {
 
     /// Runtime-owned singleton, created on first use.
     pub inline fn acquire(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
-        if (rt.host_invocation) |resident| {
+        if (rt.execution.host_invocation) |resident| {
             const self: *HostInvocation = @ptrCast(@alignCast(resident.ptr));
             std.debug.assert(!self.published and self.machine.depth == 0);
             if (!self.machine.alreadyTargets(ctx, output, global)) {
@@ -706,7 +705,7 @@ pub const HostInvocation = struct {
 
     noinline fn acquireSlow(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
         const self = try create(rt, ctx, output, global);
-        rt.host_invocation = .{ .ptr = self, .retire = retire };
+        rt.execution.host_invocation = .{ .ptr = self, .retire = retire };
         return self;
     }
 
@@ -802,7 +801,7 @@ pub const HostInvocation = struct {
     /// the backtrace chain. Requires no active invocation.
     pub inline fn publish(self: *HostInvocation, rt: *core.JSRuntime) void {
         std.debug.assert(!self.published);
-        std.debug.assert(rt.active_invocation == null);
+        std.debug.assert(rt.execution.active_invocation == null);
         std.debug.assert(self.machine.depth == 0);
         // `root_view.live` and `invocation.current_backtrace_view` are
         // invariants of the idle machine (set at creation; an idle-mode
@@ -812,18 +811,16 @@ pub const HostInvocation = struct {
         // `rt` by parameter, not `ctx.runtime`: the caller already holds it,
         // and re-deriving it here cost two dependent loads per publish and
         // two more per unpublish on every embedder crossing.
-        self.backtrace_frame.previous = rt.current_backtrace_frame;
-        rt.current_backtrace_frame = &self.backtrace_frame;
-        rt.active_invocation = &self.invocation;
+        rt.execution.pushBacktrace(&self.backtrace_frame);
+        _ = rt.execution.enterInvocation(&self.invocation);
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = true;
     }
 
     pub inline fn unpublish(self: *HostInvocation, rt: *core.JSRuntime) void {
         std.debug.assert(self.published);
         std.debug.assert(self.machine.depth == 0);
-        std.debug.assert(rt.current_backtrace_frame == &self.backtrace_frame);
-        rt.active_invocation = null;
-        rt.current_backtrace_frame = self.backtrace_frame.previous;
+        rt.execution.leaveInvocation(null);
+        rt.execution.popBacktrace(&self.backtrace_frame);
         // The idle Machine is not traced; a result left here would dangle by
         // the next publish, which traces it again.
         self.machine.vm.return_value = core.JSValue.undefinedValue();

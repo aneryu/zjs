@@ -7,6 +7,7 @@
 //! `gc_trace_stw.traceHeaderEdges`.
 
 const std = @import("std");
+const gc_weak = @import("gc_weak.zig");
 const jobs = @import("jobs.zig");
 const object_mod = @import("object.zig");
 const runtime_mod = @import("../runtime.zig");
@@ -42,10 +43,10 @@ pub fn enqueueFinalizationCleanup(
     if (rt.job_queue.reserved_entries != 0) {
         rt.job_queue.enqueueReserved(job);
     } else {
-        rt.job_queue.enqueueFinalization(job) catch {};
+        rt.job_queue.enqueue(job) catch {};
     }
     cell.state = .queued;
-    if (cell.target_identity) |identity| rt.releaseWeakIdentity(identity);
+    if (cell.target_identity) |identity| gc_weak.release(rt, identity);
     cell.target_identity = null;
     return true;
 }

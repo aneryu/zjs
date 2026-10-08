@@ -22,7 +22,7 @@ const Frame = builtin_dispatch.Frame;
 const HostError = exception_ops.HostError;
 
 const SimpleJsonError = std.mem.Allocator.Error || error{
-    // A long parse or stringify polls the interrupt handler (JSRuntime.pollNativeWork).
+    // A long parse or stringify polls the interrupt handler (interrupt.State.pollNativeWork).
     Interrupted,
     IncompatibleDescriptor,
     InvalidAtom,
@@ -223,7 +223,7 @@ test "json boundary parser roots recursive construction during allocation GC" {
         failure: ?anyerror = null,
         fn collect(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            _ = self.rt.collectFull(null, .declared_only) catch |err| {
+            _ = self.rt.collectForTest() catch |err| {
                 self.failure = err;
                 return;
             };
@@ -243,19 +243,15 @@ test "json boundary parser roots recursive construction during allocation GC" {
                 rt.gc.scheduler.host_quiescent = true;
                 const input = (try core.string.String.createAscii(rt, source)).value();
                 var probe = Probe{ .rt = rt };
-                rt.gc.heap_budget.probe = Probe.collect;
-                rt.gc.heap_budget.probe_ctx = &probe;
-                defer {
-                    rt.gc.heap_budget.probe = null;
-                    rt.gc.heap_budget.probe_ctx = null;
-                }
+                _ = rt.gc.heap_budget.installProbe(.{ .run = Probe.collect, .context = &probe });
+                defer rt.gc.heap_budget.restoreProbe(null);
                 var record: ?JsonParseWithRecord = null;
                 defer if (record) |*parsed| parsed.deinit(rt);
                 const result = if (recorded) blk: {
                     record = try parseWithRecord(rt, null, input);
                     break :blk record.?.value;
                 } else try parse(rt, null, input);
-                rt.gc.heap_budget.probe = null;
+                rt.gc.heap_budget.restoreProbe(null);
                 if (probe.failure) |err| return err;
                 try std.testing.expect(probe.calls >= 3);
                 const object = object_ops.objectFromValue(result).?;
@@ -356,7 +352,7 @@ fn jsonParseFull(rt: *core.JSRuntime, global: ?*core.Object, units: []const u16)
 }
 
 const JsonParseError = std.mem.Allocator.Error || error{
-    // A long parse or stringify polls the interrupt handler (JSRuntime.pollNativeWork).
+    // A long parse or stringify polls the interrupt handler (interrupt.State.pollNativeWork).
     Interrupted,
     SyntaxError,
     StackOverflow,
@@ -648,7 +644,7 @@ const JsonUnitParser = struct {
     /// (value + primitive source span) so the reviver walk can attach
     /// `context.source` and run the same-value guard.
     fn parseValueRecord(self: *Self, record: ?*JsonParseRecord) JsonParseError!core.JSValue {
-        if (self.rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+        if (self.rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
         self.skipWhitespace();
         const start = self.index;
         const unit = self.peek() orelse return error.SyntaxError;
@@ -724,7 +720,7 @@ const JsonUnitParser = struct {
             return object_value;
         }
         while (true) {
-            try self.rt.pollNativeWork();
+            try self.rt.interrupt.pollNativeWork();
             self.skipWhitespace();
             if (self.peek() != '"') return error.SyntaxError;
             const key_atom = try self.parseKeyAtom();
@@ -806,7 +802,7 @@ const JsonUnitParser = struct {
         }
         var index: u32 = 0;
         while (true) {
-            try self.rt.pollNativeWork();
+            try self.rt.interrupt.pollNativeWork();
             var child_slot_storage: JsonParseRecord = undefined;
             const child_slot: ?*JsonParseRecord = if (record != null) &child_slot_storage else null;
             var child = try self.parseValueRecord(child_slot);
@@ -1061,7 +1057,7 @@ const SimpleJsonParser = struct {
     }
 
     fn parseValue(self: *SimpleJsonParser) SimpleJsonError!core.JSValue {
-        if (self.rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+        if (self.rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
         self.skipWhitespace();
         const byte = self.peek() orelse return error.UnsupportedSimpleJson;
         return switch (byte) {
@@ -1100,7 +1096,7 @@ const SimpleJsonParser = struct {
         if (self.consumeByte('}')) return object_value;
 
         while (true) {
-            try self.rt.pollNativeWork();
+            try self.rt.interrupt.pollNativeWork();
             self.skipWhitespace();
             if (self.peek() != '"') return error.UnsupportedSimpleJson;
             const key_text = try self.parseSimpleStringBytes();
@@ -1139,7 +1135,7 @@ const SimpleJsonParser = struct {
 
         var index: u32 = 0;
         while (true) {
-            try self.rt.pollNativeWork();
+            try self.rt.interrupt.pollNativeWork();
             const item_value = try self.parseValue();
             var root_item = item_value;
             const item_live: []core.JSValue = @as(*[1]core.JSValue, &root_item);
@@ -1302,7 +1298,7 @@ const appendJsonAtomName = core.json.appendJsonAtomName;
 // --- VM-coercing JSON.parse/JSON.stringify ---------------------------------
 
 const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
-    // A long parse or stringify polls the interrupt handler (JSRuntime.pollNativeWork).
+    // A long parse or stringify polls the interrupt handler (interrupt.State.pollNativeWork).
     Interrupted,
     InvalidUtf8,
     TypeError,
@@ -1410,7 +1406,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const input = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{input};
@@ -1422,7 +1418,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     try std.testing.expectError(error.SyntaxError, jsonParseCall(ctx, null, global, &args, null, null));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1693,7 +1689,7 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
-    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{
@@ -1713,7 +1709,7 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     try std.testing.expectEqualStrings("null", bytes.items);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1750,7 +1746,7 @@ fn jsonAppendSimpleValue(
     // route for plain values, so its per-value recursion is where deep nesting
     // must turn into a catchable InternalError "stack overflow" (QuickJS
     // js_json_to_str, quickjs.c) instead of a native crash.
-    if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
     if (value.is(.undefined_value) or value.is(.symbol)) {
         if (array_slot) {
             try buffer.appendSlice(rt.nativeAllocator(), "null");
@@ -1824,7 +1820,7 @@ fn jsonAppendSimpleArray(
     const elements = object.arrayElements();
     if (object.arrayLength() > elements.len) return .fallback;
     for (object.shapeProps()) |prop| {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         if (core.property.Flags.fromBits(prop.flags).deleted) continue;
         if (core.array.arrayIndexFromAtom(rt.atoms, prop.atom_id) != null) return .fallback;
     }
@@ -1836,7 +1832,7 @@ fn jsonAppendSimpleArray(
     try buffer.append(rt.nativeAllocator(), '[');
     var index: usize = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        try rt.pollNativeWork();
+        try rt.interrupt.pollNativeWork();
         try ensureJsonOutputFits(buffer);
         if (index != 0) try buffer.append(rt.nativeAllocator(), ',');
         const element = elements[index];
@@ -2070,7 +2066,7 @@ fn jsonSerializeProperty(
     // InternalError "stack overflow" in QuickJS (js_json_to_str
     // JS_ThrowStackOverflow, quickjs.c). error.StackOverflow maps to that
     // InternalError via runtimeErrorInfo.
-    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     var values = [_]core.JSValue{ global.value(), holder_value, options.replacer, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     const live: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
@@ -2350,7 +2346,7 @@ const S3DupKeyMajorProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!self.active) return;
         const before = self.rt.gc.block_heap.mark_epoch;
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
     }
 };
@@ -2373,15 +2369,9 @@ test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors tak
     text_roots.activate(rt);
     defer text_roots.deactivate(rt);
 
-    const saved_fn = rt.gc.heap_budget.probe;
-    const saved_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3DupKeyMajorProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3DupKeyMajorProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_fn;
-        rt.gc.heap_budget.probe_ctx = saved_ctx;
-    }
+    const saved_fn = rt.gc.heap_budget.installProbe(.{ .run = S3DupKeyMajorProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_fn);
 
     probe.active = true;
     var parse_result = parseWithRecord(rt, null, text) catch |err| {

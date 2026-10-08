@@ -515,14 +515,6 @@ pub const MajorPhase = enum(u8) {
     sweep,
 };
 
-pub const SchedulerPoint = enum(u8) {
-    allocation_slow_path,
-    callback_boundary,
-    idle,
-    safepoint,
-    urgent,
-};
-
 pub const RequestReason = enum(u8) {
     manual,
     allocation_threshold,
@@ -1017,9 +1009,9 @@ pub const CollectionResult = struct {
 
 /// Runtime poll purpose used by the GC driver to choose the collection path.
 pub const PollMode = enum {
+    /// Allocation slow path: the heap budget crossed its threshold.
     normal,
     callback_boundary,
-    idle,
     safepoint,
     urgent,
 
@@ -1034,7 +1026,7 @@ pub const PollMode = enum {
     /// this policy together with the poll's other conditions.
     pub fn acceptsMinor(self: PollMode) bool {
         return switch (self) {
-            .idle, .safepoint, .callback_boundary => true,
+            .safepoint, .callback_boundary => true,
             .normal, .urgent => false,
         };
     }
@@ -1046,7 +1038,7 @@ pub const PollMode = enum {
     pub fn rootScan(self: PollMode) RootScan {
         return switch (self) {
             .normal, .safepoint, .callback_boundary => .engine_active,
-            .urgent, .idle => .declared_only,
+            .urgent => .declared_only,
         };
     }
 };
@@ -1232,7 +1224,7 @@ pub const PauseDistribution = struct {
 };
 
 /// Counters the collector actually maintains. Every field here has a write
-/// site in `recordSuccess` / `recordFailure` / the zero-ref drain; refcount
+/// site in `completeMajor` / `failMajor` / `recordMinor`; refcount
 /// traffic is deliberately uninstrumented because a counter on that path is
 /// not cost-neutral (2026-08-11 ruling), and cycle *count* is absent because
 /// the collector reports freed objects, not strongly-connected components.
@@ -1363,7 +1355,7 @@ pub const HotWords = extern struct {
     phase: Phase = .none,
     /// A collection driver (major or minor) is on the stack. Distinct from
     /// `phase`, which also covers destruction and nested drains; see
-    /// `JSRuntime.collectorBusy`.
+    /// `Registry.isBusy`.
     collecting: bool = false,
 
     /// Write-barrier gate: the phase-owned mask the fast path ANDs against
@@ -1574,25 +1566,15 @@ pub const Registry = struct {
         return self;
     }
 
-    pub const AllocationCallbacks = struct {
-        retry: *const fn (*anyopaque) void,
-        notify: *const fn (?*anyopaque, usize) void,
-    };
-
     /// Commit allocation services after the runtime's roots, atoms, classes,
-    /// and shapes are ready to survive collection. Construction itself must
-    /// never invoke these callbacks or use the active slab allocation route.
-    pub fn activate(self: *Registry, account: *JSRuntime, callbacks: AllocationCallbacks) void {
+    /// and shapes are ready to survive collection. Until then `runtime` is
+    /// null, so construction never collects (heap-limit retry, allocation
+    /// notify) or uses the active slab allocation route.
+    pub fn activate(self: *Registry, account: *JSRuntime) void {
         std.debug.assert(self.runtime == null and account.gc == self);
         self.runtime = account;
         self.useIndependentSmallObjectSlabArenaBacking();
         self.enableSmallObjectSlab();
-        self.heap_budget.retry = callbacks.retry;
-        self.heap_budget.retry_ctx = account;
-        if (comptime native_alloc.allocation_gc_trigger_enabled) {
-            self.heap_budget.owner_notify = callbacks.notify;
-            self.heap_budget.owner_ctx = account;
-        }
     }
 
     /// Bind the groups that hold self-referential state, after the Registry
@@ -1771,6 +1753,8 @@ pub const Registry = struct {
         self.hot.phase = .none;
     }
 
+    /// Account off-heap bytes owned by a heap object and post the external
+    /// pressure request when the policy says so. Release with the token.
     pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken {
         if (bytes == 0) return .{};
         const id = try self.external.add(self.runtime.?, bytes);
@@ -1779,6 +1763,9 @@ pub const Registry = struct {
         self.stats.external_alloc_count +|= 1;
         const weighted = std.math.mul(usize, bytes, self.scheduler.policy.external_weight) catch std.math.maxInt(usize);
         self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
+        if (self.externalMemoryRequestReason()) |reason| {
+            self.requestGC(reason, self.externalMemoryRequestUrgency());
+        }
         return .{
             .registry = self,
             .id = id,
@@ -3395,7 +3382,7 @@ pub const Registry = struct {
         if (source_meta.flags.needs_finalizer) self.setNeedsFinalizer(moved);
 
         object.Object.fromHeader(moved).rebindAfterRelocation(@intFromPtr(old), body_bytes);
-        gc_weak.relocateObjectIdentities(rt, object.Object.fromHeader(old), object.Object.fromHeader(moved));
+        gc_weak.relocateObject(rt, object.Object.fromHeader(old), object.Object.fromHeader(moved));
         setForwarding(old, moved, body_bytes);
         // Poison what the copy left behind, in safety builds. Without this the
         // husk still holds the object's old field values, so code that kept a
@@ -3747,9 +3734,10 @@ pub const Registry = struct {
     pub const statsSnapshot = registry_diagnostics.statsSnapshot;
     pub const counterSnapshot = registry_diagnostics.counterSnapshot;
     pub const verifyObjectPropertyStorageLayouts = registry_diagnostics.verifyObjectPropertyStorageLayouts;
-    pub const recordFailure = registry_diagnostics.recordFailure;
-    pub const recordSuccess = registry_diagnostics.recordSuccess;
-    pub const recordMinorSuccess = registry_diagnostics.recordMinorSuccess;
+    pub const recordMinor = registry_diagnostics.recordMinor;
+    pub const completeMajor = registry_diagnostics.completeMajor;
+    pub const failMajor = registry_diagnostics.failMajor;
+    pub const resetGrowthThreshold = registry_diagnostics.resetGrowthThreshold;
     pub const verifyIntrusiveList = registry_diagnostics.verifyIntrusiveList;
     pub const verifyConstructionRoots = registry_diagnostics.verifyConstructionRoots;
     pub const verifyRepresentationInvariants = registry_diagnostics.verifyRepresentationInvariants;
@@ -3758,6 +3746,30 @@ pub const Registry = struct {
     pub const verifyHeapAccounting = registry_diagnostics.verifyHeapAccounting;
     pub const liveCount = registry_diagnostics.liveCount;
     pub const liveCountKind = registry_diagnostics.liveCountKind;
+
+    /// True while a collection or a collector phase (major driver, minor,
+    /// destruction) is running; nested collection requests stay pending.
+    pub inline fn isBusy(self: *const Registry) bool {
+        return self.hot.collecting or self.hot.phase != .none;
+    }
+
+    /// A collection driver (major or minor) is on the stack. Root and handle
+    /// mutation is refused while it is.
+    pub inline fn isCollecting(self: *const Registry) bool {
+        return self.hot.collecting;
+    }
+
+    /// Runtime teardown is destroying the whole heap (`deinit`): owners are
+    /// gone, so per-object cleanup that would consult them must not run.
+    pub inline fn isTearingDown(self: *const Registry) bool {
+        return self.hot.phase == .deinit;
+    }
+
+    /// The tracer is running destructors for condemned cells; liveness is
+    /// read from mark bits.
+    pub inline fn inTracerDestroy(self: *const Registry) bool {
+        return self.hot.phase == .tracer_destroy;
+    }
 
     pub fn containsHeader(self: *const Registry, header: *const Header) bool {
         if (self.lists.sweep_current == header) return true;

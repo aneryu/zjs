@@ -13,6 +13,7 @@ const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
+const atomics_ops = @import("atomics_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const jobs_mod = core.jobs;
 const frame_mod = @import("frame.zig");
@@ -307,7 +308,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const marker_key = try rt.internAtom("marker");
     const state_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-state-symbol");
     {
-        const state_marker_value = try rt.takeSymbolValue(state_symbol);
+        const state_marker_value = try rt.symbolValue(state_symbol);
         try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(state_marker_value, .all));
     }
 
@@ -316,7 +317,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const promise_value = try rt.takeSymbolValue(promise_symbol);
+    const promise_value = try rt.symbolValue(promise_symbol);
     const function_value = try createPromiseResolvingFunction(rt, global, promise_value, true, state);
     const function_object = objectFromValue(function_value) orelse return error.TypeError;
 
@@ -337,7 +338,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expect(function_object.functionPromiseResolvingReject());
 
     state_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
     const stored_state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
@@ -349,7 +350,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
 
     live_roots.deactivate(rt);
     live_roots_active = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
 }
@@ -380,7 +381,7 @@ test "internalPromiseCapability roots promise and shared resolving pair under GC
     try std.testing.expect(resolve_state.same(reject_state));
 
     const promise_symbol = try rt.atoms.newValueSymbol("gc-internal-promise-capability-symbol");
-    var marker_value = try rt.takeSymbolValue(promise_symbol);
+    var marker_value = try rt.symbolValue(promise_symbol);
     var marker_roots = core.runtime.rootValues(.{&marker_value});
     marker_roots.activate(rt);
     try promise.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, .all));
@@ -392,7 +393,7 @@ test "internalPromiseCapability roots promise and shared resolving pair under GC
     var live_roots_active = true;
     defer if (live_roots_active) live_roots.deactivate(rt);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     const stored_target = resolve_slot.?.functionPromiseResolvingTarget() orelse return error.TypeError;
     const stored_promise = objectFromValue(stored_target) orelse return error.TypeError;
@@ -403,7 +404,7 @@ test "internalPromiseCapability roots promise and shared resolving pair under GC
 
     live_roots.deactivate(rt);
     live_roots_active = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
 }
 
@@ -550,7 +551,7 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
 
     // An atom id is an integer, so nothing but a declared atom root keeps the
     // four entries alive across each other's body allocation (gc-invariants,
-    // class B); and each `takeSymbolValue` mints a body, which allocates, so
+    // class B); and each `symbolValue` mints a body, which allocates, so
     // the values already taken need their frame before the next call rather
     // than after the last one. Both frames close before the collection below,
     // which is the one that has to find the symbols unreachable.
@@ -575,10 +576,10 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
         });
         root_frame.activate(rt);
         defer root_frame.deactivate(rt);
-        on_fulfilled_value = try rt.takeSymbolValue(on_fulfilled_symbol);
-        on_rejected_value = try rt.takeSymbolValue(on_rejected_symbol);
-        resolve_value = try rt.takeSymbolValue(resolve_symbol);
-        reject_value = try rt.takeSymbolValue(reject_symbol);
+        on_fulfilled_value = try rt.symbolValue(on_fulfilled_symbol);
+        on_rejected_value = try rt.symbolValue(on_rejected_symbol);
+        resolve_value = try rt.symbolValue(resolve_symbol);
+        reject_value = try rt.symbolValue(reject_symbol);
         break :blk try promiseReactionRecord(rt, on_fulfilled_value, on_rejected_value, resolve_value, reject_value);
     };
     const record = objectFromValue(record_value) orelse return error.TypeError;
@@ -592,7 +593,7 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve().?.asSymbolAtom().?);
     try std.testing.expectEqual(reject_symbol, record.promiseReactionReject().?.asSymbolAtom().?);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) == null);
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) == null);
     try std.testing.expect(rt.atoms.name(resolve_symbol) == null);
@@ -621,7 +622,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     const marker_key = try rt.internAtom("marker");
     const reaction_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-record-symbol");
     {
-        const reaction_marker_value = try rt.takeSymbolValue(reaction_symbol);
+        const reaction_marker_value = try rt.symbolValue(reaction_symbol);
         try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(reaction_marker_value, .all));
     }
 
@@ -630,7 +631,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const reaction_payload = try rt.takeSymbolValue(value_symbol);
+    const reaction_payload = try rt.symbolValue(value_symbol);
     var job = try promiseReactionJob(ctx, reaction, reaction_payload, true);
     var job_alive = true;
     defer if (job_alive) job.deinit();
@@ -652,7 +653,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
     try std.testing.expect(job.payload.promise_reaction.rejected);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const stored_reaction_value = job.payload.promise_reaction.reaction;
@@ -666,7 +667,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     job_roots_active = false;
     job.deinit();
     job_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(reaction_symbol) == null);
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
@@ -718,10 +719,10 @@ test "prepared promise reaction jobs expose direct symbol payloads to an explici
 
     const jobs = try rt.nativeAllocator().alloc(jobs_mod.Job, 2);
     const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
-    const first = try rt.takeSymbolValue(first_atom);
+    const first = try rt.symbolValue(first_atom);
     jobs[0] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
     const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
-    const second = try rt.takeSymbolValue(second_atom);
+    const second = try rt.symbolValue(second_atom);
     jobs[1] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), second, false);
     var prepared = PreparedPromiseReactionJobs{
         .jobs = jobs,
@@ -740,13 +741,13 @@ test "prepared promise reaction jobs expose direct symbol payloads to an explici
     var roots_active = true;
     defer if (roots_active) roots.deactivate(rt);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
     try std.testing.expect(rt.atoms.name(second_atom) != null);
 
     roots.deactivate(rt);
     roots_active = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
 }
@@ -852,7 +853,7 @@ test "promiseSettleValue roots direct symbol result while preparing reaction job
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    const settle_value = try rt.takeSymbolValue(symbol_atom);
+    const settle_value = try rt.symbolValue(symbol_atom);
     try promiseSettleValue(ctx, promise, settle_value, false);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -865,7 +866,7 @@ test "promiseSettleValue roots direct symbol result while preparing reaction job
     var pending_job = ctx.runtime.job_queue.takeFirst() orelse return error.TypeError;
     pending_job.deinit();
     try promise.setPromiseResult(rt, null);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -934,7 +935,7 @@ fn settlePromiseResolutionWithReservedOwner(
     std.debug.assert(slot_reserved.*);
     promiseSettleValue(ctx, target, completion, rejected) catch |err| {
         if (err != error.OutOfMemory) return err;
-        ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseSettlementNoFail(
+        ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseSettlement(
             ctx,
             target.value(),
             completion,
@@ -1098,7 +1099,7 @@ const PromiseJobOomProbe = struct {
         // live) so the limit below is the LIVE size -- storage cells are
         // collected carriers now, so `checkAllocation`'s retry collection
         // would otherwise find real bytes to give back.
-        _ = rt.collectFull(null, .engine_active) catch {};
+        _ = rt.collectFull() catch {};
         rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
         if (self.fail) return error.TypeError;
         return core.JSValue.int32(77);
@@ -1215,7 +1216,7 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     // allocate.
     try rt.job_queue.ensureCapacity(1);
     // TGC S4-b: see `PromiseJobOomProbe.call`.
-    _ = rt.collectFull(null, .engine_active) catch {};
+    _ = rt.collectFull() catch {};
     rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     _ = (try promiseResolvingFunctionCall(
         ctx,
@@ -1243,14 +1244,14 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     )).?;
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(?i32, 41), target.promiseResult().?.as(.int));
     try std.testing.expect(!target.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 test "custom Promise reaction capability bare error becomes runOne exception exactly once" {
@@ -1259,7 +1260,7 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
 
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    const global = try zjs_vm.contextGlobal(ctx);
+    _ = try zjs_vm.contextGlobal(ctx);
 
     var probe = PromiseBareCapabilityErrorProbe{};
     const resolve = try promiseBareCapabilityErrorFunction(ctx, &probe);
@@ -1279,15 +1280,15 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
     };
     try rt.job_queue.enqueueFunc(ctx, TailJob.run, &.{});
 
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.exception, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.exception, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(ctx.hasException());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     _ = ctx.takeException();
 
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null));
 }
 
 test "Promise reaction OOM transfers internal settle to FIFO without invoking handler twice" {
@@ -1315,7 +1316,7 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
     );
     try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(1), false);
 
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
@@ -1323,11 +1324,11 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
     try std.testing.expectEqual(@as(?i32, 77), rt.job_queue.jobs[0].payload.promise_settlement.completion.as(.int));
 
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(?i32, 77), target.promiseResult().?.as(.int));
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 test "Promise resolving OOM keeps FIFO owner after then getter and resolver collection" {
@@ -1362,14 +1363,14 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult().?.same(thenable.value()));
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 test "Promise resolving getter throw plus settle OOM rejects once after resolver collection" {
@@ -1403,15 +1404,15 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
     try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() != null);
     try std.testing.expect(target.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 test "Promise thenable OOM resumes rejection without invoking then twice" {
@@ -1421,7 +1422,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setNativeBytesLimitForTest(null);
-    const global = try zjs_vm.contextGlobal(ctx);
+    _ = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
     try appendDummyPromiseReaction(rt, target);
@@ -1431,7 +1432,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     const then_function = try promiseJobOomProbeFunction(ctx, &probe, "thenableOomProbe");
     try rt.job_queue.enqueuePromiseThenable(ctx, target.value(), thenable.value(), then_function);
 
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
@@ -1439,12 +1440,12 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
 
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() != null);
     try std.testing.expect(target.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 test "Job.initPromiseThenable roots direct function bytecode then callback while creating job" {
@@ -1463,7 +1464,7 @@ test "Job.initPromiseThenable roots direct function bytecode then callback while
     const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+    }, &.{try rt.symbolValue(symbol_atom)});
 
     const then_callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -1481,7 +1482,7 @@ test "Job.initPromiseThenable roots direct function bytecode then callback while
 
     job.deinit();
     job_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1522,7 +1523,7 @@ pub fn promiseThenableJobCall(
                 // side effects. Capture its abrupt completion in the entry and
                 // resume only the rejection call after a retriable OOM.
                 const reason = try promiseErrorValue(ctx, global, err);
-                payload.replaceCompletionOwned(ctx.runtime, reason);
+                payload.replaceCompletionOwned(reason);
                 payload.phase = .reject;
                 break :invoke;
             };
@@ -1600,12 +1601,12 @@ pub fn promiseReactionJobCall(
                 // its abrupt completion before attempting the capability reject,
                 // so an OOM retries only that settle phase.
                 const reason = try promiseErrorValue(ctx, global, err);
-                payload.replaceValueOwned(ctx.runtime, reason);
+                payload.replaceValueOwned(reason);
                 payload.phase = .reject;
                 break :invoke;
             };
             if (payload.rejected) clearHandledRejectionException(ctx);
-            payload.replaceValueOwned(ctx.runtime, callback_result);
+            payload.replaceValueOwned(callback_result);
             payload.phase = .resolve;
         }
     }
@@ -1962,7 +1963,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     try promiseSetArrayIndex(rt, keys, 0, key_name);
     const value_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-keyed-result-symbol");
     {
-        const keyed_value = try rt.takeSymbolValue(value_symbol);
+        const keyed_value = try rt.symbolValue(value_symbol);
         try promiseSetArrayIndex(rt, values, 0, keyed_value);
     }
 
@@ -1982,7 +1983,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer if (result_roots_active) result_roots.deactivate(rt);
 
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const answer_atom = try rt.internAtom("answer");
     {
@@ -1994,7 +1995,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
 
     result_roots.deactivate(rt);
     result_roots_active = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
@@ -2023,7 +2024,7 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const payload_value = try rt.takeSymbolValue(symbol_atom);
+    const payload_value = try rt.symbolValue(symbol_atom);
     const record_value = try promiseSettlementRecord(rt, null, false, payload_value);
     const record = objectFromValue(record_value) orelse return error.TypeError;
 
@@ -2034,7 +2035,7 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
         try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2062,7 +2063,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     const values = try core.Object.create(rt, core.class.ids.array, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const resolve_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -2080,7 +2081,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
 
     core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2862,7 +2863,7 @@ test "async resume callbacks keep only internal state and trace their continuati
         roots.activate(rt);
         defer roots.deactivate(rt);
         const marker = try rt.atoms.newValueSymbol("async-resume-continuation-root");
-        try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(try rt.takeSymbolValue(marker), .all));
+        try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(try rt.symbolValue(marker), .all));
         const old_threshold = rt.gcThreshold();
         rt.setGCThreshold(0);
         defer rt.setGCThreshold(old_threshold);
@@ -2883,12 +2884,12 @@ test "async resume callbacks keep only internal state and trace their continuati
 
         // The callback must be the sole root of its continuation at this boundary.
         continuation = null;
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(marker) != null);
         const retained = callback.?.asyncResumeContinuation().?;
         try std.testing.expectEqual(marker, (try retained.getProperty(marker_key)).asSymbolAtom().?);
         callback = null;
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(marker) == null);
     }
 }
@@ -2911,7 +2912,7 @@ test "async resume callback allocation failure preserves its continuation" {
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, asyncFunctionResumeCallback(rt, global, continuation.?, false));
     rt.setNativeBytesLimitForTest(null);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(?i32, 42), (try continuation.?.getProperty(marker_key)).as(.int));
     const callback = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, continuation.?, true));
     try std.testing.expectEqual(continuation.?, callback.asyncResumeContinuation().?);
@@ -2928,7 +2929,7 @@ test "async resume callback continuation barrier preserves young state" {
     var roots = core.runtime.rootObjects(.{&callback});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!callback.?.gcHeader().metaConst().flags.young);
 
     const young = try core.Object.create(rt, core.class.ids.object, null);
@@ -2936,14 +2937,14 @@ test "async resume callback continuation barrier preserves young state" {
     callback.?.setAsyncResumeContinuation(rt, young);
     try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(callback.?.gcHeader())));
     // Declared-only collection cannot rescue young through this Zig local.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.ownsObject(young));
     try std.testing.expectEqual(young, callback.?.asyncResumeContinuation().?);
 
     const removed = try core.Object.create(rt, core.class.ids.object, null);
     callback.?.setAsyncResumeContinuation(rt, removed);
     callback.?.setAsyncResumeContinuation(rt, null);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!rt.ownsObject(removed));
 }
 
@@ -2996,7 +2997,7 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
         fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.calls += 1;
-            _ = rt.collectForTest();
+            _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
             return false;
         }
     };
@@ -3018,7 +3019,7 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
     continuation_value = continuation.value();
     try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
     const symbol_atom = try rt.atoms.newValueSymbol("interrupt-async-settle-symbol");
-    result_value = try rt.takeSymbolValue(symbol_atom);
+    result_value = try rt.symbolValue(symbol_atom);
 
     // Remove setup roots so only the callee can keep these values alive.
     // Declared-root collection ignores the native pointer locals above.
@@ -3035,7 +3036,7 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
     try std.testing.expect(rt.ownsObject(target));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(symbol_atom, target.promiseResult().?.asSymbolAtom().?);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(continuation));
     try std.testing.expect(!rt.ownsObject(target));
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -3057,7 +3058,7 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
         const continuation = try core.Object.create(rt, core.class.ids.generator, null);
         continuation_value = continuation.value();
         try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         rt.suppressLimitCollectionForTest(true);
         defer rt.suppressLimitCollectionForTest(false);
         const allocated = rt.allocation_diagnostics.allocated_bytes;
@@ -3137,14 +3138,14 @@ test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" 
     // target and observed completion; retrying must not read the getter again.
     continuation_value = core.JSValue.undefinedValue();
     thenable_value = core.JSValue.undefinedValue();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     rt.setNativeBytesLimitForTest(null);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expect(target.promiseResult().?.sameValue(thenable.value()));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null));
 }
 
 test "asyncFunctionSettle roots direct symbol result before promise stores it" {
@@ -3164,7 +3165,7 @@ test "asyncFunctionSettle roots direct symbol result before promise stores it" {
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    const settle_value = try rt.takeSymbolValue(symbol_atom);
+    const settle_value = try rt.symbolValue(symbol_atom);
     try asyncFunctionSettle(ctx, null, global, continuation, settle_value, false);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -3173,7 +3174,7 @@ test "asyncFunctionSettle roots direct symbol result before promise stores it" {
     try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
 
     try promise_object.setPromiseResult(rt, null);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3506,7 +3507,7 @@ test "promiseFinallyCallback roots direct symbol payload while allocating callba
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const payload_value = try rt.takeSymbolValue(symbol_atom);
+    const payload_value = try rt.symbolValue(symbol_atom);
     const callback = try promiseFinallyCallback(
         rt,
         global,
@@ -3521,7 +3522,7 @@ test "promiseFinallyCallback roots direct symbol payload while allocating callba
     const stored = callback_object.functionPromiseFinallyPayload() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3628,7 +3629,7 @@ pub fn performPromiseThen(
     const result_value = object.promiseResult() orelse core.JSValue.undefinedValue();
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
-    var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job = jobs_mod.Job.initPromiseReaction(ctx, reaction_object.value(), result_value, rejected);
     var prepared_job_owned = true;
     defer if (prepared_job_owned) prepared_job.deinit();
     try ctx.runtime.job_queue.reserveEntries(1);
@@ -3651,7 +3652,7 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setNativeBytesLimitForTest(null);
-    const global = try zjs_vm.contextGlobal(ctx);
+    _ = try zjs_vm.contextGlobal(ctx);
 
     const reason = core.JSValue.int32(73);
     ctx.setTrackUnhandledRejections(true);
@@ -3662,7 +3663,7 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     // TGC S4-b: storage buffers are collected carriers now, so the
     // limit-triggered retry collection inside `checkAllocation` can free real
     // bytes. Sweep first so the baseline is the LIVE size.
-    _ = rt.collectFull(null, .engine_active) catch {};
+    _ = rt.collectFull() catch {};
     const baseline = rt.allocation_diagnostics.allocated_bytes;
     rt.setNativeBytesLimitForTest(baseline);
     try std.testing.expectError(error.OutOfMemory, performPromiseThen(
@@ -3691,7 +3692,7 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     try std.testing.expect(!ctx.hasUnhandledRejection());
     try std.testing.expect(!ctx.hasException());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null));
 }
 
 pub fn promiseThen(
@@ -3725,7 +3726,7 @@ pub fn promiseThen(
     const reaction = try thenReactionRecord(ctx.runtime, &capability, stored_on_fulfilled, stored_on_rejected);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
-    var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job = jobs_mod.Job.initPromiseReaction(ctx, reaction_object.value(), result_value, rejected);
     var prepared_job_owned = true;
     defer if (prepared_job_owned) prepared_job.deinit();
     try ctx.runtime.job_queue.reserveEntries(1);
@@ -3770,7 +3771,7 @@ pub fn drainPendingPromiseJobs(
 pub fn runRuntimeMicrotask(rt: *core.JSRuntime) HostError!jobs_mod.RunOneStatus {
     if (!rt.job_queue.hasJobs()) return .empty;
     const ctx = rt.job_queue.jobs[0].realm.borrow() orelse return error.InvalidBuiltinRegistry;
-    return drainOnePendingJob(ctx, rt.microtasks.output, ctx.global orelse return error.InvalidBuiltinRegistry);
+    return drainOnePendingJob(ctx, rt.microtasks.output);
 }
 
 fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
@@ -3791,22 +3792,17 @@ fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactio
 
 /// Execute exactly one typed ECMAScript FIFO entry. The host context selects
 /// the Runtime only; the entry's owned RealmRef selects the execution realm.
-pub fn drainOnePendingJob(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) HostError!jobs_mod.RunOneStatus {
-    _ = global;
+pub fn drainOnePendingJob(ctx: *core.JSContext, output: ?*std.Io.Writer) HostError!jobs_mod.RunOneStatus {
     const queue = &ctx.runtime.job_queue;
     if (!queue.hasJobs()) return .empty;
 
     var entry = queue.takeFirst().?;
     var entry_owned = true;
     defer if (entry_owned) entry.deinit();
-    var active_job_root: core.runtime.ActiveJobRoot = .{};
+    var active_job_root: jobs_mod.ActiveJobRoot = .{};
     active_job_root.activate(ctx.runtime, &entry);
     defer active_job_root.deactivate(ctx.runtime);
-    defer if (!ctx.runtime.microtasks.running) ctx.runtime.clearWeakRefKeptAlive();
+    defer ctx.runtime.microtasks.endStandaloneJob(ctx.runtime.nativeAllocator());
     const job_ctx = entry.realm.borrow().?;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     // Retriable arms claim the unlinked head slot first, so a failure before
@@ -3860,7 +3856,7 @@ pub fn drainOnePendingJob(
         },
         .atomics_waiter => |*payload| {
             queue.reserveUnlinkedEntrySlot();
-            payload.runner(job_ctx, payload) catch |err|
+            atomics_ops.atomicsRunAsyncWaiterCompletion(job_ctx, payload) catch |err|
                 return retryOrFail(queue, &entry, &entry_owned, job_ctx, err, true);
         },
         .finalization => |*payload| {
@@ -3925,7 +3921,7 @@ test "promise enqueues reactions and executes jobs via engine" {
     ctx.global = global;
 
     promise_jobs = 0;
-    try core.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
+    try ctx.runtime.job_queue.enqueueFunc(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
 
     try drainPendingPromiseJobs(ctx, null, global);
 
@@ -3953,7 +3949,7 @@ test "promise reaction carrier barriers cover all four slots" {
     var roots = core.runtime.rootObjects(.{&record});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!record.?.gcHeader().metaConst().flags.young);
     inline for (.{
         .{ "setPromiseReactionOnFulfilled", "promiseReactionOnFulfilled" },
@@ -3965,13 +3961,13 @@ test "promise reaction carrier barriers cover all four slots" {
         try std.testing.expect(child.gcHeader().metaConst().flags.young);
         try @field(core.Object, accessors[0])(record.?, rt, child.value());
         try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(record.?.gcHeader())));
-        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         try std.testing.expect(rt.ownsObject(child));
         try std.testing.expect(@field(core.Object, accessors[1])(record.?).?.same(child.value()));
         const removed = try core.Object.create(rt, core.class.ids.object, null);
         try @field(core.Object, accessors[0])(record.?, rt, removed.value());
         try @field(core.Object, accessors[0])(record.?, rt, null);
-        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         try std.testing.expect(!rt.ownsObject(removed));
     }
 }
@@ -3983,14 +3979,14 @@ test "promise reaction carrier promotion preserves values across OOM and GC" {
     var symbols: [4]core.Atom = undefined;
     for (&values, &symbols) |*value, *symbol| {
         symbol.* = try rt.atoms.newValueSymbol("reaction-promotion");
-        value.* = try rt.takeSymbolValue(symbol.*);
+        value.* = try rt.symbolValue(symbol.*);
     }
     var record: ?*core.Object = try core.Object.expect(try promiseReactionRecord(rt, values[0], values[1], values[2], values[3]));
     var roots = core.runtime.rootObjects(.{&record});
     roots.activate(rt);
     defer roots.deactivate(rt);
     values = @splat(core.JSValue.undefinedValue());
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     rt.setNativeBytesLimitForTest(0);
     defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, record.?.ensureOrdinaryPayload(rt));
@@ -4000,14 +3996,14 @@ test "promise reaction carrier promotion preserves values across OOM and GC" {
     (try record.?.promiseAlreadyResolvedSlot(rt)).* = true;
     try std.testing.expect(record.?.promiseAlreadyResolved());
     try std.testing.expectEqual(core.class.PayloadKind.ordinary, record.?.flags.class_payload_kind);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const getters = .{ "promiseReactionOnFulfilled", "promiseReactionOnRejected", "promiseReactionResolve", "promiseReactionReject" };
     inline for (getters, 0..) |getter, i| {
         try std.testing.expect(rt.atoms.name(symbols[i]) != null);
         try std.testing.expectEqual(symbols[i], @field(core.Object, getter)(record.?).?.asSymbolAtom().?);
     }
     record = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     for (symbols) |symbol| try std.testing.expect(rt.atoms.name(symbol) == null);
 }
 
@@ -4027,11 +4023,11 @@ test "promise reaction carrier allocation failure preserves input roots" {
     record = try core.Object.expect(try promiseReactionRecord(rt, input.?.value(), input.?.value(), input.?.value(), input.?.value()));
     const child = input.?;
     input = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.ownsObject(child));
     try std.testing.expect(record.?.promiseReactionReject().?.same(child.value()));
     record = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(child));
 }
 
@@ -4044,7 +4040,7 @@ test "P-Cap target and error realm edges survive remembered and declared-only tr
     var roots = core.runtime.rootObjects(.{&record});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!record.?.gcHeader().metaConst().flags.young);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -4052,20 +4048,20 @@ test "P-Cap target and error realm edges survive remembered and declared-only tr
     try std.testing.expect(target.gcHeader().metaConst().flags.young);
     record.?.setPromiseReactionIntrinsicCapability(rt, target.value(), error_global.value());
     try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(record.?.gcHeader())));
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.ownsObject(target));
     try std.testing.expect(rt.ownsObject(error_global));
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.target.sameValue(target.value()));
     try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.self_error_global.sameValue(error_global.value()));
 
     _ = try record.?.ensureOrdinaryPayload(rt);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.ownsObject(target));
     try std.testing.expect(rt.ownsObject(error_global));
     try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.target.sameValue(target.value()));
     record.?.clearPromiseReactionIntrinsicCapability();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(target));
     try std.testing.expect(!rt.ownsObject(error_global));
 }
@@ -4109,7 +4105,7 @@ test "fulfilled await uses only its reserved FIFO slot" {
         defer roots.deactivate(rt);
         value = switch (kind) {
             0 => core.JSValue.int32(42),
-            1 => try rt.takeSymbolValue(try rt.atoms.newValueSymbol("direct-await-value")),
+            1 => try rt.symbolValue(try rt.atoms.newValueSymbol("direct-await-value")),
             else => (try core.Object.create(rt, core.class.ids.object, null)).value(),
         };
         awaited = try core.promise.fulfilledWithPrototype(ctx, value, promisePrototypeFromGlobal(rt, global));

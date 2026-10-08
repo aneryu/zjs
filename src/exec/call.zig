@@ -246,7 +246,7 @@ test "primitiveWrapper roots direct symbol while creating call wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const wrapper_value = try primitiveWrapper(ctx, core.class.ids.symbol, symbol_value, null);
     const wrapper = try property_ops.expectObject(wrapper_value);
 
@@ -254,7 +254,7 @@ test "primitiveWrapper roots direct symbol while creating call wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -362,9 +362,9 @@ test "createBoundFunction roots bound this and args while creating function" {
     const target = try core.function.nativeFunction(ctx, "target", 0);
 
     const this_atom = try rt.atoms.newValueSymbol("gc-bound-this-symbol");
-    const this_value = try rt.takeSymbolValue(this_atom);
+    const this_value = try rt.symbolValue(this_atom);
     const arg_atom = try rt.atoms.newValueSymbol("gc-bound-arg-symbol");
-    const arg_value = try rt.takeSymbolValue(arg_atom);
+    const arg_value = try rt.symbolValue(arg_atom);
     const bound_args = [_]core.JSValue{arg_value};
 
     const old_threshold = rt.gcThreshold();
@@ -387,7 +387,7 @@ test "createBoundFunction roots bound this and args while creating function" {
     try std.testing.expectEqual(@as(usize, 1), bound.boundArgs().len);
     try std.testing.expect(bound.boundArgs()[0].same(arg_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(this_atom) == null);
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
@@ -413,7 +413,7 @@ test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
     );
 
     const arg_atom = try rt.atoms.newValueSymbol("gc-call-legacy-inline-arg-root");
-    const arg_value = try rt.takeSymbolValue(arg_atom);
+    const arg_value = try rt.symbolValue(arg_atom);
     const args = [_]core.JSValue{arg_value};
 
     const Trigger = struct {
@@ -425,23 +425,17 @@ test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
+            _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
             self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_id = arg_atom,
     };
-    rt.gc.heap_budget.probe = Trigger.trigger;
-    rt.gc.heap_budget.probe_ctx = &trigger;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = Trigger.trigger, .context = &trigger });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     _ = try call_runtime.callValueOrBytecodeRoot(
         ctx,
@@ -453,13 +447,12 @@ test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
         null,
         null,
     );
-    rt.gc.heap_budget.probe = saved_trigger_fn;
-    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_arg);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
@@ -491,7 +484,7 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
         var name_buffer: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "gc-call-overflow-arg-{d}", .{index});
         atom_slot.* = try rt.atoms.newValueSymbol(name);
-        arg_slot.* = try rt.takeSymbolValue(atom_slot.*);
+        arg_slot.* = try rt.symbolValue(atom_slot.*);
     }
 
     const Trigger = struct {
@@ -503,7 +496,7 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.collectFull(null, .engine_active) catch {};
+            _ = self.rt.collectFull() catch {};
             self.collections += 1;
             for (self.atom_ids) |id| {
                 if (self.rt.atoms.name(id) == null) self.lost_arg = true;
@@ -525,18 +518,12 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
     rt.forcePreciseRootScanForTest();
     defer rt.restoreDefaultRootScanForTest();
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_ids = arg_atoms[0..],
     };
-    rt.gc.heap_budget.probe = Trigger.trigger;
-    rt.gc.heap_budget.probe_ctx = &trigger;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = Trigger.trigger, .context = &trigger });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     const result = try call_runtime.callValueOrBytecodeRoot(
         ctx,
@@ -548,8 +535,7 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
         null,
         null,
     );
-    rt.gc.heap_budget.probe = saved_trigger_fn;
-    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     // At least one collection has to have run inside the call, or the
     // assertions below prove nothing.
@@ -614,7 +600,7 @@ fn functionBytecodeToStringValue(
     object: ?*core.Object,
 ) !core.JSValue {
     if (function_bytecode.sourceText()) |source| {
-        try rt.pollNativeBulkWork(source.len);
+        try rt.interrupt.pollNativeBulkWork(source.len);
         return value_ops.createStringValue(rt, source);
     }
     if (object) |function_object| {
@@ -782,7 +768,7 @@ pub fn evalGlobalScriptSource(
     // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
     // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
     // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.runtime.stack.call_depth == 0) ctx.runtime.updateNativeStackTop();
+    if (ctx.runtime.stack.call_depth == 0) ctx.runtime.stack.captureNativeTop();
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
@@ -792,7 +778,7 @@ pub fn evalGlobalScriptSource(
 
     const EvalResult = @typeInfo(@TypeOf(evalGlobalScriptSource)).@"fn".return_type.?;
     const result: EvalResult = blk: {
-        const compile_realm = ctx.runtime.contextForGlobalIncludingConstructing(global) orelse break :blk error.InvalidBuiltinRegistry;
+        const compile_realm = ctx.runtime.contexts.forGlobal(global, .include_constructing) orelse break :blk error.InvalidBuiltinRegistry;
         var compiled = parser.compile(.{ .realm = compile_realm }, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
         defer compiled.deinit();
         if (compiled.syntax_error) |*parse_error| {

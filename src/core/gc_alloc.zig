@@ -4,6 +4,7 @@
 const gc_alloc = @This();
 const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
+const gc_driver = @import("gc_driver.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const Registry = @import("gc.zig").Registry;
@@ -1042,10 +1043,13 @@ pub fn heapChargeForCarrier(total_bytes: usize) usize {
 /// Prospective JS-heap charge. `bytes` is the amount publication will add
 /// to the heap budget, not the diagnostic allocation size. Checks admission
 /// without reserving or charging bytes; Registry charges on publication.
-/// `allow_retry` permits the budget's GC callback. Otherwise this only checks.
+/// `allow_retry` permits one heap-limit collection, once the Registry is
+/// activated. Otherwise this only checks.
 fn admitHeapCharge(self: *Registry, bytes: usize, allow_retry: bool) !void {
-    const budget = &self.heap_budget;
-    if (allow_retry) try budget.admit(bytes) else try budget.checkOnly(bytes);
+    // No limit is the common case: nothing to check, no retry to reach.
+    if (self.heap_budget.limit == null) return;
+    const rt = self.runtime orelse return self.heap_budget.checkOnly(bytes);
+    if (allow_retry) try gc_driver.admitHeapCharge(rt, bytes) else try self.heap_budget.checkOnly(bytes);
 }
 
 /// Test and force-GC observation for an allocation that opted in. `NoTrigger`
@@ -1058,7 +1062,7 @@ pub inline fn noteAllocProbe(self: *Registry, byte_count: usize) void {
     if (comptime builtin.is_test) {
         if (budget.runProbe(byte_count)) return;
     }
-    if (budget.owner_notify) |notify| notify(budget.owner_ctx, byte_count);
+    if (self.runtime) |rt| gc_driver.requestGCForAllocation(rt, byte_count);
 }
 
 fn requireGc(comptime T: type) void {

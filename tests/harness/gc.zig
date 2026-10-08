@@ -3,6 +3,7 @@
 //! `reclaimNow` is the precise-scan discipline: anything the test still
 //! holds must be named in a `rootValues` / `rootObjects` frame.
 
+const std = @import("std");
 const zjs = @import("zjs");
 const core = zjs.core;
 
@@ -14,7 +15,7 @@ const core = zjs.core;
 /// deterministic, and it is what turns a missing root into a test failure
 /// rather than into a conservative-scan accident.
 pub fn reclaimNow(rt: *core.JSRuntime) void {
-    _ = rt.collectForTest();
+    _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {
@@ -30,13 +31,12 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
 /// just this one with `key.value()` already applied.
 pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     const key_identity = (try core.Object.weakIdentityFromValue(rt, key)).?;
-    rt.retainWeakIdentity(key_identity);
-    errdefer rt.releaseWeakIdentity(key_identity);
+    core.gc_weak.retain(rt, key_identity);
+    errdefer core.gc_weak.release(rt, key_identity);
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.items.len;
-    const inserted_holder = !collection.isBorrowedReferenceHolder();
-    try rt.registerBorrowedReferenceHolder(collection);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(collection);
+    const inserted_holder = try core.property_state.registerHolder(rt, collection);
+    errdefer if (inserted_holder) core.property_state.unregisterHolder(rt, collection);
     try collection.ensureWeakCollectionEntryCapacity(rt, index + 1);
     const refreshed_entries = collection.weakCollectionEntriesSlot();
     refreshed_entries.items = refreshed_entries.items.ptr[0 .. index + 1];
@@ -45,5 +45,5 @@ pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.
         .key_identity = key_identity,
         .value = value,
     };
-    try rt.registerBorrowedReferenceHolder(collection);
+    _ = try core.property_state.registerHolder(rt, collection);
 }

@@ -486,7 +486,7 @@ fn applyRuntimeOptions(rt: *zjs.Runtime, runtime_options: RuntimeOptions) void {
     // `detailed_reports` is one input of the barrier gate; a flip against a
     // live Registry must republish it (gc.refreshBarrierGate contract).
     rt.gc.refreshBarrierGate();
-    rt.can_block = runtime_options.can_block;
+    rt.host_wait.can_block = runtime_options.can_block;
     if (runtime_options.memory_limit) |limit| rt.setMemoryLimit(limit);
     if (runtime_options.stack_size) |size| rt.setStackSize(size);
     if (runtime_options.native_stack_size) |size| rt.setNativeStackSize(clampToThreadStack(size));

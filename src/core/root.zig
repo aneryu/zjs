@@ -65,8 +65,13 @@ pub const gc_carrier = @import("gc_carrier.zig");
 pub const gc_visit = @import("gc_visit.zig");
 pub const generator_state = @import("generator_state.zig");
 pub const gc_trace_stw = @import("gc_trace_stw.zig");
+pub const gc_driver = @import("gc_driver.zig");
+pub const property_state = @import("property_state.zig");
+pub const gc_weak = @import("gc_weak.zig");
 pub const gc_conservative = @import("gc_conservative.zig");
 pub const thread_stack = @import("thread_stack.zig");
+pub const vm_stack = @import("vm_stack.zig");
+pub const interrupt = @import("interrupt.zig");
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

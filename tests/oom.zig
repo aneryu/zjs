@@ -581,7 +581,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
         try wrapper.runJobs(null);
         while (try zjs.exec.atomics_ops.runNextAtomicsHostCompletion(ctx, false)) try wrapper.runJobs(null);
     }
-    if (snippet.collect_cycles) _ = rt.collectForTest();
+    if (snippet.collect_cycles) _ = try rt.collectForTest();
 
     if (snippet.post_source) |post_source| {
         const post_value = try wrapper.eval(post_source, .{ .filename = corpus_filename });
@@ -924,7 +924,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
                 _ = ctx.takeUnhandledRejection();
             }
         }
-        if (snippet.collect_cycles) _ = rt.collectForTest();
+        if (snippet.collect_cycles) _ = try rt.collectForTest();
 
         // Recovery canary: must fully succeed in the same runtime. The
         // injector is disarmed first - the canary verifies recovery after
@@ -1117,7 +1117,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
                 // Failed native functions may temporarily retain their
                 // constructing Realm. The ordinary cycle pass must retire the
                 // whole unpublished graph without touching the anchor Realm.
-                _ = rt.collectForTest();
+                _ = try rt.collectForTest();
                 try std.testing.expect(rt.contexts.constructing_head == null);
                 try std.testing.expect(rt.contexts.constructing_tail == null);
                 try std.testing.expectEqual(anchor, rt.firstContext().?);
@@ -1191,7 +1191,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     // and the closing assertions compare against a heap that a full
     // collection has just walked -- so the baseline has to be taken from the
     // same quiesced state or the debris shows up as a spurious delta.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const baseline_bytes = rt.allocation_diagnostics.allocated_bytes;
     const baseline_allocations = rt.allocation_diagnostics.allocation_count;
     const baseline_live = rt.gc.liveCount();
@@ -1267,7 +1267,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.allocation_diagnostics.allocated_bytes);
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
     try std.testing.expectEqual(baseline_bytes, rt.allocation_diagnostics.allocated_bytes);

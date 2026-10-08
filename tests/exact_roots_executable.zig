@@ -43,13 +43,13 @@ fn verifyWaiterRoots(rt: *core.JSRuntime) !void {
     waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = object.value(), .realm = core.RealmRef.retain(ctx) };
     atomics.atomicsLinkAsyncWaiter(waiter);
     defer atomics.cleanupAtomicsWaitersForContext(ctx);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     const moved = waiter.promise.?.heapReference().?;
     try require(@intFromPtr(moved) != before);
     try require(atomics.atomicsWakeWaiters(waiter.key, 1) == 1);
     try atomics.processExpiredAtomicsWaiters(ctx);
     try require(rt.job_queue.jobs.len == 1);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(rt.job_queue.jobs[0].payload.atomics_waiter.promise.heapReference().? == moved);
     try require(rt.gc.containsHeader(rt.job_queue.jobs[0].payload.atomics_waiter.promise.cycleMarkHeader().?));
     var job = rt.job_queue.takeFirst().?;
@@ -118,14 +118,14 @@ pub fn main() !void {
     rt.unregisterRootProvider(provider);
     try require((try reference.get(rt)).bits == value.bits);
     try require(rt.active_value_roots != null);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(rt.gc.containsHeader(header));
     try require((try reference.get(rt)).asStringBodyRaw().?.eqlBytes("production exact root"));
     roots.deactivate();
     if (reference.get(rt)) |_| return error.ExpiredReferenceAccepted else |err| {
         if (err != error.InactiveRoot) return err;
     }
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(!rt.gc.containsHeader(header));
 
     try roots.activate(rt);
@@ -137,7 +137,7 @@ pub fn main() !void {
     try second.copyFrom(rt, first.readOnly());
     const before = @intFromPtr(object.gcHeader());
     try require(core.gc.Registry.isNurseryHeader(object.gcHeader()));
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     const moved = (try first.get(rt)).cycleMarkHeader().?;
     try require(@intFromPtr(moved) != before);
     try require((try first.get(rt)).bits == (try second.get(rt)).bits);
@@ -258,7 +258,7 @@ fn verifyBulkDescriptorResultRoots() !void {
             const source = rt.liveObjectFromWeakIdentity(self.source).?;
             try require(try source.deleteProperty(rt, core.atom.ids.name));
             try require(try source.deleteProperty(rt, self.key));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.lost = rt.liveObjectFromWeakIdentity(self.incoming) == null or rt.atoms.name(self.key) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
             return .{ .value = core.JSValue.int32(17) };
@@ -294,7 +294,7 @@ fn verifyBulkDescriptorResultRoots() !void {
             } else {
                 var kept = try core.JSValueHandle.init(rt, (try result).?);
                 defer kept.deinit();
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const out = core.Object.fromHeader(kept.get().refHeader().?);
                 const first = core.Object.fromHeader((try out.getProperty(core.atom.ids.name)).refHeader().?);
                 try require((try first.getProperty(core.atom.ids.value)).same(rt.liveObjectFromWeakIdentity(probe.incoming).?.value()));
@@ -333,7 +333,7 @@ fn verifyDescriptorResultRoots() !void {
                 if (budget != null and budget.? == 0) try require(if (result) |_| false else |err| err == error.OutOfMemory);
                 var kept = try core.JSValueHandle.init(rt, returned);
                 defer kept.deinit();
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const object = core.Object.fromHeader(kept.get().refHeader().?);
                 const expected = rt.liveObjectFromWeakIdentity(identity).?.value();
                 if (accessor) {
@@ -363,7 +363,7 @@ fn verifyObjectGroupByRoots() !void {
             const rt = ctx.runtime;
             if (stage == 5 and argc == 2) self.item = rt.registerWeakObjectIdentity(core.Object.fromHeader(args[1].refHeader().?)) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == 7) self.closes += 1;
-            _ = rt.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = rt.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == 6) self.lost = rt.liveObjectFromWeakIdentity(self.item.?) == null;
             return core.JSValue.boolean(self.lost or stage == self.failure or (stage == 7 and self.close_failure));
         }
@@ -420,7 +420,7 @@ fn verifyObjectGroupByRoots() !void {
                 } else {
                     var kept = try core.JSValueHandle.init(rt, (try result).?);
                     defer kept.deinit();
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const out = core.Object.fromHeader(kept.get().refHeader().?);
                     try require(out.getPrototype() == null);
                     for ([_][]const u8{ "group0", "group1" }, 0..) |name, group_index| {
@@ -448,7 +448,7 @@ fn verifyFromEntriesRoots() !void {
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
             if (stage == 8) self.closes += 1;
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             return core.JSValue.boolean(stage == self.failure or (stage == 8 and self.close_failure));
         }
     };
@@ -501,7 +501,7 @@ fn verifyFromEntriesRoots() !void {
                 } else {
                     var kept = try core.JSValueHandle.init(rt, (try result).?);
                     defer kept.deinit();
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const value = try core.Object.fromHeader(kept.get().refHeader().?).getProperty(try rt.internAtom("entryKey"));
                     try require((try core.Object.fromHeader(value.refHeader().?).getProperty(try rt.internAtom("marker"))).same(core.JSValue.int32(42)));
                 }
@@ -521,7 +521,7 @@ fn verifyOwnPropertyKeyConversionRoots() !void {
         fn thunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, entry: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             const rt = ctx.runtime;
-            _ = rt.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = rt.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or (self.needs_accessor and rt.liveObjectFromWeakIdentity(self.accessor) == null);
             if (self.lost or self.fail) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
@@ -608,7 +608,7 @@ fn verifyObjectAssignRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             try require(try rt.liveObjectFromWeakIdentity(self.source).?.deleteProperty(rt, self.key));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or (!self.direct and rt.liveObjectFromWeakIdentity(self.later) == null) or rt.atoms.name(self.key) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
             return .{ .value = core.JSValue.int32(17) };
@@ -667,8 +667,6 @@ fn verifyObjectAssignRoots() !void {
 fn verifyArrayLengthConversionRoots() !void {
     const Probe = struct {
         rt: *core.JSRuntime,
-        original_retry: *const fn (*anyopaque) void,
-        original_context: *anyopaque,
         minor_error: ?anyerror = null,
         moved: bool = false,
         calls: usize = 0,
@@ -680,13 +678,16 @@ fn verifyArrayLengthConversionRoots() !void {
             // Exercise a minor/major sequence at hint-string admission. Keep
             // the normal retry and heap-limit enforcement after the minor.
             const before = self.rt.liveObjectFromWeakIdentity(self.identity).?;
-            _ = core.gc_trace_stw.collectMinor(self.rt, null, .declared_only) catch |err| {
+            _ = core.gc_trace_stw.collectMinor(self.rt, .declared_only) catch |err| {
                 self.minor_error = err;
                 return;
             };
             const after = self.rt.liveObjectFromWeakIdentity(self.identity);
             self.moved = self.moved or (after != null and before != after.?);
-            self.original_retry(self.original_context);
+            // Then the production retry, with this override out of the way.
+            self.rt.gc.heap_budget.retry_override = null;
+            defer self.rt.gc.heap_budget.retry_override = .{ .context = self, .collect = retry };
+            (core.gc_driver.HeapLimitRetry{ .rt = self.rt }).collect();
             const retried = self.rt.liveObjectFromWeakIdentity(self.identity);
             self.moved = self.moved or (retried != null and before != retried.?);
         }
@@ -710,26 +711,22 @@ fn verifyArrayLengthConversionRoots() !void {
                 defer ctx.destroy();
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
-                var probe = Probe{ .failure = failure, .rt = rt, .original_retry = rt.gc.heap_budget.retry.?, .original_context = rt.gc.heap_budget.retry_ctx.? };
+                rt.setGCThreshold(std.math.maxInt(usize));
+                var probe = Probe{ .failure = failure, .rt = rt };
                 var method = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "lengthConversion", 1));
                 defer method.deinit();
                 const entry = try rt.allocNativeEntry(.{ .target = core.NativeEntry.code(&Probe.thunk), .kind = .managed, .state = &probe });
                 core.Object.fromHeader(method.get().refHeader().?).installNativeEntry(entry);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const source = try core.Object.createPlainObject(rt, null);
                 try source.defineOwnProperty(rt, core.atom.predefinedId("Symbol.toPrimitive", .symbol).?, core.Descriptor.data(method.get(), .all));
                 probe.identity = try rt.registerWeakObjectIdentity(source);
                 // Admission can reclaim this unrooted string and then succeed.
                 _ = try core.string.String.createAscii(rt, &([_]u8{'x'} ** 8192));
                 if (budget != 0) rt.setMemoryLimit(if (budget == 1) 0 else rt.gc.heap_budget.bytes);
-                if (budget == 3) {
-                    rt.gc.heap_budget.retry = Probe.retry;
-                    rt.gc.heap_budget.retry_ctx = &probe;
-                }
+                if (budget == 3) rt.gc.heap_budget.retry_override = .{ .context = &probe, .collect = Probe.retry };
                 const result = zjs.exec.array_ops.arrayLengthDefineValue(ctx, null, global, source.value());
-                rt.gc.heap_budget.retry = probe.original_retry;
-                rt.gc.heap_budget.retry_ctx = probe.original_context;
+                rt.gc.heap_budget.retry_override = null;
                 rt.setMemoryLimit(null);
                 if (probe.minor_error) |err| return err;
                 if (budget == 3 and nursery and !probe.moved) return error.ArrayLengthFixtureDidNotMove;
@@ -763,7 +760,7 @@ fn verifyBulkDescriptorRoots() !void {
             const rt = ctx.runtime;
             const properties = rt.liveObjectFromWeakIdentity(self.properties).?;
             try require(try properties.deleteProperty(rt, core.atom.ids.name));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -831,7 +828,7 @@ fn verifyDescriptorConversionRoots() !void {
             const rt = ctx.runtime;
             const descriptor = rt.liveObjectFromWeakIdentity(self.descriptor).?;
             try require(try descriptor.deleteProperty(rt, self.field));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -942,13 +939,13 @@ fn verifyNativeMethodTableRootsMode(comptime reserve_only: bool) !void {
             try target.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(core.JSValue.int32(99), .all));
             const identity = try rt.registerWeakObjectIdentity(target);
             if (budget) |extra| rt.setMemoryLimit(if (extra == 0) 0 else rt.gc.heap_budget.bytes + extra);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const result = if (reserve_only)
                 target.reserveOwnPropertyCapacityAssumingPlain(rt, target.shape_ref.prop_count + methods.len)
             else
                 zjs.exec.standard_globals.defineNativeMethodsAssumingNew(rt, target, &methods);
             rt.setMemoryLimit(std.math.maxInt(usize));
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             const live = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostNativeMethodTableOwner;
             var kept = try core.JSValueHandle.init(rt, live.value());
             defer kept.deinit();
@@ -961,10 +958,10 @@ fn verifyNativeMethodTableRootsMode(comptime reserve_only: bool) !void {
                 try require(budget != null and err == error.OutOfMemory);
                 // Bulk installation commits one property at a time. Resume
                 // only the uncommitted suffix, preserving the new-key contract.
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
             }
             if (installed < methods.len) try zjs.exec.standard_globals.defineNativeMethodsAssumingNew(rt, core.Object.fromHeader(kept.get().refHeader().?), methods[installed..]);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require((try core.Object.fromHeader(kept.get().refHeader().?).getProperty(core.atom.ids.value)).same(core.JSValue.int32(99)));
             for (methods) |entry| {
                 const key = try rt.internAtom(entry.name);
@@ -999,23 +996,23 @@ fn verifyNamespacePublicationRoots() !void {
                 const owner = core.Object.fromHeader(global.get().refHeader().?);
                 try require(owner.propKindAt(owner.findProperty(case.key).?) == .auto_init);
                 if (budget) |extra| rt.setMemoryLimit(if (extra == 0) 0 else rt.gc.heap_budget.bytes + extra);
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 var result = owner.getProperty(case.key);
                 rt.setMemoryLimit(std.math.maxInt(usize));
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 if (result) |_| {
                     try require(budget != 0);
                 } else |err| {
                     try require(budget != null and err == error.OutOfMemory);
                     try require(rt.active_value_roots == null);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const live = core.Object.fromHeader(global.get().refHeader().?);
                     try require(live.propKindAt(live.findProperty(case.key).?) == .auto_init);
                     result = live.getProperty(case.key);
                 }
                 var namespace = try core.JSValueHandle.init(rt, try result);
                 defer namespace.deinit();
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 try require((try core.Object.fromHeader(global.get().refHeader().?).getProperty(case.key)).same(namespace.get()));
                 for (case.methods) |name| {
                     const key = try rt.internAtom(name);
@@ -1061,21 +1058,21 @@ fn verifyAutoInitBuilderRoots() !void {
                 else
                     try owner.defineAutoInitPropertyFromDescriptor(rt, key, core.property.Flags.data(.all), global, &infos[mode]);
                 if (budget) |extra| rt.setMemoryLimit(if (extra == 0) 0 else rt.gc.heap_budget.bytes + extra);
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 var result = owner.getProperty(key);
                 rt.setMemoryLimit(std.math.maxInt(usize));
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 if (result) |_| {
                     try require(budget != 0);
                 } else |err| {
                     try require(budget != null and err == error.OutOfMemory);
                     try require(rt.active_value_roots == null);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     result = core.Object.fromHeader(target.get().refHeader().?).getProperty(key);
                 }
                 var kept = try core.JSValueHandle.init(rt, try result);
                 defer kept.deinit();
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const value = kept.get();
                 const object = core.Object.fromHeader(value.refHeader().?);
                 try require((try core.Object.fromHeader(target.get().refHeader().?).getProperty(key)).same(value));
@@ -1119,7 +1116,7 @@ fn verifyAutoInitNativePreparationRoots() !void {
         fn prepare(rt: *core.JSRuntime, _: *const core.property.AutoInit, value: core.JSValue) anyerror!void {
             const self = active;
             self.produced = try rt.registerWeakObjectIdentity(core.Object.fromHeader(value.refHeader().?));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.produced) == null;
             if (self.fail or self.lost) return error.OutOfMemory;
@@ -1153,7 +1150,7 @@ fn verifyAutoInitNativePreparationRoots() !void {
             defer kept.deinit();
             try require(zjs.exec.call_runtime.isCallableValue(kept.get()));
             try require((try object.getProperty(core.atom.ids.name)).same(kept.get()));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
             const produced = rt.liveObjectFromWeakIdentity(probe.produced) orelse return error.LostAutoInitNativeResult;
             try require(kept.get().same(produced.value()));
@@ -1176,7 +1173,7 @@ fn verifyAutoInitReadRoots() !void {
             const self: *@This() = @constCast(@fieldParentPtr("owner", owner));
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -1185,7 +1182,7 @@ fn verifyAutoInitReadRoots() !void {
                 try require(try target.deleteProperty(rt, key));
                 // Neither the placeholder nor its atom is reachable from the
                 // target now. The in-flight transaction must still name both.
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 try target.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(99), .all));
             }
             var result = try core.JSValueHandle.init(rt, (try core.Object.create(rt, core.class.ids.object, null)).value());
@@ -1223,7 +1220,7 @@ fn verifyAutoInitReadRoots() !void {
                     if (probe.replace) {
                         try require(if (result) |_| false else |err| err == error.IncompatibleDescriptor);
                         try require((try Probe.read(object, rt, key, descriptor_read)).same(core.JSValue.int32(99)));
-                        _ = try rt.collectFull(null, .declared_only);
+                        _ = try rt.collectFull();
                         try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
                         try require(rt.liveObjectFromWeakIdentity(probe.produced) == null);
                         continue;
@@ -1238,7 +1235,7 @@ fn verifyAutoInitReadRoots() !void {
                     defer kept.deinit();
                     try require((try Probe.read(object, rt, key, descriptor_read)).same(kept.get()));
                     try require(probe.calls == if (fail) @as(usize, 2) else 1);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     try require(rt.liveObjectFromWeakIdentity(probe.target) == null);
                     const produced = rt.liveObjectFromWeakIdentity(probe.produced) orelse return error.LostAutoInitReadResult;
                     try require(kept.get().same(produced.value()));
@@ -1261,7 +1258,7 @@ fn verifyPropertyRedefinitionRoots() !void {
             const self: *@This() = @constCast(@fieldParentPtr("owner", owner));
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             self.lost = rt.liveObjectFromWeakIdentity(self.target) == null or rt.liveObjectFromWeakIdentity(self.incoming) == null;
             if (self.lost or self.fail) return error.OutOfMemory;
@@ -1346,23 +1343,23 @@ fn verifyNamedNativePublicationRoots() !void {
             defer ctx.destroy();
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
             if (budget) |extra| rt.setMemoryLimit(if (extra == 0) 0 else rt.gc.heap_budget.bytes + extra);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             var result = zjs.exec.object_ops.callSitePrototypeFromGlobal(rt, global);
             rt.setMemoryLimit(std.math.maxInt(usize));
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             if (result) |_| {
                 if (budget == 0) return error.ExpectedNamedNativeAllocationFailure;
             } else |err| {
                 try require(budget != null and err == error.OutOfMemory);
                 try require(rt.active_value_roots == null);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 try require(global.cachedRealmValue(rt, .callsite_prototype) == null);
                 // A failed partial publication must also permit a clean retry.
                 result = zjs.exec.object_ops.callSitePrototypeFromGlobal(rt, global);
             }
             var kept = try core.JSValueHandle.init(rt, (try result).value());
             defer kept.deinit();
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const object = core.Object.fromHeader(kept.get().refHeader().?);
             const methods = [_]struct { name: []const u8, id: core.function.EngineHelperMethod }{
                 .{ .name = "getFunction", .id = .callsite_get_function },
@@ -1399,9 +1396,9 @@ fn verifyIteratorFromRoots() !void {
                 return core.JSValue.undefinedValue();
             }
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
-            if (stage == 3) ctx.runtime.gc.heap_budget.gc_threshold = 0;
+            if (stage == 3) ctx.runtime.setGCThreshold(0);
             return core.JSValue.undefinedValue();
         }
     };
@@ -1417,7 +1414,7 @@ fn verifyIteratorFromRoots() !void {
                 const ctx = context.core;
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 if (warm) _ = try zjs.exec.object_ops.wrapForValidIteratorPrototype(rt, global);
                 var probe = Probe{ .failure = failure };
                 var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "fromBoundaryGc", 2));
@@ -1431,7 +1428,7 @@ fn verifyIteratorFromRoots() !void {
                     const value = zjs.exec.iterator_ops.iteratorFromCall(ctx, null, global, &.{source.get()}, null, null) catch |err| break :exercise err;
                     var wrapper = core.JSValueHandle.init(rt, value) catch |err| break :exercise err;
                     defer wrapper.deinit();
-                    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                    rt.setGCThreshold(std.math.maxInt(usize));
                     const owner = core.Object.fromHeader(wrapper.get().refHeader().?);
                     const target = rt.liveObjectFromWeakIdentity(probe.iterator.?) orelse break :exercise error.LostIteratorFromTarget;
                     try require(owner.iteratorTargetSlot().*.?.same(target.value()));
@@ -1462,19 +1459,19 @@ fn verifySpreadDenseRoots() !void {
             defer context.destroy();
             const ctx = context.core;
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             var source = try core.JSValueHandle.init(rt, try context.eval("Array.from({length:128}, (_,i)=>({n:i}))", .{}));
             defer source.deinit();
             const target = if (alias) core.Object.fromHeader(source.get().refHeader().?) else try core.Object.createArray(rt, null);
             const identity = try rt.registerWeakObjectIdentity(target);
             const start: i32 = if (alias) 128 else 0;
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const index = try zjs.exec.call_runtime.appendSpreadValuesEnumerate(ctx, null, global, target, source.get(), start);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             try require(index == start + 128);
             var kept = try core.JSValueHandle.init(rt, (rt.liveObjectFromWeakIdentity(identity) orelse return error.LostSpreadDenseTarget).value());
             defer kept.deinit();
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const array = core.Object.fromHeader(kept.get().refHeader().?);
             const source_array = core.Object.fromHeader(source.get().refHeader().?);
             const n = try rt.internAtom("n");
@@ -1502,7 +1499,7 @@ fn verifyIteratorAppendRoots() !void {
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
             if (stage == 3) self.next_gets += 1;
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (ctx.runtime.liveObjectFromWeakIdentity(self.target) == null) self.lost = true;
             if (self.lost or stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
@@ -1520,7 +1517,7 @@ fn verifyIteratorAppendRoots() !void {
                 const ctx = context.core;
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 var probe = Probe{ .failure = failure };
                 var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "appendBoundaryGc", 1));
                 defer callback.deinit();
@@ -1571,7 +1568,7 @@ fn verifyIteratorStepRoots() !void {
                 return core.JSValue.undefinedValue();
             }
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (self.argument) |id| {
                 if (stage <= 2 and ctx.runtime.liveObjectFromWeakIdentity(id) == null) self.lost = true;
             }
@@ -1598,7 +1595,7 @@ fn verifyIteratorStepRoots() !void {
                     const ctx = context.core;
                     defer ctx.clearException();
                     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                    rt.setGCThreshold(std.math.maxInt(usize));
                     var probe = Probe{ .failure = failure };
                     var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "stepBoundaryGc", 2));
                     defer callback.deinit();
@@ -1642,7 +1639,7 @@ fn verifyZipCollectionRoots() !void {
             if (argc != 1) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.TypeError);
             const stage = args[0].as(.int).?;
             self.seen |= @as(u32, 1) << @intCast(stage);
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (stage == self.failure) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
         }
@@ -1660,7 +1657,7 @@ fn verifyZipCollectionRoots() !void {
                 const ctx = context.core;
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 var probe = Probe{ .failure = failure };
                 var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "zipCollectGc", 1));
                 defer callback.deinit();
@@ -1707,7 +1704,7 @@ fn verifyZipCollectionRoots() !void {
                 } else {
                     var helper = try core.JSValueHandle.init(rt, try result);
                     defer helper.deinit();
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const step = try zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                     const row = core.Object.fromHeader((try core.Object.fromHeader(step.refHeader().?).getProperty(core.atom.ids.value)).refHeader().?);
                     const first = try row.getProperty(if (keyed) try rt.internAtom("a") else core.Atom.taggedInt(0));
@@ -1726,7 +1723,7 @@ fn verifyConcatCreationRoots() !void {
     const Probe = struct {
         fn getMethod(ctx: *core.JSContext, _: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
             const fail = (try core.Object.fromHeader(value.refHeader().?).getProperty(core.atom.ids.done)).same(core.JSValue.boolean(true));
-            _ = try ctx.runtime.collectFull(null, .declared_only);
+            _ = try ctx.runtime.collectFull();
             if (fail) return error.OutOfMemory;
             return global.getProperty(core.atom.ids.next);
         }
@@ -1740,7 +1737,7 @@ fn verifyConcatCreationRoots() !void {
             const ctx = try core.JSContext.create(rt, .{});
             defer ctx.destroy();
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             try global.defineOwnProperty(rt, core.atom.ids.next, core.Descriptor.data(try core.function.nativeFunction(ctx, "concatBoundaryMethod", 0), .all));
             var identities: [2]usize = undefined;
             var args: [2]core.JSValue = undefined;
@@ -1754,13 +1751,13 @@ fn verifyConcatCreationRoots() !void {
             if (fail) {
                 if (result) |_| return error.ExpectedConcatGetterFailure else |err| try require(err == error.OutOfMemory);
                 try require(rt.active_value_roots == null);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 for (identities) |identity| try require(rt.liveObjectFromWeakIdentity(identity) == null);
                 continue;
             }
             var helper = try core.JSValueHandle.init(rt, try result);
             defer helper.deinit();
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const records = core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorTargetSlot().*.?.refHeader().?);
             for (identities, 0..) |identity, index| {
                 const input = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostConcatInput;
@@ -1784,11 +1781,11 @@ fn verifyZipCreationRoots() !void {
                     const ctx = try core.JSContext.create(rt, .{});
                     defer ctx.destroy();
                     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                    rt.setGCThreshold(std.math.maxInt(usize));
                     if (warm) _ = try zjs.exec.iterator_ops.iteratorHelperPrototype(rt, global);
                     // Collect bootstrap garbage first: otherwise the budget
                     // sweep below measures how much of it a collection frees.
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     var identities: [4]usize = undefined;
                     const inputs = setup: {
                         var roots = core.runtime.ExactValueRoots(4){};
@@ -1803,7 +1800,7 @@ fn verifyZipCreationRoots() !void {
                         inline for (0..4) |index| values[index] = try (try roots.ref(index)).get(rt);
                         break :setup values;
                     };
-                    rt.gc.heap_budget.gc_threshold = 0;
+                    rt.setGCThreshold(0);
                     if (extra_budget) |extra| rt.setMemoryLimit(rt.gc.heap_budget.bytes + extra);
                     const result = zjs.exec.iterator_ops.iteratorZipCreateHelper(
                         rt,
@@ -1823,14 +1820,14 @@ fn verifyZipCreationRoots() !void {
                     } else |err| {
                         try require(err == error.OutOfMemory and extra_budget != null);
                         try require(rt.active_value_roots == null);
-                        _ = try rt.collectFull(null, .declared_only);
+                        _ = try rt.collectFull();
                         for (identities) |identity| try require(rt.liveObjectFromWeakIdentity(identity) == null);
                         continue;
                     }
                     var helper = try core.JSValueHandle.init(rt, try result);
                     defer helper.deinit();
-                    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
-                    _ = try rt.collectFull(null, .declared_only);
+                    rt.setGCThreshold(std.math.maxInt(usize));
+                    _ = try rt.collectFull();
                     const owner = core.Object.fromHeader(helper.get().refHeader().?);
                     const edges = [_]?core.JSValue{ owner.iteratorTargetSlot().*, owner.iteratorZipNexts(), owner.iteratorZipPads(), owner.iteratorZipKeys() };
                     for (identities[0..if (keyed) @as(usize, 4) else 3], edges[0..if (keyed) @as(usize, 4) else 3]) |identity, edge| {
@@ -1851,7 +1848,7 @@ fn verifyZipCallbackRoots() !void {
         fn thunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, entry: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             self.calls += 1;
-            _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+            _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             if (self.fail and self.calls == 2) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
         }
@@ -1868,7 +1865,7 @@ fn verifyZipCallbackRoots() !void {
                 const ctx = context.core;
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 var probe = Probe{ .fail = fail };
                 var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "zipBoundaryGc", 0));
                 defer callback.deinit();
@@ -1915,7 +1912,7 @@ fn verifyFlatMapInnerPublication() !void {
             const self: *@This() = @ptrCast(@alignCast(entry.state.?));
             self.calls += 1;
             if (self.collect) {
-                _ = ctx.runtime.collectFull(null, .declared_only) catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+                _ = ctx.runtime.collectFull() catch |err| return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
             }
             if (self.fail and self.calls == 2) return zjs.exec.builtin_dispatch.embedderErrorToValue(ctx, error.OutOfMemory);
             return core.JSValue.undefinedValue();
@@ -1933,7 +1930,7 @@ fn verifyFlatMapInnerPublication() !void {
                 const ctx = context.core;
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 var probe = Probe{ .collect = collect, .fail = fail };
                 var callback = try core.JSValueHandle.init(rt, try core.function.nativeFunction(ctx, "flatMapBoundaryGc", 0));
                 defer callback.deinit();
@@ -1945,7 +1942,7 @@ fn verifyFlatMapInnerPublication() !void {
                     .{},
                 ));
                 defer helper.deinit();
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 try require(!helper.get().refHeader().?.metaConst().flags.young);
                 const result = zjs.exec.iterator_ops.iteratorHelperNext(ctx, null, global, helper.get(), null, null);
                 try require(!core.Object.fromHeader(helper.get().refHeader().?).generatorExecuting());
@@ -1957,7 +1954,7 @@ fn verifyFlatMapInnerPublication() !void {
                     try require((try core.Object.fromHeader((try result).refHeader().?).getProperty(core.atom.ids.value)).as(.int).? == 42);
                     const inner_id = try rt.registerWeakObjectIdentity(core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorData().?.refHeader().?));
                     const next_id = try rt.registerWeakObjectIdentity(core.Object.fromHeader(core.Object.fromHeader(helper.get().refHeader().?).iteratorInnerNext().?.refHeader().?));
-                    if (nursery) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+                    if (nursery) _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
                     const owner = core.Object.fromHeader(helper.get().refHeader().?);
                     try require(owner.iteratorData().?.same((rt.liveObjectFromWeakIdentity(inner_id) orelse return error.LostFlatMapInner).value()));
                     try require(owner.iteratorInnerNext().?.same((rt.liveObjectFromWeakIdentity(next_id) orelse return error.LostFlatMapNext).value()));
@@ -1985,7 +1982,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
         failure: usize,
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             self.calls += 1;
-            _ = try ctx.runtime.collectFull(null, .declared_only);
+            _ = try ctx.runtime.collectFull();
             const callback = ctx.runtime.liveObjectFromWeakIdentity(self.callback_id);
             if (callback == null or ctx.runtime.liveObjectFromWeakIdentity(self.receiver_id) == null) {
                 self.lost = true;
@@ -2011,7 +2008,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
                 defer ctx.destroy();
                 defer ctx.clearException();
                 const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 if (cached) _ = try zjs.exec.iterator_ops.iteratorHelperPrototype(rt, global);
                 var probe = Probe{ .failure = failure };
                 const inputs = setup: {
@@ -2039,7 +2036,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
                     probe.callback_id = try rt.registerWeakObjectIdentity(core.Object.fromHeader((try callback.get(rt)).refHeader().?));
                     break :setup [_]core.JSValue{ try receiver.get(rt), try argument.get(rt) };
                 };
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 const result = zjs.exec.iterator_ops.iteratorPrototypeMethodCall(ctx, null, global, inputs[0], inputs[1..], @intFromEnum(method), null, null);
                 rt.setMemoryLimit(null);
                 if (probe.lost) return error.LostIteratorHelperInput;
@@ -2053,7 +2050,7 @@ fn verifyIteratorHelperCreationMethod(comptime method: core.host_function.builti
                     defer roots.deactivate();
                     const kept = try roots.ref(0);
                     try kept.set(rt, (try result).?);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const helper = core.Object.fromHeader((try kept.get(rt)).refHeader().?);
                     try require(helper.iteratorTargetSlot().*.?.same(rt.liveObjectFromWeakIdentity(probe.receiver_id).?.value()));
                     try require(helper.iteratorNextSlot().*.?.same(rt.liveObjectFromWeakIdentity(probe.callback_id).?.value()));
@@ -2084,7 +2081,7 @@ fn verifyIteratorCloseExceptionMode(comptime mode: enum { single, all, normal })
             // A later callback may clear/replace the pending exception. The
             // completion must retain its own copy until all closes finish.
             ctx.clearException();
-            _ = try ctx.runtime.collectFull(null, .declared_only);
+            _ = try ctx.runtime.collectFull();
             if (ctx.runtime.liveObjectFromWeakIdentity(self.identity) == null) {
                 self.lost = true;
                 return error.OutOfMemory;
@@ -2107,7 +2104,7 @@ fn verifyIteratorCloseExceptionMode(comptime mode: enum { single, all, normal })
             defer ctx.destroy();
             defer ctx.clearException();
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             var probe = Probe{ .fail = fail };
             const inputs = setup: {
                 var roots = core.runtime.ExactValueRoots(4){};
@@ -2173,7 +2170,7 @@ fn verifyIteratorTerminalRoots(comptime method: core.host_function.builtin_metho
         fail: bool,
         fn collect(self: *@This(), ctx: *core.JSContext) !void {
             if (self.accumulator) |header| {
-                _ = try ctx.runtime.collectFull(null, .declared_only);
+                _ = try ctx.runtime.collectFull();
                 const current = ctx.runtime.liveObjectFromWeakIdentity(self.identity.?) orelse {
                     self.lost = true;
                     return error.OutOfMemory;
@@ -2226,7 +2223,7 @@ fn verifyIteratorTerminalRoots(comptime method: core.host_function.builtin_metho
             defer ctx.destroy();
             defer ctx.clearException();
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             var probe = Probe{ .fail = fail };
             const inputs = setup: {
                 var roots = core.runtime.ExactValueRoots(4){};
@@ -2307,7 +2304,7 @@ fn verifyCallSiteLifetimeRoute(comptime bytecode_route: bool, comptime internal_
     defer context.destroy();
     const ctx = context.core;
     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+    rt.setGCThreshold(std.math.maxInt(usize));
     var receiver = try core.JSValueHandle.init(rt, (try core.Object.createPlainObject(rt, null)).value());
     defer receiver.deinit();
     var callee = try core.JSValueHandle.init(rt, if (bytecode_route)
@@ -2328,7 +2325,7 @@ fn verifyCallSiteLifetimeRoute(comptime bytecode_route: bool, comptime internal_
     try require((site.route == .bytecode) == bytecode_route);
     try require((try site.call(&.{})).same(receiver.get()));
     const before = receiver.get();
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try require(!receiver.get().same(before));
     const result = try site.call(&.{});
     if (!result.same(receiver.get())) return error.StaleCallSiteReceiver;
@@ -2336,12 +2333,12 @@ fn verifyCallSiteLifetimeRoute(comptime bytecode_route: bool, comptime internal_
     const identity = try rt.registerWeakObjectIdentity(core.Object.fromHeader(receiver.get().refHeader().?));
     receiver.deinit();
     callee.deinit();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     const held = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostCallSiteOwnedReceiver;
     try require((try site.call(&.{})).same(held.value()));
     site.deinit();
     try require(rt.active_value_roots == null);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(rt.liveObjectFromWeakIdentity(identity) == null);
 }
 
@@ -2361,7 +2358,7 @@ fn verifyCallEntryRootsMode(comptime mode: enum { root, site, site_this, interna
             const self: *@This() = @ptrCast(@alignCast(state.?));
             self.polls += 1;
             if (mode == .root) @memset(self.args, core.JSValue.undefinedValue());
-            _ = runtime.collectFull(null, .declared_only) catch |err| {
+            _ = runtime.collectFull() catch |err| {
                 self.gc_error = err;
                 return true;
             };
@@ -2385,7 +2382,7 @@ fn verifyCallEntryRootsMode(comptime mode: enum { root, site, site_this, interna
             defer ctx.destroy();
             defer ctx.clearException();
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            runtime.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            runtime.setGCThreshold(std.math.maxInt(usize));
             const inputs = setup: {
                 var roots = core.runtime.ExactValueRoots(3){};
                 try roots.activate(runtime);
@@ -2439,7 +2436,7 @@ fn verifyCallEntryRootsMode(comptime mode: enum { root, site, site_this, interna
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(runtime, returned);
-                _ = try runtime.collectFull(null, .declared_only);
+                _ = try runtime.collectFull();
                 try require(runtime.gc.containsHeader((try kept.get(runtime)).refHeader().?));
             }
             try require(runtime.active_value_roots == (if (mode == .internal_site or mode == .internal_this) &site.internal_roots.frame else null));
@@ -2453,7 +2450,7 @@ fn verifyRetainedNurseryPrototype() !void {
         defer rt.destroy();
         rt.gc.nursery.enabled = true;
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+        rt.setGCThreshold(std.math.maxInt(usize));
         var roots = core.runtime.ExactValueRoots(2){};
         try roots.activate(rt);
         defer roots.deactivate();
@@ -2471,14 +2468,14 @@ fn verifyRetainedNurseryPrototype() !void {
             frame.activate(rt);
             defer frame.deactivate(rt);
             if (major) {
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
             } else {
-                _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+                _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
             }
             try require((try prototype.get(rt)).cycleMarkHeader().? == original);
         }
         try prototype.set(rt, core.JSValue.undefinedValue());
-        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         const moved = rt.liveObjectFromWeakIdentity(identity) orelse return error.LostRetainedNurseryPrototype;
         try require(moved.gcHeader() != original);
         try require(core.Object.fromHeader((try owner.get(rt)).cycleMarkHeader().?).getPrototype() == moved);
@@ -2528,8 +2525,8 @@ fn verifyCollectionGroupRoots() !void {
                 const array = rt.liveObjectFromWeakIdentity(id).?;
                 try require(try array.deleteProperty(rt, core.Atom.taggedInt(@intCast(self.calls))));
             }
-            if (rt.gc.nursery.enabled) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-            _ = try rt.collectFull(null, .declared_only);
+            if (rt.gc.nursery.enabled) _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
+            _ = try rt.collectFull();
             self.lost_source = if (self.source_identity) |id| rt.liveObjectFromWeakIdentity(id) == null else !rt.gc.containsHeader(self.source.cycleMarkHeader().?);
             self.lost_item = if (identity) |id| rt.liveObjectFromWeakIdentity(id) == null else !rt.gc.containsHeader(item);
             self.lost_callback = rt.liveObjectFromWeakIdentity(self.callback_identity) == null;
@@ -2565,7 +2562,7 @@ fn verifyCollectionGroupRoots() !void {
                     defer rt.destroy();
                     rt.gc.nursery.enabled = nursery;
                     rt.gc.scheduler.host_quiescent = true;
-                    rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                    rt.setGCThreshold(std.math.maxInt(usize));
                     const ctx = try core.JSContext.create(rt, .{});
                     defer ctx.destroy();
                     _ = try zjs.exec.zjs_vm.contextGlobal(ctx);
@@ -2613,7 +2610,7 @@ fn verifyCollectionGroupRoots() !void {
                     defer Probe.active = null;
                     // Keep array elements young until the callback so its
                     // repaired argument slot is exercised by evacuation.
-                    rt.gc.heap_budget.gc_threshold = if (mode == 4) std.math.maxInt(usize) else 0;
+                    rt.setGCThreshold(if (mode == 4) std.math.maxInt(usize) else 0);
                     const result = zjs.exec.collection_ops.groupByWithCallbackHost(rt, inputs[0..2], core.Object.fromHeader(inputs[2].cycleMarkHeader().?), .{ .ctx = ctx, .call = Probe.call });
                     rt.setMemoryLimit(null);
                     if (probe.unexpected_error) |err| return err;
@@ -2637,7 +2634,7 @@ fn verifyCollectionGroupRoots() !void {
                     if (mode == 1) try require(inputs[0].ropeBody().?.flatString() == null);
                     if (mode == 3) try require(inputs[0].ropeBody().?.buffer != null);
                     if (nursery and mode == 4) try require(probe.moved_items > 0);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     const map = core.Object.fromHeader((try kept.get(rt)).cycleMarkHeader().?);
                     try require(map.getPrototype() == rt.liveObjectFromWeakIdentity(probe.prototype_identity));
                     const entries = map.collectionEntries();
@@ -2676,7 +2673,7 @@ fn verifyTailBufferPublication() !void {
     try right.set(rt, (try core.string.String.createAscii(rt, "!")).value());
     const measured = try core.string.createTailBufferRope(rt, core.string.asFlat(try left.get(rt)).?, core.string.asFlat(try right.get(rt)).?);
     const charge = core.string.accountedStorageSizeFromHeader(measured.buffer.?.header());
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     // Admit the buffer but collect at node allocation. The unpublished
     // buffer must remain live, so this cap must produce a recoverable OOM.
     rt.setMemoryLimit(rt.gc.heap_budget.bytes + charge);
@@ -2720,7 +2717,7 @@ fn verifyStringAddRoots() !void {
                 defer rt.destroy();
                 rt.gc.nursery.enabled = nursery;
                 rt.gc.scheduler.host_quiescent = true;
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 const inputs = setup: {
                     var roots = core.runtime.ExactValueRoots(3){};
                     try roots.activate(rt);
@@ -2775,12 +2772,12 @@ fn verifyStringAddRoots() !void {
                         else => unreachable,
                     }
                     try temporary.set(rt, core.JSValue.undefinedValue());
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     break :setup [_]core.JSValue{ try left.get(rt), try right.get(rt) };
                 };
                 var candidate_peak: usize = 0;
                 rt.gc.heap_budget.beginCyclePeakTracking(&candidate_peak);
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 rt.setMemoryLimit(switch (failure_stage) {
                     0 => null,
                     1 => 0,
@@ -2807,7 +2804,7 @@ fn verifyStringAddRoots() !void {
                 const kept = try roots.ref(0);
                 try kept.set(rt, try result);
                 for (0..2) |pass| {
-                    if (pass == 1) _ = try rt.collectFull(null, .declared_only);
+                    if (pass == 1) _ = try rt.collectFull();
                     const value = try kept.get(rt);
                     if (core.string.stringValueLenUnchecked(value) != expected.len) return error.StringAddResultChanged;
                     for (expected, 0..) |unit, index| {
@@ -2839,7 +2836,7 @@ fn verifyPrimitiveBoxingRoots() !void {
                 defer rt.destroy();
                 rt.gc.nursery.enabled = nursery;
                 rt.gc.scheduler.host_quiescent = true;
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 const ctx = try core.JSContext.create(rt, .{});
                 defer ctx.destroy();
                 _ = try zjs.exec.zjs_vm.contextGlobal(ctx);
@@ -2859,7 +2856,7 @@ fn verifyPrimitiveBoxingRoots() !void {
                     try core.Object.fromHeader((try global.get(rt)).refHeader().?).defineOwnProperty(rt, case.name, core.Descriptor.data(try constructor.get(rt), .all));
                     try input.set(rt, switch (mode) {
                         0 => (try core.bigint.BigInt.create(rt, (@as(i128, 1) << 90) + 7)).valueRef(),
-                        1 => try rt.takeSymbolValue(try rt.atoms.newValueSymbol("boxing-input")),
+                        1 => try rt.symbolValue(try rt.atoms.newValueSymbol("boxing-input")),
                         2 => core.JSValue.float64(-0.0),
                         3 => core.JSValue.boolean(true),
                         7 => core.JSValue.shortBigInt(123),
@@ -2880,7 +2877,7 @@ fn verifyPrimitiveBoxingRoots() !void {
                 const header = inputs.input.cycleMarkHeader();
                 const before = rt.active_value_roots;
                 const epoch = rt.gc.collection_epoch;
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 const result = if (access)
                     try zjs.exec.object_ops.primitiveObjectForAccess(rt, core.Object.fromHeader(inputs.global.refHeader().?), inputs.input)
                 else
@@ -2906,7 +2903,7 @@ fn verifyPrimitiveBoxingRoots() !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 try require(core.Object.fromHeader((try kept.get(rt)).refHeader().?).objectData().?.same(inputs.input));
             }
         }
@@ -2930,7 +2927,7 @@ fn verifyConstructorKindDispatch() !void {
             const flat = if (visible.ropeBody()) |rope| rope.flatString() else core.string.asFlat(visible);
             const name_header = if (flat) |body| body.header() else null;
             try require(try constructor.deleteProperty(rt, core.atom.ids.name));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const before = rt.active_value_roots;
             const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
             const parse_float = try global.getProperty(comptime core.atom.predefinedId("parseFloat", .string).?);
@@ -2968,7 +2965,7 @@ fn verifyConstructorKindDispatch() !void {
                 defer rt.destroy();
                 rt.gc.nursery.enabled = nursery;
                 rt.gc.scheduler.host_quiescent = true;
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 const ctx = try core.JSContext.create(rt, .{});
                 defer ctx.destroy();
                 defer ctx.clearException();
@@ -3047,7 +3044,7 @@ fn verifyPureValueReadWindows() !void {
             break :setup [_]core.JSValue{ try input.get(rt), try map.get(rt), try array.get(rt) };
         };
         rt.setMemoryLimit(0);
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const native_before = rt.allocation_diagnostics.allocated_bytes;
         failing.fail_index = failing.alloc_index;
@@ -3102,7 +3099,7 @@ fn verifyBareNumberAutoInitRoots() !void {
             const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = ctx.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.collectFull(null, .declared_only) catch |err| {
+            _ = rt.collectFull() catch |err| {
                 self.collection_failure = err;
                 return error.ReferenceError;
             };
@@ -3189,7 +3186,7 @@ fn verifyStringIndexAllocationRoots() !void {
             defer ctx.destroy();
             defer ctx.clearException();
             _ = try zjs.exec.zjs_vm.contextGlobal(ctx);
-            rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+            rt.setGCThreshold(std.math.maxInt(usize));
             const input = setup: {
                 var roots = core.runtime.ExactValueRoots(2){};
                 try roots.activate(rt);
@@ -3200,7 +3197,7 @@ fn verifyStringIndexAllocationRoots() !void {
                 try right.set(rt, (try core.string.String.createAscii(rt, "tail")).value());
                 break :setup (try core.string.String.createRope(rt, try left.get(rt), try right.get(rt))).value();
             };
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             rt.setMemoryLimit(if (oom) 0 else null);
             const epoch = rt.gc.collection_epoch;
             const args = [_]core.JSValue{core.JSValue.int32(1)};
@@ -3228,7 +3225,7 @@ fn verifyNumberAndIndexCoercionRoots(comptime index_read: bool) !void {
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             const rt = ctx.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.gc.collection_epoch > epoch);
             self.calls += 1;
             if (self.calls == 2) {
@@ -3239,7 +3236,7 @@ fn verifyNumberAndIndexCoercionRoots(comptime index_read: bool) !void {
                 try require(nested.as(.int).? == 42);
                 try require(rt.active_value_roots == before);
                 self.reentries += 1;
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
             }
             if (self.text) |text| if (!rt.gc.containsHeader(text)) {
                 self.lost = true;
@@ -3321,7 +3318,7 @@ fn verifyBitmapHeapBudgetReclaim() !void {
         const rt = try core.JSRuntime.create(std.heap.page_allocator, .{});
         defer rt.destroy();
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+        rt.setGCThreshold(std.math.maxInt(usize));
         var roots = core.runtime.ExactValueRoots(1){};
         try roots.activate(rt);
         defer roots.deactivate();
@@ -3336,9 +3333,9 @@ fn verifyBitmapHeapBudgetReclaim() !void {
             const identity = try rt.registerWeakObjectIdentity(dead);
             const epoch = rt.gc.collection_epoch;
             if (minor) {
-                _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+                _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
             } else {
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
             }
             try require(rt.gc.collection_epoch > epoch);
             if (rt.gc.heap_budget.bytes != baseline) return error.BitmapReclaimLeakedHeapBudget;
@@ -3354,7 +3351,7 @@ fn verifyRawJsonConstructionRoots() !void {
     const charges = measured: {
         const rt = try core.JSRuntime.create(std.heap.page_allocator, .{});
         defer rt.destroy();
-        rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+        rt.setGCThreshold(std.math.maxInt(usize));
         const before = rt.gc.heap_budget.bytes;
         _ = try core.string.String.createUtf16(rt, &units);
         const parsed = rt.gc.heap_budget.bytes;
@@ -3370,7 +3367,7 @@ fn verifyRawJsonConstructionRoots() !void {
                 defer rt.destroy();
                 rt.gc.nursery.enabled = nursery;
                 rt.gc.scheduler.host_quiescent = true;
-                rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+                rt.setGCThreshold(std.math.maxInt(usize));
                 const base = rt.gc.heap_budget.bytes;
                 const input = setup: {
                     if (!rope) break :setup (try core.string.String.createAscii(rt, source)).value();
@@ -3411,7 +3408,7 @@ fn verifyRawJsonConstructionRoots() !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const object = core.Object.fromHeader((try kept.get(rt)).cycleMarkHeader().?);
                 if (!zjs.exec.json_ops.isRawJSON(try kept.get(rt))) return error.InvalidRawJsonClass;
                 if (object.flags.extensible or object.getPrototype() != null) return error.InvalidRawJsonIntegrity;
@@ -3439,7 +3436,7 @@ fn verifyJsonStringifyAutoInitRoots() !void {
             const realm: *core.JSContext = @alignCast(@fieldParentPtr("header", realm_header));
             const rt = realm.runtime;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.collectFull(null, .declared_only) catch |err| {
+            _ = rt.collectFull() catch |err| {
                 self.collection_failure = err;
                 return error.OutOfMemory;
             };
@@ -3536,7 +3533,7 @@ fn verifyJsonStringifyOwnKeysRoots() !void {
             self.calls += 1;
             if (self.calls > 1) return error.OutOfMemory;
             const epoch = rt.gc.collection_epoch;
-            _ = rt.collectFull(null, .declared_only) catch |err| {
+            _ = rt.collectFull() catch |err| {
                 self.failure = err;
                 return error.OutOfMemory;
             };
@@ -3625,7 +3622,7 @@ fn verifyJsonStringifyGetterRoots() !void {
                 try require(try core.Object.fromHeader(header).deleteProperty(rt, self.later_key));
             }
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.gc.collection_epoch > epoch);
             if (stage == 2 and rt.atoms.name(self.later_key) == null) return error.LostStringifySnapshotAtom;
             self.calls += 1;
@@ -3735,7 +3732,7 @@ fn verifyJsonStringifyCallbackRoots() !void {
             const result = try roots.ref(0);
             try result.set(rt, args[1]);
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.gc.collection_epoch > epoch);
             const current = rt.liveObjectFromWeakIdentity(identity) orelse return error.InvalidStringifyReceiver;
             self.moved = self.moved or current.gcHeader() != header;
@@ -3847,7 +3844,7 @@ fn verifyJsonGapReadWindows() !void {
             // No caller roots; every native output growth can independently
             // fail. Partial output belongs to the callee even on OOM.
             rt.setMemoryLimit(0);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const native_before = rt.allocation_diagnostics.allocated_bytes;
             const epoch = rt.gc.collection_epoch;
             failing.fail_index = failing.alloc_index + offset;
@@ -3894,7 +3891,7 @@ fn verifyJsonStringifyOptionRoots() !void {
                 _ = try array.deleteProperty(rt, core.Atom.taggedInt(0));
             }
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.gc.collection_epoch > epoch);
             self.calls += 1;
             const target = rt.liveObjectFromWeakIdentity(self.target);
@@ -3991,7 +3988,7 @@ fn verifyJsonQuoteReadWindows() !void {
             // No caller roots or JS allocation budget. The escaper must only
             // borrow its input and may fail solely on native output growth.
             rt.setMemoryLimit(0);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             if (fail) failing.fail_index = failing.alloc_index;
             const epoch = rt.gc.collection_epoch;
             var bytes = std.ArrayList(u8).empty;
@@ -4049,7 +4046,7 @@ fn verifyJsonReviverRoots() !void {
             const result = try roots.ref(0);
             try result.set(rt, args[1]);
             const epoch = rt.gc.collection_epoch;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(rt.gc.collection_epoch > epoch);
             const current = rt.liveObjectFromWeakIdentity(identity) orelse return error.InvalidReviverHolder;
             self.moved = self.moved or current.gcHeader() != header;
@@ -4144,7 +4141,7 @@ fn verifyJsonParseReadWindows() !void {
                     try right.set(rt, (try core.string.String.createAscii(rt, if (full) "\\u0078\"},2]}" else "x\"},2]}")).value());
                     break :setup (try core.string.String.createRope(rt, try left.get(rt), try right.get(rt))).value();
                 };
-                rt.gc.heap_budget.gc_threshold = 0;
+                rt.setGCThreshold(0);
                 if (fail) rt.setMemoryLimit(0);
                 const epoch = rt.gc.collection_epoch;
                 const result = zjs.exec.json_ops.parse(rt, null, input);
@@ -4200,7 +4197,7 @@ fn verifyDateReadWindows() !void {
                 try require(rt.gc.collection_epoch == epoch);
             }
             if (!fail) rt.setMemoryLimit(null);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             // The constructor must consume unrooted inputs before this
             // allocation collects their storage; it needs only the scalar ms.
             const result = zjs.exec.date_ops.construct(rt, selected);
@@ -4227,7 +4224,7 @@ fn verifyDateCoercionRoots() !void {
         lost: bool = false,
         fn run(self: *@This(), ctx: *core.JSContext) !core.JSValue {
             const rt = ctx.runtime;
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             self.calls += 1;
             if ((self.check_receiver and !rt.gc.containsHeader(self.receiver)) or
                 (self.check_later and rt.liveObjectFromWeakIdentity(self.later_identity) == null))
@@ -4332,7 +4329,7 @@ fn verifyDateCallbackChains() !void {
                 self.stale = true;
                 return error.DateCallbackReceiverStale;
             }
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const current = rt.liveObjectFromWeakIdentity(self.receiver_id) orelse {
                 self.lost = true;
                 return error.DateCallbackReceiverLost;
@@ -4481,7 +4478,7 @@ fn verifyUriReadWindows() !void {
             }
             // No caller root survives into the operation. Output allocation
             // must happen after the last borrowed input read, even on OOM.
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             if (fail) rt.setMemoryLimit(0);
             const epoch = rt.gc.collection_epoch;
             const result = switch (mode) {
@@ -4554,10 +4551,10 @@ fn verifyEvacuationRollback() !void {
             try rt.registerRootProvider(provider);
             defer rt.unregisterRootProvider(provider);
             const heap_before = rt.gc.heap_budget.bytes;
-            if (collectReadonlyRootFixture(rt, null, minor)) |_| return error.ExpectedTraceFailure else |err| {
+            if (collectReadonlyRootFixture(rt, minor)) |_| return error.ExpectedTraceFailure else |err| {
                 try require(err == failure);
             }
-            try require(probe.saw_move and !rt.roots.isTracing() and !rt.gc.hot.collecting);
+            try require(probe.saw_move and !rt.roots.isTracing() and !rt.gc.isCollecting());
             try require(rt.gc.heap_budget.bytes == heap_before);
             try require(probe.object_alias == first_object);
             try require((try first.get(rt)).bits == before[0].bits);
@@ -4574,7 +4571,7 @@ fn verifyEvacuationRollback() !void {
             try require((try second_object.getProperty(core.atom.ids.value)).bits == before[0].bits);
             try rt.gc.verifyHeapAccounting(rt);
             // A failed retirement requires a major before minors resume.
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const moved_first = try first.get(rt);
             const moved_second = try second.get(rt);
             try require(weak.get().bits == moved_first.bits);
@@ -4637,7 +4634,7 @@ fn verifyWeakEphemeronRelocation() !void {
                     const value_identity = weak_value.slot.?.identity.?;
                     try middle_root.set(rt, core.JSValue.undefinedValue());
                     if (!strong_value) try value_root.set(rt, core.JSValue.undefinedValue());
-                    try collectReadonlyRootFixture(rt, null, minor);
+                    try collectReadonlyRootFixture(rt, minor);
                     const entries = table.weakCollectionEntries();
                     try require(entries.len == 3);
                     try require((entries[0].value.bits != value_before.bits) == nursery);
@@ -4653,13 +4650,13 @@ fn verifyWeakEphemeronRelocation() !void {
                     if (strong_value) try require((try value_root.get(rt)).bits == entries[0].value.bits);
                     try key_root.set(rt, core.JSValue.undefinedValue());
                     try value_root.set(rt, core.JSValue.undefinedValue());
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     try require(table.weakCollectionEntries().len == 0);
                     try require(!weak_middle.isAlive() and !weak_value.isAlive());
                     try require(weak_middle.get().is(.undefined_value) and weak_value.get().is(.undefined_value));
                     try require(rt.weak.object_ids.count() == 0 and rt.weak.id_objects.count() == 0);
                     try require(callback.calls == 1);
-                    _ = try rt.collectFull(null, .declared_only);
+                    _ = try rt.collectFull();
                     try require(callback.calls == 1);
                     try rt.gc.verifyHeapAccounting(rt);
                 }
@@ -4681,7 +4678,7 @@ fn verifyFunctionHomeObject() !void {
             const closure = try core.Object.create(rt, core.class.ids.bytecode_function, null);
             try (try roots.ref(0)).set(rt, closure.value());
             if (auxiliary) _ = try closure.functionSourceSlot(rt);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(!closure.gcHeader().meta().flags.young);
             var previous: ?*core.gc.Header = null;
             for (0..2) |_| {
@@ -4690,17 +4687,17 @@ fn verifyFunctionHomeObject() !void {
                 try closure.setFunctionHomeObject(rt, home);
                 try closure.setFunctionHomeObject(rt, home);
                 try require(rt.gc.generation.remembered.contains(@intFromPtr(closure.gcHeader())));
-                _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+                _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
                 const stored = closure.functionHomeObject().?;
                 try require(rt.gc.containsHeader(stored.gcHeader()));
                 try require(nursery == (@intFromPtr(stored) != before));
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 if (previous) |old| try require(!rt.gc.containsHeader(old));
                 try require(closure.functionHomeObject() == stored);
                 previous = stored.gcHeader();
             }
             try closure.setFunctionHomeObject(rt, null);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(closure.functionHomeObject() == null);
             try require(!rt.gc.containsHeader(previous.?));
         }
@@ -4735,7 +4732,7 @@ fn verifyAccessorSlots() !void {
             try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.accessor(try getter.get(rt), try setter.get(rt), .{ .configurable = true }));
             try getter.set(rt, core.JSValue.undefinedValue());
             try setter.set(rt, core.JSValue.undefinedValue());
-            _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+            _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
             object = core.Object.fromHeader((try owner.get(rt)).cycleMarkHeader().?);
             const index: usize = if (external) 2 else 0;
             const accessor = object.asAccessorAt(index).?;
@@ -4745,10 +4742,10 @@ fn verifyAccessorSlots() !void {
             try require((moved_getter.bits == moved_setter.bits) == shared);
             try require(rt.gc.containsHeader(moved_getter.cycleMarkHeader().?));
             try require(rt.gc.containsHeader(moved_setter.cycleMarkHeader().?));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(object.asAccessorAt(index).?.getterValue().bits == moved_getter.bits);
             try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             try require(!rt.gc.containsHeader(moved_getter.cycleMarkHeader().?));
             try require(!rt.gc.containsHeader(moved_setter.cycleMarkHeader().?));
         }
@@ -4773,27 +4770,27 @@ fn verifyCellRootCarriers() !void {
             const before = object.value().bits;
             cell.setVarRefValue(rt, object.value());
             try require(core.gc.Registry.isNurseryHeader(object.gcHeader()));
-            try collectReadonlyRootFixture(rt, null, minor);
+            try collectReadonlyRootFixture(rt, minor);
             try require(cells[0] == cell and rt.gc.containsHeader(&cell.header));
             const moved = cell.varRefValue();
             try require(moved.bits != before);
             try require(rt.gc.containsHeader(moved.cycleMarkHeader().?));
-            try collectReadonlyRootFixture(rt, null, false);
+            try collectReadonlyRootFixture(rt, false);
             try require(cell.varRefValue().bits == moved.bits);
             // Keeping the carrier rooted must not retain an overwritten child.
             cell.setVarRefValue(rt, core.JSValue.undefinedValue());
-            try collectReadonlyRootFixture(rt, null, false);
+            try collectReadonlyRootFixture(rt, false);
             try require(rt.gc.containsHeader(&cell.header));
             try require(!rt.gc.containsHeader(moved.cycleMarkHeader().?));
         }
     }
 }
 
-fn collectReadonlyRootFixture(rt: *core.JSRuntime, roots: ?*const core.runtime.ValueRootFrame, minor: bool) core.runtime.RootTraceError!void {
+fn collectReadonlyRootFixture(rt: *core.JSRuntime, minor: bool) core.runtime.RootTraceError!void {
     if (minor) {
-        _ = try core.gc_trace_stw.collectMinor(rt, roots, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     } else {
-        _ = try rt.collectFull(roots, .declared_only);
+        _ = try rt.collectFull();
     }
 }
 
@@ -4824,9 +4821,12 @@ fn verifyReadonlyNurseryRoots() !void {
             const provider = core.runtime.RootProvider{ .context = &provider_state, .trace = Provider.trace };
             if (kind == .object_provider) try rt.registerRootProvider(provider);
             defer if (kind == .object_provider) rt.unregisterRootProvider(provider);
+            // A header root on the active chain takes the readonly prepass
+            // like a borrowed slice.
             const headers = [_]core.runtime.HeaderRootValue{.{ .header = object.gcHeader() }};
-            const extra = core.runtime.ValueRootFrame{ .headers = &headers };
-            const extra_roots: ?*const core.runtime.ValueRootFrame = if (kind == .extra_header) &extra else null;
+            var header_frame = core.runtime.ValueRootFrame{ .headers = if (kind == .extra_header) &headers else &.{} };
+            header_frame.activate(rt);
+            defer header_frame.deactivate(rt);
             var roots = core.runtime.ExactValueRoots(1){};
             try roots.activate(rt);
             defer roots.deactivate();
@@ -4834,21 +4834,21 @@ fn verifyReadonlyNurseryRoots() !void {
             try writable.set(rt, borrowed[0]);
             try require(core.gc.Registry.isNurseryHeader(object.gcHeader()));
             if (provider_state.fail) {
-                const result = collectReadonlyRootFixture(rt, extra_roots, minor);
+                const result = collectReadonlyRootFixture(rt, minor);
                 if (result) |_| return error.ExpectedTraceFailure else |err| {
                     if (err != error.OutOfMemory) return err;
                 }
-                try require(!rt.gc.hot.collecting and !rt.roots.isTracing());
+                try require(!rt.gc.isCollecting() and !rt.roots.isTracing());
                 try require(!core.gc.headerForwarded(object.gcHeader()));
                 try require((try writable.get(rt)).bits == borrowed[0].bits);
                 provider_state.fail = false;
             }
-            try collectReadonlyRootFixture(rt, extra_roots, minor);
+            try collectReadonlyRootFixture(rt, minor);
             try require((try writable.get(rt)).bits == borrowed[0].bits);
             try require(rt.gc.containsHeader(object.gcHeader()));
             try require(!core.gc.headerForwarded(object.gcHeader()));
             // Retention also has to survive a later full collection.
-            _ = try rt.collectFull(extra_roots, .declared_only);
+            _ = try rt.collectFull();
             try require((try writable.get(rt)).bits == borrowed[0].bits);
             try require(rt.gc.containsHeader(object.gcHeader()));
         }
@@ -4861,7 +4861,7 @@ fn verifyRegExpLegacyStaticsRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     defer rt.gc.nursery.enabled = nursery_enabled;
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     const long_len = 1 << 20;
     const bytes = try rt.nativeAllocator().alloc(u8, long_len + 8);
     defer rt.nativeAllocator().free(bytes);
@@ -4894,12 +4894,12 @@ fn verifyRegExpLegacyStaticsRoots(rt: *core.JSRuntime) !void {
         try require(legacy.lazy_no_capture_match and legacy.input.?.same(old_input));
         try require(rt.active_value_roots == before);
         rt.setMemoryLimit(null);
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const retry_epoch = rt.gc.collection_epoch;
         try zjs.exec.string_ops.updateRegExpLegacyStaticsForMatch(rt, global, source, &found, bytes.len);
         try require(rt.gc.collection_epoch > retry_epoch);
         try require(rt.active_value_roots == before);
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectFull();
         try require(!legacy.lazy_no_capture_match);
         try require(core.string.stringValueLenUnchecked(legacy.last_match.?) == long_len + 4);
         try require(core.string.stringValueLenUnchecked(legacy.captures[0].?) == long_len);
@@ -4919,7 +4919,7 @@ fn verifyRegExpCaptureResultRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     defer rt.gc.nursery.enabled = nursery_enabled;
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     var compiled = try zjs.exec.regexp_ops.compileWithRuntime(rt, "(?<letter>a)(\xc4\x80)", "d");
     defer compiled.deinit(rt.nativeAllocator());
     const captures = [_]usize{ 2, 3, 3, 4 };
@@ -4939,7 +4939,7 @@ fn verifyRegExpCaptureResultRoots(rt: *core.JSRuntime) !void {
         const old_groups = inputs[1].cycleMarkHeader().?;
         if (nursery) try require(core.gc.Registry.isNurseryHeader(old_groups));
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         const array = try core.Object.createRegExpMatchArrayFromShape(rt, ctx.core.regexp_result_shape.?, 2, inputs[0], inputs[1]);
@@ -4953,18 +4953,18 @@ fn verifyRegExpCaptureResultRoots(rt: *core.JSRuntime) !void {
         defer retained.deactivate();
         const result = try retained.ref(0);
         try result.set(rt, array.value());
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectFull();
 
         // The incoming string has no caller root during full construction.
         const input = (try core.string.String.createUtf16(rt, &.{ 'x', 'x', 'a', 0x100, 'y', 'y' })).value();
         const global = try ctx.core.globalObject();
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const build_epoch = rt.gc.collection_epoch;
         const pins = rt.gc.pins.count();
         try result.set(rt, try zjs.exec.string_ops.createRegExpMatchArrayFromValue(rt, global, input, &found, 6, true));
         try require(rt.gc.collection_epoch > build_epoch);
         try require(rt.gc.pins.count() == pins);
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectFull();
         const letter = try rt.internAtom("letter");
         const output = core.value_semantics.objectFromValue(try result.get(rt)).?;
         try require(output.arrayLength() == 3);
@@ -4984,7 +4984,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     defer rt.gc.nursery.enabled = nursery_enabled;
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     for ([_]bool{ false, true }) |nursery| {
         rt.gc.nursery.enabled = nursery;
         for (0..3) |mode| {
@@ -5027,7 +5027,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
             try require(rt.active_value_roots == before);
 
             rt.setMemoryLimit(null);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const retry_epoch = rt.gc.collection_epoch;
             const result = if (mode == 0)
                 try zjs.exec.regexp_ops.regExpTestMethod(ctx.core, null, global, inputs[0], &.{inputs[1]}, null, null)
@@ -5045,7 +5045,7 @@ fn verifyRegExpExecutionRoots(rt: *core.JSRuntime) !void {
                 defer roots.deactivate();
                 const kept = try roots.ref(0);
                 try kept.set(rt, result);
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 const letter = try rt.internAtom("letter");
                 const array = core.value_semantics.objectFromValue(try kept.get(rt)).?;
                 try require(array.arrayLength() == 3);
@@ -5094,7 +5094,7 @@ fn verifyRegExpProgramCommit() !void {
                 try source.set(rt, (try core.string.String.createAscii(rt, "a")).value());
                 try right.set(rt, (try core.string.String.createUtf16(rt, &.{0x100})).value());
                 try source.set(rt, (try core.string.String.createRope(rt, try source.get(rt), try right.get(rt))).value());
-                _ = try rt.collectFull(null, .declared_only);
+                _ = try rt.collectFull();
                 base = rt.gc.heap_budget.bytes;
                 break :inputs [_]core.JSValue{ try owner.get(rt), try source.get(rt) };
             };
@@ -5117,7 +5117,7 @@ fn verifyRegExpProgramCommit() !void {
             try require(inputs[1].ropeBody().?.isLinearized() == (failure_stage == 1));
 
             rt.setMemoryLimit(null);
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const retry_epoch = rt.gc.collection_epoch;
             try object.setRegexpProgram(rt, inputs[1], compiled.bytecode);
             try require(rt.gc.collection_epoch > retry_epoch);
@@ -5127,7 +5127,7 @@ fn verifyRegExpProgramCommit() !void {
             defer retained.deactivate();
             const owner = try retained.ref(0);
             try owner.set(rt, inputs[0]);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectFull();
             const published = core.value_semantics.objectFromValue(try owner.get(rt)).?;
             try require(core.string.stringValueLenUnchecked(published.regexpSource().?) == 2);
             try require(core.string.stringValueCodeUnitAtUnchecked(published.regexpSource().?, 1) == 0x100);
@@ -5142,7 +5142,7 @@ fn verifyRegExpCompileRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     defer rt.gc.nursery.enabled = nursery_enabled;
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     for ([_]bool{ false, true }) |nursery| {
         rt.gc.nursery.enabled = nursery;
         var values: [3]core.JSValue = undefined;
@@ -5163,7 +5163,7 @@ fn verifyRegExpCompileRoots(rt: *core.JSRuntime) !void {
         const before = rt.active_value_roots;
         const epoch = rt.gc.collection_epoch;
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const result = (try zjs.exec.regexp_ops.regExpCompile(ctx.core, null, global, values[0], &.{ values[1], values[2] }, null, null)).?;
         try require(rt.gc.collection_epoch > epoch);
         try require(rt.active_value_roots == before);
@@ -5204,8 +5204,8 @@ fn verifyRegExpSourcePublication(rt: *core.JSRuntime) !void {
         try require(!(try source.get(rt)).ropeBody().?.isLinearized());
         rt.setMemoryLimit(null);
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = 0;
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         try core.value_semantics.objectFromValue(try owner.get(rt)).?.setRegexpSource(rt, try source.get(rt));
         const stored = core.value_semantics.objectFromValue(try owner.get(rt)).?.regexpSource().?;
@@ -5222,7 +5222,7 @@ fn verifyRegExpSourcePublication(rt: *core.JSRuntime) !void {
             try owner.set(rt, (try core.Object.create(rt, core.class.ids.regexp, null)).value());
             const fresh = (try owner.get(rt)).cycleMarkHeader().?;
             try require(!core.gc.Registry.isNurseryHeader(fresh));
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const generation = rt.gc.collection_epoch;
             try core.value_semantics.objectFromValue(try owner.get(rt)).?.setRegexpSource(rt, try source.get(rt));
             try require(rt.gc.collection_epoch > generation);
@@ -5244,12 +5244,12 @@ fn verifyRegExpSourcePublication(rt: *core.JSRuntime) !void {
         break :input [_]core.JSValue{ try source.get(rt), try flags.get(rt) };
     };
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const before = rt.active_value_roots;
     const created = try zjs.exec.regexp_ops.constructWithPrototype(rt, inputs[0], inputs[1], null);
     try require(rt.active_value_roots == before);
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     // Neither the source regexp nor its borrowed bytecode has a caller root
     // while cloning allocates a new object and copies the compiled payload.
     const clone = try zjs.exec.regexp_ops.constructWithPrototype(rt, created, core.JSValue.undefinedValue(), null);
@@ -5259,7 +5259,7 @@ fn verifyRegExpSourcePublication(rt: *core.JSRuntime) !void {
     defer roots.deactivate();
     const output = try roots.ref(0);
     try output.set(rt, clone);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     const object = core.value_semantics.objectFromValue(try output.get(rt)).?;
     try require(core.string.asFlat(object.regexpSource().?).?.eqlBytes("ab"));
     try require(object.regexpCompiledBytecode().len != 0);
@@ -5286,8 +5286,8 @@ fn verifyRegExpEscapeBorrow(rt: *core.JSRuntime) !void {
             break :input (try core.string.String.createRope(rt, try left.get(rt), try right.get(rt))).value();
         };
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = 0;
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         // No caller root: all source reads must finish before result allocation.
@@ -5390,7 +5390,7 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
     const nursery_enabled = rt.gc.nursery.enabled;
     rt.gc.nursery.enabled = false;
     defer rt.gc.nursery.enabled = nursery_enabled;
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     const count = rt.gc.liveCountKind(.object);
     const epoch = rt.gc.collection_epoch;
     const before = rt.active_value_roots;
@@ -5406,12 +5406,12 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
     try require(rt.active_value_roots == before);
     try require(rt.gc.liveCountKind(.object) == count + 1);
     rt.setMemoryLimit(null);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(rt.gc.liveCountKind(.object) == count);
     {
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = std.math.maxInt(usize);
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(std.math.maxInt(usize));
         // Leave enough reclaimable storage for admission to succeed on retry.
         // The retry must occur during metadata allocation, after the function
         // object exists, rather than at the initial object-allocation check.
@@ -5433,7 +5433,7 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
         defer roots.deactivate();
         const function = try roots.ref(0);
         try function.set(rt, created);
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectFull();
         const object = core.value_semantics.objectFromValue(try function.get(rt)).?;
         try require(object.class_id == core.class.ids.c_function);
         try require(object.getPrototype() == ctx.core.cached_function_proto);
@@ -5451,11 +5451,11 @@ fn verifyNativeFunctionMetadataRoots(rt: *core.JSRuntime) !void {
         const method = try roots.ref(1);
         try target.set(rt, (try core.Object.createPlainObject(rt, null)).value());
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
+        defer rt.setGCThreshold(threshold);
         for ([_][]const u8{ "rootedNativeMethod", "\xce\xbb", "" }) |method_name| {
             // A collection recalculates the threshold; force each invocation,
             // including the cached/empty-name constructor paths.
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const generation = rt.gc.collection_epoch;
             try method.set(rt, try core.function.defineNativeMethod(ctx.core, core.value_semantics.objectFromValue(try target.get(rt)).?, method_name, 2));
             const key = try rt.internAtom(method_name);
@@ -5495,8 +5495,8 @@ fn verifyStringIteratorRoots(rt: *core.JSRuntime) !void {
             break :input (try core.string.String.createRope(rt, try left.get(rt), try right.get(rt))).value();
         };
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = 0;
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         // Construction must retain the input and every intermediate prototype
@@ -5516,7 +5516,7 @@ fn verifyStringIteratorRoots(rt: *core.JSRuntime) !void {
         try require((try prototype.getProperty(core.atom.predefinedId("next", .string).?)).is(.object));
         const expected = [_][]const u16{ &.{'a'}, &.{ 0xd800, 0xdc00 }, &.{0x100}, &.{0xdc01} };
         for (expected) |units| {
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const generation = rt.gc.collection_epoch;
             const result = try zjs.exec.string_ops.stringIteratorNext(rt, try ctx.core.globalObject(), try iterator.get(rt));
             try require(rt.gc.collection_epoch > generation);
@@ -5527,7 +5527,7 @@ fn verifyStringIteratorRoots(rt: *core.JSRuntime) !void {
             for (units, 0..) |unit, index| try require(core.string.stringValueCodeUnitAtUnchecked(value, index) == unit);
         }
         for (0..2) |_| {
-            rt.gc.heap_budget.gc_threshold = 0;
+            rt.setGCThreshold(0);
             const generation = rt.gc.collection_epoch;
             const result = try zjs.exec.string_ops.stringIteratorNext(rt, try ctx.core.globalObject(), try iterator.get(rt));
             try require(rt.gc.collection_epoch > generation);
@@ -5563,8 +5563,8 @@ fn verifyStringCaseRoots(rt: *core.JSRuntime) !void {
                 break :input try source.get(rt);
             };
             const threshold = rt.gc.heap_budget.gc_threshold;
-            defer rt.gc.heap_budget.gc_threshold = threshold;
-            rt.gc.heap_budget.gc_threshold = 0;
+            defer rt.setGCThreshold(threshold);
+            rt.setGCThreshold(0);
             const epoch = rt.gc.collection_epoch;
             const before = rt.active_value_roots;
             const header = input.cycleMarkHeader().?;
@@ -5612,8 +5612,8 @@ fn verifyStringSplitRoots(rt: *core.JSRuntime) !void {
             break :input [_]core.JSValue{ try source.get(rt), try separator.get(rt) };
         };
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = 0;
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         const result = try zjs.exec.string_ops.methodCall(rt, inputs[0], 27, &.{ inputs[1], if (mode == 3) core.JSValue.int32(0) else core.JSValue.undefinedValue() });
@@ -5655,8 +5655,8 @@ fn verifyStringWrapperAndRepeat(rt: *core.JSRuntime) !void {
         // The wrapper must root its input and partially initialized output.
         // Repeat consumes its input before allocating the result.
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
-        rt.gc.heap_budget.gc_threshold = 0;
+        defer rt.setGCThreshold(threshold);
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         if (repeat_string) {
@@ -5699,9 +5699,9 @@ fn verifyStringSearchRoots(rt: *core.JSRuntime) !void {
         };
         // Only the callee owns precise roots for these operands from here.
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
+        defer rt.setGCThreshold(threshold);
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         const pos = if (method == 6) core.JSValue.int32(3) else if (method == 7) core.JSValue.int32(5) else core.JSValue.undefinedValue();
@@ -5733,8 +5733,8 @@ fn verifyRopeQueries(rt: *core.JSRuntime) !void {
     try require(rt.gc.collection_epoch == epoch);
     rt.setMemoryLimit(null);
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const trimmed = try zjs.exec.string_ops.methodCall(rt, try source.get(rt), 8, &.{});
     try require(core.string.stringValueLen(trimmed) == 3);
     const repaired = try zjs.exec.string_ops.methodCall(rt, try source.get(rt), 39, &.{});
@@ -5756,9 +5756,9 @@ fn verifyStringConversionChains(rt: *core.JSRuntime) !void {
         const source = try core.string.String.createUtf16(rt, &.{ 'e', 0x301 });
         const global = try ctx.core.globalObject();
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
+        defer rt.setGCThreshold(threshold);
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const before = rt.active_value_roots;
         const result = switch (mode) {
@@ -5783,7 +5783,7 @@ fn verifyStableHeaderRoot(rt: *core.JSRuntime) !void {
     roots.activate(rt);
     defer roots.deactivate(rt);
     try require(rt.active_value_roots == &roots);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     try require(rt.gc.containsHeader(&shape.header));
 }
 
@@ -5801,9 +5801,9 @@ fn verifyGenericReplace(rt: *core.JSRuntime) !void {
     try source.set(rt, (try core.string.String.createAscii(rt, "aaa")).value());
     const global = try ctx.core.globalObject();
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const pin_count = rt.gc.pins.headers().len;
     const active_roots = rt.active_value_roots;
@@ -5820,9 +5820,9 @@ fn verifyStringMatchAll(rt: *core.JSRuntime) !void {
     const global = try ctx.core.globalObject();
     const source = try core.string.String.createAscii(rt, "production-string-matchAll");
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = try zjs.exec.string_ops.stringMatchAll(ctx.core, null, global, source.value(), &.{}, null, null);
     try require(rt.gc.collection_epoch > epoch);
@@ -5859,9 +5859,9 @@ fn verifyRegExpMatchAll(rt: *core.JSRuntime) !void {
     const source = try core.string.String.createAscii(rt, "production-matchAll-source");
     const arguments = [_]core.JSValue{source.value()};
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = try zjs.exec.string_ops.regExpSymbolMatchAll(ctx.core, null, global, rx, &arguments, null, null);
     try require(rt.gc.collection_epoch > epoch);
@@ -5870,7 +5870,7 @@ fn verifyRegExpMatchAll(rt: *core.JSRuntime) !void {
     defer roots.deactivate();
     const published = try roots.ref(0);
     try published.set(rt, result);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectFull();
     const iterator = core.value_semantics.objectFromValue(try published.get(rt)).?;
     try require(iterator.class_id == core.class.ids.regexp_string_iterator);
     try require(iterator.iteratorTargetSlot().* != null);
@@ -5888,9 +5888,9 @@ fn verifyRegExpMatchSearch(rt: *core.JSRuntime) !void {
             "({ get lastIndex() { return {}; }, set lastIndex(v) {}, exec() { return { index: 2 }; } })", .{});
         const source = try core.string.String.createAscii(rt, "production-regexp-source");
         const threshold = rt.gc.heap_budget.gc_threshold;
-        defer rt.gc.heap_budget.gc_threshold = threshold;
+        defer rt.setGCThreshold(threshold);
         rt.gc.scheduler.host_quiescent = true;
-        rt.gc.heap_budget.gc_threshold = 0;
+        rt.setGCThreshold(0);
         const epoch = rt.gc.collection_epoch;
         const result = if (match)
             try zjs.exec.string_ops.regExpSymbolMatchGeneric(ctx.core, null, global, rx, source.value(), null, null)
@@ -5913,9 +5913,9 @@ fn verifyRegExpSplitEntry(rt: *core.JSRuntime) !void {
     const source = try core.string.String.createAscii(rt, "split-entry-source");
     const arguments = [_]core.JSValue{ source.value(), core.JSValue.int32(1) };
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = try zjs.exec.string_ops.regExpSymbolSplit(ctx.core, null, global, rx, &arguments, null, null);
     try require(rt.gc.collection_epoch > epoch);
@@ -5951,9 +5951,9 @@ fn verifyRegExpSplit(rt: *core.JSRuntime) !void {
     const b = try core.string.String.createUtf16(rt, &.{ 0xde00, 'b' });
     const source = try core.string.String.createRope(rt, a.value(), b.value());
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = try zjs.exec.string_ops.regExpSymbolSplitGeneric(ctx.core, null, global, splitter, source.value(), 20, true, null, null);
     try require(rt.gc.collection_epoch > epoch);
@@ -5972,9 +5972,9 @@ fn verifyRegExpReplace(rt: *core.JSRuntime) !void {
     const source = try core.string.String.createRope(rt, a.value(), b.value());
     const replacement = try core.string.String.createRope(rt, b.value(), a.value());
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
+    defer rt.setGCThreshold(threshold);
     rt.gc.scheduler.host_quiescent = true;
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const result = (try zjs.exec.string_ops.regExpReplaceFast(ctx.core, null, global, rx, source.value(), replacement.value(), null, null)) orelse return error.ExpectedFastReplace;
     try require(rt.gc.collection_epoch > epoch);
@@ -5987,8 +5987,8 @@ fn verifySlices(rt: *core.JSRuntime) !void {
     const parent = try core.string.String.createUtf16(rt, &.{ 0x100, 'a', 'b', 0xd800 });
     const header = parent.header();
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const narrow = try core.string.String.createSlice(rt, parent, 1, 2);
     try require(rt.gc.collection_epoch > epoch);
@@ -6027,13 +6027,13 @@ fn verifyConcat(rt: *core.JSRuntime) !void {
     // array itself is not a root, and conservative retention is disabled.
     // Use the real threshold: allocation probes are erased outside tests.
     const threshold = rt.gc.heap_budget.gc_threshold;
-    defer rt.gc.heap_budget.gc_threshold = threshold;
-    rt.gc.heap_budget.gc_threshold = 0;
+    defer rt.setGCThreshold(threshold);
+    rt.setGCThreshold(0);
     const epoch = rt.gc.collection_epoch;
     const joined = try zjs.exec.string_ops.stringConcat(ctx, null, global, parts[0], parts[1..], null, null);
     try require(rt.gc.collection_epoch > epoch);
     try require(core.string.asFlat(joined).?.eqlBytes("leftright-2147483648"));
-    rt.gc.heap_budget.gc_threshold = 0;
+    rt.setGCThreshold(0);
     const before = rt.gc.collection_epoch;
     const direct = try core.string.String.createConcatParts(rt, &parts);
     try require(rt.gc.collection_epoch > before);

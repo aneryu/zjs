@@ -15,7 +15,6 @@ const VarRef = @import("var_ref.zig").VarRef;
 const Object = @import("object.zig").Object;
 const native_entry = @import("native_entry.zig");
 const module_auto_init = @import("module_auto_init.zig");
-const property_state = @import("property_state.zig");
 const std = @import("std");
 
 /// Property kind (qjs `JS_PROP_TMASK`, quickjs.h). The kind is NOT
@@ -332,10 +331,6 @@ comptime {
     if (mode == .ReleaseFast or mode == .ReleaseSmall) {
         std.debug.assert(@sizeOf(Slot) == 16);
     }
-}
-
-pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !*const AutoInit {
-    return property_state.internAutoInit(rt, info);
 }
 
 pub fn autoInit(ref: anytype) *const AutoInit {

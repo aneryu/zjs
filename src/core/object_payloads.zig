@@ -16,6 +16,7 @@ const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const FunctionBytecode = @import("../bytecode.zig").function_bytecode.FunctionBytecode;
 const std = @import("std");
+const gc_weak = @import("gc_weak.zig");
 const typed_array_names = @import("typed_array_names.zig");
 const builtin = @import("builtin");
 
@@ -37,7 +38,7 @@ pub const WeakCollectionEntry = struct {
     hash_next: usize = collection_no_entry,
 
     pub fn destroy(self: WeakCollectionEntry, rt: *JSRuntime) void {
-        rt.releaseWeakIdentity(self.key_identity);
+        gc_weak.release(rt, self.key_identity);
     }
 };
 
@@ -72,8 +73,8 @@ pub const FinalizationRegistryCell = struct {
     }
 
     pub fn destroy(self: FinalizationRegistryCell, rt: *JSRuntime) void {
-        if (self.target_identity) |identity| rt.releaseWeakIdentity(identity);
-        if (self.unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
+        if (self.target_identity) |identity| gc_weak.release(rt, identity);
+        if (self.unregister_token_identity) |identity| gc_weak.release(rt, identity);
         // Active/pending cells still own the job-queue reservation taken at
         // register. Queued cells already consumed it via enqueueReserved.
         // Runtime teardown destroys the queue before leftover objects.
@@ -262,7 +263,7 @@ pub const IteratorPayload = struct {
 /// Per-payload node in the runtime's weak-holder list. The links point to the
 /// owning Object rather than to another node, so traversal does not need a
 /// payload-kind cast. `borrowed_holder_index` is the independent O(1) index
-/// into Runtime.borrowed_reference_holders; keeping both pieces here matches
+/// into Runtime.property_tables.borrowed_holders; keeping both pieces here matches
 /// QuickJS's payload-resident JSWeakRefHeader without growing JSObject.
 pub const WeakReferenceHolderLink = struct {
     previous: ?*Object = null,
@@ -313,7 +314,7 @@ pub const CollectionPayload = struct {
         self.bucket_heads = &.{};
         self.active_count = 0;
         if (old_bucket_heads.len != 0) rt.freeNative(usize, old_bucket_heads);
-        for (self.weak_entries.items) |entry| rt.releaseWeakIdentity(entry.key_identity);
+        for (self.weak_entries.items) |entry| gc_weak.release(rt, entry.key_identity);
         self.weak_entries.deinit(rt.nativeAllocator());
     }
 
@@ -355,7 +356,7 @@ pub const SharedBufferStore = struct {
         // buffer's maxByteLength reservation up front.
         const bytes: []u8 = if (byte_length == 0) &.{} else (allocator.rawAlloc(byte_length, .of(u8), @returnAddress()) orelse return error.OutOfMemory)[0..byte_length];
         errdefer if (bytes.len != 0) allocator.rawFree(bytes, .of(u8), @returnAddress());
-        var external_memory = try rt.reportExternalAlloc(byte_length);
+        var external_memory = try rt.gc.reportExternalAlloc(byte_length);
         errdefer external_memory.release();
         store.* = .{
             .ref_count = .init(1),
@@ -374,7 +375,7 @@ pub const SharedBufferStore = struct {
         const allocator = std.heap.page_allocator;
         const store = try allocator.create(SharedBufferStore);
         errdefer allocator.destroy(store);
-        var external_memory = try rt.reportExternalAlloc(bytes.len);
+        var external_memory = try rt.gc.reportExternalAlloc(bytes.len);
         errdefer external_memory.release();
         store.* = .{
             .ref_count = .init(1),
@@ -704,7 +705,7 @@ pub const WeakRefPayload = struct {
     weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *WeakRefPayload, rt: *JSRuntime) void {
-        rt.clearWeakIdentitySlot(&self.weak_target_identity);
+        gc_weak.clearSlot(rt, &self.weak_target_identity);
     }
 
     /// Weak identities are not strong cycle-GC edges.

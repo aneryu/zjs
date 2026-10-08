@@ -675,7 +675,7 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const wrapper_value = try constructPrimitiveWrapperWithPrototype(rt, core.class.ids.symbol, null, symbol_value);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
@@ -683,7 +683,7 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     const stored = wrapper.objectDataSlot().* orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -778,8 +778,8 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    ctx.runtime.formatting_error_stack = true;
-    defer ctx.runtime.formatting_error_stack = false;
+    ctx.runtime.execution.beginErrorStackFormatting();
+    defer ctx.runtime.execution.endErrorStackFormatting();
 
     const aggregate_value = try aggregateErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     const aggregate = objectFromValue(aggregate_value) orelse return error.TypeError;
@@ -798,7 +798,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
@@ -845,9 +845,9 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
     const error_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-value-symbol");
-    const error_arg = try rt.takeSymbolValue(error_atom);
+    const error_arg = try rt.symbolValue(error_atom);
     const suppressed_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-suppressed-symbol");
-    const suppressed_arg = try rt.takeSymbolValue(suppressed_atom);
+    const suppressed_arg = try rt.symbolValue(suppressed_atom);
     const args = [_]core.JSValue{
         error_arg,
         suppressed_arg,
@@ -871,7 +871,7 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
         try std.testing.expect(stored_suppressed.same(suppressed_arg));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(suppressed_atom) == null);
 }
@@ -912,7 +912,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     const options = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
 
     const cause_atom = try rt.atoms.newValueSymbol("gc-error-cause-symbol");
-    const cause_value = try rt.takeSymbolValue(cause_atom);
+    const cause_value = try rt.symbolValue(cause_atom);
     try options.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_value, .method));
     const args = [_]core.JSValue{
         core.JSValue.undefinedValue(),
@@ -921,8 +921,8 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    ctx.runtime.formatting_error_stack = true;
-    defer ctx.runtime.formatting_error_stack = false;
+    ctx.runtime.execution.beginErrorStackFormatting();
+    defer ctx.runtime.execution.endErrorStackFormatting();
 
     const error_value = try errorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     const object = objectFromValue(error_value) orelse return error.TypeError;
@@ -934,7 +934,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
 
@@ -1113,9 +1113,9 @@ pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object
     var atom_roots = core.runtime.rootAtoms(.{&atom_id});
     atom_roots.activate(rt);
     defer atom_roots.deactivate(rt);
-    var owner_pin = try core.runtime.pinHeaderForNative(rt, object.gcHeader());
+    var owner_pin = try core.runtime.NativePin.initHeader(rt, object.gcHeader());
     defer owner_pin.deinit();
-    var value_pin = try core.runtime.pinValueForNative(rt, value);
+    var value_pin = try core.runtime.NativePin.initValue(rt, value);
     defer if (value_pin) |*held| held.deinit();
     try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, attrs));
 }
@@ -1160,9 +1160,9 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         var write_roots = core.runtime.ValueRootFrame{ .slices = &borrowed_slices };
         write_roots.activate(rt);
         defer write_roots.deactivate(rt);
-        var owner_pin = try core.runtime.pinValueForNative(rt, values[2]);
+        var owner_pin = try core.runtime.NativePin.initValue(rt, values[2]);
         defer if (owner_pin) |*held| held.deinit();
-        var value_pin = try core.runtime.pinValueForNative(rt, values[3]);
+        var value_pin = try core.runtime.NativePin.initValue(rt, values[3]);
         defer if (value_pin) |*held| held.deinit();
         try objectFromValue(values[2]).?.defineOwnProperty(rt, atom, core.Descriptor.data(values[3], .all));
     }
@@ -1191,7 +1191,7 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
     roots.activate(rt);
     defer roots.deactivate(rt);
 
-    var groups_pin = try core.runtime.pinHeaderForNative(rt, groups.gcHeader());
+    var groups_pin = try core.runtime.NativePin.initHeader(rt, groups.gcHeader());
     defer groups_pin.deinit();
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
@@ -2630,7 +2630,7 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const wrapper_value = try primitiveObjectForAccess(rt, global, symbol_value);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
@@ -2638,7 +2638,7 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3172,7 +3172,7 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.symbolValue(symbol_atom)});
 
     const desc_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -3194,7 +3194,7 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
         try std.testing.expect(stored.same(desc_value));
     }
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -4030,7 +4030,7 @@ test "private brand atom is released with home object" {
     // object is torn down; under the tracer that is a collection rather than
     // the last release. Nothing here needs rooting -- `home` is the thing that
     // must die.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(brand_atom) == null);
 }
 
@@ -4463,7 +4463,7 @@ pub fn speciesConstructor(
 /// engine for the proxy's target, so this is also the native-stack check that
 /// bounds a deep proxy chain (qjs get_proxy_method).
 pub fn proxyHandlerForTrap(ctx: *core.JSContext, global: *core.Object, proxy: *core.Object) !core.JSValue {
-    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
+    if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     return proxy.proxyHandler() orelse {
         _ = try throwTypeErrorMessage(ctx, global, "revoked proxy");
         unreachable;
@@ -5713,7 +5713,7 @@ test "Object.groupBy new group define failure releases group once" {
     var roots = core.runtime.rootObjects(.{ &kept_global, &kept_out });
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     // RealmContext and Shapes are GC objects: global and out share one live
     // empty root shape, alongside their owning context.
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());

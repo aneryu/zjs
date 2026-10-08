@@ -426,9 +426,8 @@ pub const RealmContext = struct {
         try rt.requireOwnerThread();
         // A realm's intrinsics are long-lived by definition and are held as
         // bare pointers all over the engine; build them in the old generation.
-        const nursery_was_suspended = rt.gc.nursery.suspended;
-        rt.gc.nursery.suspended = true;
-        defer rt.gc.nursery.suspended = nursery_was_suspended;
+        const nursery_was_suspended = rt.gc.nursery.suspendAllocation();
+        defer rt.gc.nursery.restoreSuspension(nursery_was_suspended);
         const ctx = try rt.gc.createRuntimeCell(RealmContext);
         var initialized = false;
         errdefer if (initialized) ctx.destroy() else rt.gc.destroyCell(RealmContext, ctx);
@@ -553,12 +552,12 @@ pub const RealmContext = struct {
         // receivers and arguments -- without that a minor here reclaims
         // objects a running builtin is still walking.
         if (self.runtime.gc.shouldTryMinor() or self.runtime.gc.hasPendingMajorRequest()) {
-            _ = self.runtime.pollGC(null, .safepoint) catch {};
+            _ = self.runtime.pollGC(.safepoint) catch {};
         }
         // Stress mode wants the collection window everywhere, not once per
         // 10k ticks; the cadence is the other half of the knob.
         if (gc.forensics.stress_cadence) |cadence| self.interrupt_counter = cadence;
-        return self.runtime.runInterruptHandler();
+        return self.runtime.interrupt.poll();
     }
 
     pub fn setTrackUnhandledRejections(self: *RealmContext, enabled: bool) void {
@@ -1133,14 +1132,6 @@ pub const RealmContext = struct {
         if (capacity != 0) rt.freeNative(UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
-    pub fn pushActiveBacktraceFrame(self: *RealmContext, frame: *ActiveBacktraceFrame) void {
-        execution.linkActiveBacktrace(self.runtime, frame);
-    }
-
-    pub fn popActiveBacktraceFrame(self: *RealmContext, frame: *ActiveBacktraceFrame) void {
-        execution.unlinkActiveBacktrace(self.runtime, frame);
-    }
-
     /// The innermost `max_frames` active frames, oldest first. Callers print
     /// at most `Error.stackTraceLimit` frames; bounding the snapshot keeps an
     /// error thrown at recursion depth n (a stack overflow) from costing
@@ -1152,7 +1143,7 @@ pub const RealmContext = struct {
         // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
         {
-            var active = self.runtime.current_backtrace_frame;
+            var active = self.runtime.execution.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
                 while (active_count < max_frames) : (index += 1) {
@@ -1171,7 +1162,7 @@ pub const RealmContext = struct {
         // Fill so the innermost frame lands LAST (oldest-active...innermost).
         var active_index = active_count;
         {
-            var active = self.runtime.current_backtrace_frame;
+            var active = self.runtime.execution.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
                 while (active_index > 0) : (index += 1) {
@@ -1220,7 +1211,7 @@ pub const RealmContext = struct {
         if (self.global) |existing| {
             if (existing != global) return error.InvalidBuiltinRegistry;
         }
-        if (rt.contextForGlobalIncludingConstructing(global)) |owner| {
+        if (rt.contexts.forGlobal(global, .include_constructing)) |owner| {
             if (owner != self) return error.InvalidBuiltinRegistry;
         }
         const adopted = self.global == null;

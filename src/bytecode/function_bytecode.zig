@@ -6,6 +6,7 @@ const atom = @import("../core/atom.zig");
 const context = @import("../core/context.zig");
 const gc = @import("../core/gc.zig");
 const runtime = @import("../runtime.zig");
+const engine_services = @import("../engine_services.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const opcode = bytecode.opcode;
 const EntryContract = bytecode.EntryContract;
@@ -1213,7 +1214,7 @@ pub const FunctionBytecodeImpl = extern struct {
         // Small-inline CallerState lives in the hot pad and is found via
         // the live code pointer. Tear it down before the code pointer is
         // cleared.
-        if (rt.small_inline.destroy) |cb| cb(rt, @ptrCast(self));
+        engine_services.destroySmallInlineState(rt, self);
 
         self.byte_code = null;
         self.byte_code_len = 0;
@@ -1272,7 +1273,7 @@ pub const FunctionBytecodeImpl = extern struct {
         // Pass B receives only the header pointer. Preserve the minimum
         // sizing state it needs to reconstruct this exact FAM length after
         // Pass A has released all owners and nulled their pointers.
-        if (rt.gc.hot.phase == .deinit) {
+        if (rt.gc.isTearingDown()) {
             layout_value.restoreSizing(self);
         }
     }

@@ -2,15 +2,48 @@
 //! (`JSRuntime.weak`). This module owns register, unlink, and the paired map
 //! update. Borrowed-holder tables and WeakRef [[KeptAlive]] live elsewhere.
 //!
-//! An object identity is `weak_id << 1`. Ids are monotonic and are not reused.
+//! An object identity is `weak_id << 1`; a symbol identity is `atom << 1 | 1`
+//! (`Identity`). Object ids are monotonic and are not reused.
 //! Both maps are updated together: a failed second insert rolls the first
 //! back, and death removes both entries in the same `take` before the object
 //! storage is reused.
 
 const std = @import("std");
+const atom_mod = @import("atom.zig");
 const object_mod = @import("object.zig");
+const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
+
+/// The encoding stored in weak slots. Every encode/decode goes through here.
+pub const Identity = struct {
+    pub inline fn ofObjectId(weak_id: usize) usize {
+        return weak_id << 1;
+    }
+
+    pub inline fn ofSymbol(atom_id: atom_mod.Atom) usize {
+        return (@as(usize, atom_id.raw()) << 1) | 1;
+    }
+
+    pub inline fn isSymbol(identity: usize) bool {
+        return (identity & 1) != 0;
+    }
+
+    /// The registry id of an object identity; null for a symbol identity.
+    pub inline fn objectId(identity: usize) ?usize {
+        if (isSymbol(identity)) return null;
+        return identity >> 1;
+    }
+
+    /// The atom of a symbol identity; null for an object identity or an id
+    /// outside the atom range.
+    pub inline fn symbolAtom(identity: usize) ?atom_mod.Atom {
+        if (!isSymbol(identity)) return null;
+        const atom_id = identity >> 1;
+        if (atom_id > std.math.maxInt(u32)) return null;
+        return atom_mod.Atom.fromRaw(@intCast(atom_id));
+    }
+};
 
 /// Weak slots (WeakRef/WeakMap/WeakSet/FinalizationRegistry/WeakRootSlot)
 /// store `weak_id << 1` instead of the header address, so a recycled
@@ -98,8 +131,46 @@ pub fn unregisterHolder(rt: *JSRuntime, object: *Object) void {
 
 /// Even identities only. Symbol identities (low bit set) are not in this table.
 pub fn objectFromIdentity(rt: *const JSRuntime, identity: usize) ?*Object {
-    if ((identity & 1) != 0) return null;
-    return rt.weak.id_objects.get(identity >> 1);
+    return rt.weak.id_objects.get(Identity.objectId(identity) orelse return null);
+}
+
+/// Object identities are not counted: a token stays valid until its object
+/// dies, and death hands it back (`takeObject`). Only symbol identities,
+/// whose atom entry is kept indexed by this count, are counted.
+pub fn retain(rt: *JSRuntime, identity: usize) void {
+    rt.atoms.retainSymbolWeakRef(Identity.symbolAtom(identity) orelse return);
+}
+
+/// Mirror of `retain`: releasing an object identity is a no-op because
+/// nothing was retained.
+pub fn release(rt: *JSRuntime, identity: usize) void {
+    rt.atoms.releaseSymbolWeakRef(rt, Identity.symbolAtom(identity) orelse return);
+}
+
+/// Empty a weak slot and release what it held.
+pub fn clearSlot(rt: *JSRuntime, slot: *?usize) void {
+    const identity = slot.* orelse return;
+    slot.* = null;
+    release(rt, identity);
+}
+
+pub fn isLive(rt: *const JSRuntime, identity: usize) bool {
+    if (Identity.isSymbol(identity)) {
+        const symbol_atom = Identity.symbolAtom(identity) orelse return false;
+        return rt.atoms.kind(symbol_atom) == .symbol;
+    }
+    return objectFromIdentity(rt, identity) != null;
+}
+
+/// The value a live identity names, or undefined once it is gone.
+pub fn toValue(rt: *JSRuntime, identity: usize) JSValue {
+    if (Identity.isSymbol(identity)) {
+        const symbol_atom = Identity.symbolAtom(identity) orelse return JSValue.undefinedValue();
+        if (rt.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
+        return rt.atoms.symbolValueIfLive(rt, symbol_atom);
+    }
+    const object = objectFromIdentity(rt, identity) orelse return JSValue.undefinedValue();
+    return object.value();
 }
 
 /// Encoded weak identity (`weak_id << 1`). First registration allocates a
@@ -109,7 +180,7 @@ pub fn registerObject(rt: *JSRuntime, object: *Object) !usize {
     const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
     if (object.flags.has_weak_id) {
         const weak_id = rt.weak.object_ids.get(address).?;
-        return weak_id << 1;
+        return Identity.ofObjectId(weak_id);
     }
     const weak_id = rt.weak.next_id;
     try rt.weak.object_ids.put(rt.nativeAllocator(), address, weak_id);
@@ -124,25 +195,20 @@ pub fn registerObject(rt: *JSRuntime, object: *Object) !usize {
     // here would leave this pair pointing at freed memory, and a hit in
     // `id_objects` is the liveness test.
     object.markNeedsFinalizer(rt);
-    return weak_id << 1;
+    return Identity.ofObjectId(weak_id);
 }
 
 pub fn peekObject(rt: *const JSRuntime, object: *const Object) ?usize {
     if (!object.flags.has_weak_id) return null;
     const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
     const weak_id = rt.weak.object_ids.get(address) orelse return null;
-    return weak_id << 1;
+    return Identity.ofObjectId(weak_id);
 }
 
-/// Rebind every address-keyed side table for an object the collector moved,
-/// or moved back during evacuation rollback. Promotion and rollback must both
-/// come through here so no table is left naming the husk.
-pub fn relocateObjectIdentities(rt: *JSRuntime, previous: *const Object, current: *Object) void {
-    relocateObject(rt, previous, current);
-}
-
-/// Move the address half of an existing identity without changing the id or
-/// allocating. Removing the old key supplies capacity for its replacement.
+/// Rebind the address half of an existing identity for an object the
+/// collector moved, or moved back during evacuation rollback; promotion and
+/// rollback both come through here so no table is left naming the husk.
+/// The id is unchanged and nothing is allocated. Removing the old key supplies capacity for its replacement.
 /// `previous` may already be a forwarding husk; only its address is read.
 /// The evacuation journal calls this in reverse when restoring the source.
 pub fn relocateObject(rt: *JSRuntime, previous: *const Object, current: *Object) void {
@@ -170,5 +236,5 @@ pub fn takeObject(rt: *JSRuntime, object: *Object) ?usize {
     _ = rt.weak.object_ids.remove(address);
     _ = rt.weak.id_objects.remove(weak_id);
     rt.weak.noteRemoval();
-    return weak_id << 1;
+    return Identity.ofObjectId(weak_id);
 }

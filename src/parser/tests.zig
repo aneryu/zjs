@@ -19,7 +19,7 @@ const ParseState = engine.parser.Parser.ParseState;
 const test_entry = zjs.compiler.test_entry;
 
 fn reclaimNow(rt: *core.JSRuntime) void {
-    _ = rt.collectForTest();
+    _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
 }
 
 test "scope proof cache bounds ancestor scans across sibling functions" {
@@ -8005,7 +8005,7 @@ test "nested function declarations fit the QuickJS native parser stack budget" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    rt.updateNativeStackTop();
+    rt.stack.captureNativeTop();
 
     var parsed = try compileForTest(rt, source.items, .{
         .mode = .script,
@@ -13440,7 +13440,7 @@ pub const phase_ownership = struct {
             // major inside the measured window can drop the runtime's LIVE
             // allocation count below a baseline that still counted atom
             // spellings nothing names. Collect first, then measure.
-            _ = rt.collectForTest();
+            _ = try rt.collectForTest();
             self.* = .{
                 .rt = rt,
                 .shape = shape,
@@ -13532,7 +13532,7 @@ pub const phase_ownership = struct {
             // entries this window interned; the collector does. The terminal
             // sample asserts the window is back to zero live allocations, so
             // the collection has to happen before it is taken.
-            _ = self.rt.collectForTest();
+            _ = self.rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
         }
 
         pub fn sampleB1(self: *Window) !Snapshot {

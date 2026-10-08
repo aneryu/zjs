@@ -3785,7 +3785,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         // collection rather than this release. Nothing needs rooting -- the
         // FunctionBytecode is the thing that must die, and `ctx` is reached
         // through the host create-ref's root provider.
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
     }
 
     ctx.destroy();

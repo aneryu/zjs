@@ -324,15 +324,15 @@ pub const tests = if (@import("builtin").is_test) struct {
         defer loop.deinit();
 
         const timer_symbol = try rt.atoms.newValueSymbol("gc-event-loop-timer-symbol");
-        const timer_value = try rt.takeSymbolValue(timer_symbol);
+        const timer_value = try rt.symbolValue(timer_symbol);
         try loop.enqueueTimer(ctx.core, 1, timer_value, 0);
 
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(timer_symbol) != null);
 
         loop.clearTimer(ctx.core, 1);
 
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(timer_symbol) == null);
     }
 
@@ -396,7 +396,7 @@ pub const tests = if (@import("builtin").is_test) struct {
             .realm = ctx.core,
             .flags = .{ .func_kind = .generator },
             .cpool_count = 1,
-        }, &.{try rt.takeSymbolValue(symbol_atom)});
+        }, &.{try rt.symbolValue(symbol_atom)});
 
         const callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -408,7 +408,7 @@ pub const tests = if (@import("builtin").is_test) struct {
 
         try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     }
 

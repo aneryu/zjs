@@ -9,6 +9,7 @@
 //! cycle and retries from fresh marks.
 
 const std = @import("std");
+const gc_weak = @import("gc_weak.zig");
 const builtin = @import("builtin");
 
 const atom_mod = @import("atom.zig");
@@ -23,6 +24,7 @@ const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const BlockHeapMod = @import("gc_block_heap.zig");
 const runtime_mod = @import("../runtime.zig");
+const engine_services = @import("../engine_services.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
 const string_mod = @import("string.zig");
@@ -69,7 +71,7 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
             const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
             visitor.visitRealm(&fb.realm.ptr);
             for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
-            try traceFunctionBytecodeAtoms(rt, fb, visitor);
+            try traceFunctionBytecodeAtoms(fb, visitor);
             return;
         },
         .var_ref => {
@@ -136,10 +138,10 @@ fn sweepAtomTable(rt: *JSRuntime) void {
 /// B  `func_name`, `filename`, `script_or_module`
 /// C  the 4-byte atom operand inlined in each atom-format opcode
 /// D  `vardefs[].var_name` and `closureVar()[].var_name`
-/// H  the small-inline `CallerState` (reported through the exec hook)
+/// H  the small-inline `CallerState` (reported through `engine_services`)
 ///
 /// Visitors without a `visitAtom` decl compile this away entirely.
-fn traceFunctionBytecodeAtoms(rt: *JSRuntime, fb: *FunctionBytecode, visitor: anytype) CollectError!void {
+fn traceFunctionBytecodeAtoms(fb: *FunctionBytecode, visitor: anytype) CollectError!void {
     const VisType = @TypeOf(visitor);
     const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
     if (comptime !@hasDecl(CleanType, "visitAtom")) return;
@@ -152,20 +154,7 @@ fn traceFunctionBytecodeAtoms(rt: *JSRuntime, fb: *FunctionBytecode, visitor: an
     var operands = fb.atomOperandIterator();
     while (operands.next()) |operand| try gc_visit.atom(visitor, operand);
 
-    const hook = rt.small_inline.trace_atoms orelse return;
-    const Bridge = struct {
-        vis: VisType,
-        failed: bool = false,
-        fn visit(ctx: *anyopaque, id: atom_mod.Atom) void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            gc_visit.atom(self.vis, id) catch {
-                self.failed = true;
-            };
-        }
-    };
-    var bridge = Bridge{ .vis = visitor };
-    hook(rt, @ptrCast(fb), @ptrCast(&bridge), Bridge.visit);
-    if (bridge.failed) return error.OutOfMemory;
+    try engine_services.traceSmallInlineAtoms(fb, visitor);
 }
 
 /// What a collection leaves behind for tests and the census deduction; the
@@ -257,7 +246,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: gc.RootScan) !FullReachable {
         }
     }
 
-    var probe = try Collector.init(rt, null, scan);
+    var probe = try Collector.init(rt, scan);
     defer probe.deinit();
     // A diagnostic census must keep both the root addresses and its recorded
     // identities unchanged for the real collection that follows it.
@@ -388,7 +377,7 @@ fn verifyCollectorInvariants(rt: *JSRuntime, require_retirement_commit: bool) vo
     requireInvariant(rt.gc.verifyHeapAccounting(rt), "HEAP ACCOUNTING", "heap accounting invariant violated");
 }
 
-pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) CollectError!usize {
+pub fn collectCycles(rt: *JSRuntime, scan: gc.RootScan) CollectError!usize {
     rt.assertGCAllowed();
     if (rt.roots.isTracing()) @panic("collection reentry during tracing");
     rt.gc.last_census_ns = 0;
@@ -397,7 +386,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     // The epoch bump and the hot-block withdrawal belong to `clearMarks`,
     // which `Collector.run` reaches below; this entry used to do them a second
     // time before it.
-    var collector = try Collector.init(rt, extra_roots, scan);
+    var collector = try Collector.init(rt, scan);
     defer collector.deinit();
     // Trace-coupled retirement: only tracing can retire the marked young
     // survivors. Without opening the transaction here `retireTracedYoung` is
@@ -439,7 +428,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
 ///
 /// Returns the number of young objects reclaimed, or null when there is no
 /// generational state to work with.
-pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) CollectError!?usize {
+pub fn collectMinor(rt: *JSRuntime, scan: gc.RootScan) CollectError!?usize {
     rt.assertGCAllowed();
     if (rt.roots.isTracing()) @panic("collection reentry during tracing");
     // Hard guard, not only the scheduler's. `shouldTryMinor` is the policy
@@ -459,7 +448,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // memory, one collection after the detach that stranded it.
     if (builtin.mode == .Debug) rt.gc.verifyIntrusiveList() catch unreachable;
 
-    var collector = try Collector.init(rt, extra_roots, scan);
+    var collector = try Collector.init(rt, scan);
     collector.minor_mode = true;
     defer collector.deinit();
 
@@ -1275,7 +1264,6 @@ const Collector = struct {
         },
     };
     rt: *JSRuntime,
-    extra_roots: ?*const runtime_mod.ValueRootFrame,
     arena: std.heap.ArenaAllocator,
     work: std.ArrayList(*gc.Header),
     evacuation_enabled: bool = true,
@@ -1319,12 +1307,11 @@ const Collector = struct {
         const no_waiter = std.math.maxInt(u32);
     };
 
-    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) std.mem.Allocator.Error!Collector {
+    fn init(rt: *JSRuntime, scan: gc.RootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         return .{
             .rt = rt,
-            .extra_roots = extra_roots,
             .arena = arena,
             .work = .empty,
             // Production STW adds the conservative pass whenever the host is
@@ -1369,7 +1356,7 @@ const Collector = struct {
                 );
                 entry.source.meta().* = entry.metadata;
                 Object.fromHeader(entry.source).rebindAfterRelocation(@intFromPtr(entry.copy), entry.body_bytes);
-                gc.gc_weak.relocateObjectIdentities(self.rt, Object.fromHeader(entry.copy), Object.fromHeader(entry.source));
+                gc.gc_weak.relocateObject(self.rt, Object.fromHeader(entry.copy), Object.fromHeader(entry.source));
                 self.rt.gc.discardPromotedCell(entry.copy, entry.body_bytes);
             },
         };
@@ -1582,7 +1569,7 @@ const Collector = struct {
     }
 
     /// Objects whose address a runtime list stores raw -- the weak-holder
-    /// chain (`gc_weak.registerHolder`) and `borrowed_reference_holders` --
+    /// chain (`gc_weak.registerHolder`) and `property_tables.borrowed_holders` --
     /// must never move: a move rebinds only the weak-identity tables, so
     /// those lists would keep naming the husk. They are never young (they are
     /// allocated old), which `evacuate` asserts.
@@ -1824,12 +1811,6 @@ const Collector = struct {
         // holder can be an OLD shape naming it by atom id -- an edge no minor
         // traces and no barrier records.
         if (self.minor_mode) try self.rt.atoms.traceYoungSymbolBodies(&visitor);
-        // `JSRuntime.collectFull` can pass a frame that is not
-        // necessarily linked on `active_value_roots`. Trial deletion ignored
-        // it because RC>0 already kept those values; STW must visit it.
-        if (self.extra_roots) |roots| {
-            try self.rt.traceValueRootFrames(roots, &visitor);
-        }
     }
 
     fn shadeConservativeCandidate(context: *anyopaque, header: *gc.Header) void {
@@ -1891,8 +1872,6 @@ const Collector = struct {
             .visit_object = Prepass.object,
         };
         try self.rt.traceActiveRoots(&visitor);
-        if (self.extra_roots) |roots|
-            try self.rt.traceValueRootFrames(roots, &visitor);
     }
 
     fn seedConservativeRoots(self: *Collector) CollectError!void {
@@ -2051,7 +2030,7 @@ const Collector = struct {
         const state = self.ephemerons.?;
         if (state.out_of_memory) return;
         const arena = self.allocator();
-        if ((entry.key_identity & 1) != 0) {
+        if (gc_weak.Identity.isSymbol(entry.key_identity)) {
             state.symbol_keyed.append(arena, entry) catch {
                 state.out_of_memory = true;
             };
@@ -2084,7 +2063,7 @@ const Collector = struct {
         for (self.rt.roots.weak_root_slots.items) |slot| {
             const identity = slot.identity orelse continue;
             if (!keyIsMarked(self.rt, identity)) {
-                self.rt.clearWeakRootSlot(slot);
+                gc_weak.clearSlot(self.rt, &slot.identity);
                 self.rt.roots.queueWeakNotify(slot);
             }
         }
@@ -2104,7 +2083,7 @@ const Collector = struct {
         if (holder.weakRefPayloadForCycleGc()) |payload| {
             if (payload.weak_target_identity) |identity| {
                 if (!keyIsMarked(self.rt, identity)) {
-                    self.rt.clearWeakIdentitySlot(&payload.weak_target_identity);
+                    gc_weak.clearSlot(self.rt, &payload.weak_target_identity);
                 }
             }
         }
@@ -2120,7 +2099,7 @@ const Collector = struct {
                     write_index += 1;
                     continue;
                 }
-                self.rt.releaseWeakIdentity(entry.key_identity);
+                gc_weak.release(self.rt, entry.key_identity);
                 removed = true;
             }
             if (removed) {
@@ -2141,7 +2120,7 @@ const Collector = struct {
             if (cell.unregister_token_identity) |identity| {
                 if (!keyIsMarked(self.rt, identity)) {
                     _ = finalization_payload.dropTokenCell(identity);
-                    self.rt.clearWeakIdentitySlot(&cell.unregister_token_identity);
+                    gc_weak.clearSlot(self.rt, &cell.unregister_token_identity);
                 }
             }
             const target_identity = cell.target_identity orelse {
@@ -2662,7 +2641,7 @@ test "nursery evacuation allocation failure rolls back a traced cycle" {
     const heap_before = rt.gc.heap_budget.bytes;
     var object_alias: ?*Object = first;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var collector = try Collector.init(rt, null, .declared_only);
+    var collector = try Collector.init(rt, .declared_only);
     collector.arena.deinit();
     collector.arena = std.heap.ArenaAllocator.init(failing.allocator());
     defer collector.deinit();
@@ -2698,7 +2677,7 @@ test "nursery evacuation allocation failure rolls back a traced cycle" {
     try std.testing.expect(!rt.gc.containsHeader(moved_first));
     try std.testing.expect(!rt.gc.containsHeader(moved_second));
     try rt.gc.verifyHeapAccounting(rt);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(values[0].bits != original[0].bits);
     try std.testing.expectEqual(values[1].bits, (try Object.fromHeader(values[0].cycleMarkHeader().?).getProperty(atom_mod.ids.value)).bits);
 }
@@ -2722,7 +2701,7 @@ test "nursery ephemeron OOM rolls back table slots and weak identities" {
     const original = values;
     const heap_before = rt.gc.heap_budget.bytes;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var collector = try Collector.init(rt, null, .declared_only);
+    var collector = try Collector.init(rt, .declared_only);
     collector.arena.deinit();
     collector.arena = std.heap.ArenaAllocator.init(failing.allocator());
     defer collector.deinit();
@@ -2750,14 +2729,14 @@ test "nursery ephemeron OOM rolls back table slots and weak identities" {
     for (table.weakCollectionEntries(), original[1 .. original.len - 1], original[2..]) |entry, key, value| {
         try std.testing.expectEqual(value.bits, entry.value.bits);
         try std.testing.expectEqual(Object.fromHeader(key.cycleMarkHeader().?), rt.liveObjectFromWeakIdentity(entry.key_identity).?);
-        try std.testing.expectEqual(entry.key_identity >> 1, rt.weak.object_ids.get(@intFromPtr(key.cycleMarkHeader().?)).?);
+        try std.testing.expectEqual(gc_weak.Identity.objectId(entry.key_identity).?, rt.weak.object_ids.get(@intFromPtr(key.cycleMarkHeader().?)).?);
     }
     try std.testing.expectEqual(@as(usize, original.len - 2), rt.weak.object_ids.count());
     try std.testing.expectEqual(rt.weak.object_ids.count(), rt.weak.id_objects.count());
     try rt.gc.verifyHeapAccounting(rt);
     // Retry with the same minimal roots and prove the whole chain is live.
     @memset(values[2..], JSValue.undefinedValue());
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(values[1].bits != original[1].bits);
     for (table.weakCollectionEntries(), original[2..]) |entry, previous| {
         try std.testing.expect(entry.value.bits != previous.bits);
@@ -2779,7 +2758,7 @@ test "nursery evacuation frontier OOM precedes forwarding publication" {
     const copied_before = rt.gc.nursery.stats.copied_objects;
     try std.testing.expect(gc.Registry.isNurseryHeader(object.gcHeader()));
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var collector = try Collector.init(rt, null, .declared_only);
+    var collector = try Collector.init(rt, .declared_only);
     collector.arena.deinit();
     collector.arena = std.heap.ArenaAllocator.init(failing.allocator());
     defer collector.deinit();
@@ -2814,10 +2793,8 @@ test "nursery evacuation frontier OOM precedes forwarding publication" {
 }
 
 fn keyIsMarked(rt: *const JSRuntime, identity: usize) bool {
-    if ((identity & 1) != 0) {
-        const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(u32)) return false;
-        const symbol_atom: @import("atom.zig").Atom = @import("atom.zig").Atom.fromRaw(@intCast(atom_id));
+    if (gc_weak.Identity.isSymbol(identity)) {
+        const symbol_atom = gc_weak.Identity.symbolAtom(identity) orelse return false;
         if (rt.atoms.kind(symbol_atom) != .symbol) return false;
         const header = rt.atoms.symbolBodyHeaderIfLive(rt, symbol_atom) orelse return false;
         return rt.gc.headerMarked(header);

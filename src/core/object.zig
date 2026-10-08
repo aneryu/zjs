@@ -18,6 +18,7 @@ const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
+const property_state = @import("property_state.zig");
 const gc_weak = @import("gc_weak.zig");
 const host_function = @import("host_function.zig");
 const native_entry = @import("native_entry.zig");
@@ -996,7 +997,7 @@ pub const Object = extern struct {
         std.debug.assert(final_shape.prop_count == 0);
         self.shape_ref = final_shape;
         rt.gc.pins.removeConstructionRoot(self.gcHeader());
-        rt.registerObjectWithBytes(self, self.bodyBytes()) catch |err| {
+        registerObjectWithBytes(rt, self, self.bodyBytes()) catch |err| {
             // Only the Shape projection goes back to pristine. Bit7 of this
             // byte is the remembered-set cache owned by `gc_generation`, and
             // clearing it here would desynchronize the cache from
@@ -1020,7 +1021,7 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(!self.gcHeader().meta().alloc_info.heap_accounted);
         rt.gc.pins.removeConstructionRoot(self.gcHeader());
-        if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
+        if (self.flags.is_borrowed_reference_holder) property_state.unregisterHolder(rt, self);
         freeClassPayloadAllocation(rt, self.payloadArm().*, self.flags.class_payload_kind);
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
@@ -1147,7 +1148,7 @@ pub const Object = extern struct {
         std.debug.assert(!self.isWeakReferenceHolderClass());
         std.debug.assert(self.shape_ref.prop_count == 0);
         initialized = true;
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
     }
@@ -1231,7 +1232,7 @@ pub const Object = extern struct {
         std.debug.assert(self.shape_ref.prop_count == 0);
         shape_owned = false;
         initialized = true;
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
     }
@@ -1309,7 +1310,7 @@ pub const Object = extern struct {
         std.debug.assert(self.shape_ref.prop_count == 0);
         shape_owned = false;
         initialized = true;
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
     }
@@ -1440,7 +1441,7 @@ pub const Object = extern struct {
         if (class_id >= class.ids.init_count or class_id == class.ids.global_object) {
             self.markNeedsFinalizer(rt);
         }
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
     }
@@ -1518,7 +1519,7 @@ pub const Object = extern struct {
         {
             self.markNeedsFinalizer(rt);
         }
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
     }
@@ -1745,7 +1746,7 @@ pub const Object = extern struct {
         // Reuse the inline-layout size computed at the top of createInternal
         // instead of recomputing it inside registration (mirror of the free
         // path's unregisterObjectWithBytes). Same value allocationSize derives.
-        try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        try registerObjectWithBytes(rt, self, self.accountedBodyBytesForPhysical(alloc_size));
         // TGC S4-d spec 2.4: the construction-time half of the finalizer bit.
         // `class_payload_kind` was forced to `.none` above for an INLINE
         // payload, so the dynamic-class clauses (which are exactly the classes
@@ -1755,7 +1756,7 @@ pub const Object = extern struct {
             !is_standard_class or
             definition.has_payload_finalizer or
             // A dying realm global has to clear every borrowed reference that
-            // names it (`clearBorrowedReferencesForDestroyedObject`); its own
+            // names it (`property_state.onGlobalDestroyed`); its own
             // `.global` payload is a-class.
             class_id == class.ids.global_object)
         {
@@ -2297,12 +2298,12 @@ pub const Object = extern struct {
     }
 
     pub fn globalLexicals(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         return ctx.lexicals;
     }
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         ctx.setLexicals(v);
     }
 
@@ -2323,7 +2324,7 @@ pub const Object = extern struct {
     /// Promote an object to the realm-global class after construction.
     ///
     /// TGC S4-d spec 2.4: a dying global has to clear every borrowed reference
-    /// that names it (`clearBorrowedReferencesForDestroyedObject`), so the
+    /// that names it (`property_state.onGlobalDestroyed`), so the
     /// class change is itself a finalizer-bit set point -- `createInternal`
     /// stamps the objects that are BORN global, this stamps the rest.
     pub fn promoteToGlobalObjectClass(self: *Object, rt: *JSRuntime) void {
@@ -2509,7 +2510,7 @@ pub const Object = extern struct {
     }
 
     pub fn setCachedFunctionProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         ctx.cached_function_proto = prototype;
         // The realm owns this slot and fills it lazily; see `setClassPrototype`.
         // Unpublished (constructing) realms are covered by their publication
@@ -2520,12 +2521,12 @@ pub const Object = extern struct {
     }
 
     pub fn cachedFunctionProto(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         return ctx.cached_function_proto;
     }
 
     pub fn setCachedPromiseProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         ctx.cached_promise_proto = prototype;
         // The realm owns this slot and fills it lazily; see `setClassPrototype`.
         // Unpublished (constructing) realms are covered by their publication
@@ -2536,7 +2537,7 @@ pub const Object = extern struct {
     }
 
     pub fn cachedPromiseProto(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         return ctx.cached_promise_proto;
     }
 
@@ -2546,7 +2547,7 @@ pub const Object = extern struct {
     /// would re-trace the global at the next minor, but a minor stops at an
     /// old, already-marked realm and never reaches the young value.
     pub fn setCachedRealmValue(self: *Object, rt: *JSRuntime, slot: RealmValueSlot, next_value: ?JSValue) !void {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return error.InvalidBuiltinRegistry;
         const cached = &ctx.cached_values[@intFromEnum(slot)];
         cached.* = next_value;
         if (next_value) |stored| {
@@ -2566,14 +2567,14 @@ pub const Object = extern struct {
     /// young.
     pub fn setRealmRegExpLegacySlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) void {
         slot.* = next_value;
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return;
         if (next_value) |stored| {
             if (ctx.header.metaConst().alloc_info.heap_accounted) rt.gc.generationalBarrier(&ctx.header, stored.cycleMarkHeader());
         }
     }
 
     pub fn cachedRealmValue(self: *const Object, rt: *const JSRuntime, slot: RealmValueSlot) ?JSValue {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         return ctx.cached_values[@intFromEnum(slot)];
     }
 
@@ -2706,7 +2707,7 @@ pub const Object = extern struct {
         // the callee's own first check is `!flags.is_borrowed_reference_holder
         // -> return`, so the ~every-object destroy keeps the test inline and
         // never pays the outlined call.
-        if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
+        if (self.flags.is_borrowed_reference_holder) property_state.unregisterHolder(rt, self);
         // qjs free_object keeps no borrowed-ref side table, so the plain-object
         // hot free path must not call into that scan. Hoist its
         // helper's own entry guard to the call site: an object with no realm-
@@ -2714,7 +2715,7 @@ pub const Object = extern struct {
         // the call — the helper keeps its internal guard for the rare live
         // resource path. (borrowed guard already no-ops
         // for non-global; pure dispatch-shape change, zero behavioral risk.)
-        if (self.isGlobal() and rt.borrowed_reference_holders.items.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
+        if (self.isGlobal() and rt.property_tables.borrowed_holders.items.len != 0) property_state.onGlobalDestroyed(rt, self);
         // TGC S4-b: see the fast arm -- the storage cell is swept, not freed.
         self.setPropertyStorageEmptyForDestroy();
         rt.shapes.dropUnshared(rt, self.shape_ref);
@@ -2773,7 +2774,7 @@ pub const Object = extern struct {
         // is still heap-accounted. This is qjs free_object's remove_gc_object
         // boundary: after it returns, callbacks must no longer observe the
         // object as live.
-        rt.unregisterObjectWithBytes(self, accounted_size);
+        unregisterObjectWithBytes(rt, self, accounted_size);
         // TGC S4-e spec 2.5: the struct goes back NOW.
         //
         // The two-pass teardown (Pass A strips resources, Pass B hands the
@@ -2814,105 +2815,15 @@ pub const Object = extern struct {
         destroyDetachedClassPayload(rt, self.class_id, payload_kind, &remaining_payload);
     }
 
-    fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
-        if (rt.gc.hot.phase == .deinit) return;
-        // The raw address identity only drives borrowed raw-pointer cleanup
-        // such as realm-global pointers. Registered weak identities are kept
-        // until the qjs-style weak sweep releases them.
-        const destroyed_identity = @intFromPtr(destroyed.gcHeader()) & ~@as(usize, 1);
-        if (rt.borrowed_reference_holders.items.len == 0) return;
-        if (!destroyed.isGlobal()) return;
-        const cleanup = &rt.borrowed_weak_cleanup;
-        if (cleanup.active) {
-            cleanup.enqueue(rt.nativeAllocator(), destroyed_identity) catch {
-                clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
-            };
-            return;
-        }
-
-        cleanup.begin();
-        defer cleanup.end();
-        cleanup.enqueue(rt.nativeAllocator(), destroyed_identity) catch {
-            clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
-        };
-
-        drainBorrowedWeakCleanup(rt);
-    }
-
-    pub fn drainBorrowedWeakCleanup(rt: *JSRuntime) void {
-        var scanned_identity_count: usize = 0;
-        while (scanned_identity_count < rt.borrowed_weak_cleanup.identities.items.len) {
-            clearBorrowedReferencesForMatcher(rt, .{ .runtime_batch = scanned_identity_count });
-            scanned_identity_count = rt.borrowed_weak_cleanup.identities.items.len;
-        }
-    }
-
-    fn clearBorrowedReferencesForDestroyedIdentity(rt: *JSRuntime, destroyed_identity: usize) void {
-        clearBorrowedReferencesForMatcher(rt, .{ .single = destroyed_identity });
-    }
-
-    fn clearBorrowedReferencesForMatcher(rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        refreshBorrowedReferenceHolderIndexes(rt);
-        var finalization_enqueue_blocked = false;
-        var index: usize = 0;
-        while (index < rt.borrowed_reference_holders.items.len) {
-            const current = rt.borrowed_reference_holders.items[index];
-            if (!current.mayContainBorrowedReferences()) {
-                index += 1;
-                continue;
-            }
-            current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher, &finalization_enqueue_blocked);
-            if (index < rt.borrowed_reference_holders.items.len and rt.borrowed_reference_holders.items[index] == current) {
-                index += 1;
-                continue;
-            }
-            const current_index = runtimeBorrowedReferenceHolderIndex(rt, current) orelse {
-                continue;
-            };
-            if (current_index < rt.borrowed_reference_holders.items.len and rt.borrowed_reference_holders.items[current_index] == current) {
-                index = current_index + 1;
-            } else {
-                index = current_index;
-            }
-        }
-    }
-
-    /// Re-stamp every holder's cached position so the matcher loop below can
-    /// trust `borrowedReferenceHolderIndex()` after a callback reshuffles the
-    /// list. TGC S4-e: this pass used to COMPACT the list as well, because a
-    /// weak husk could sit in it as an already-destroyed entry. Husks are gone
-    /// -- an entry leaves this list in `unregisterBorrowedReferenceHolder`,
-    /// inside the holder's own destructor -- so only the index repair is left,
-    /// which is what the name now says.
-    fn refreshBorrowedReferenceHolderIndexes(rt: *JSRuntime) void {
-        for (rt.borrowed_reference_holders.items, 0..) |current, index| {
-            current.setBorrowedReferenceHolderIndex(index);
-        }
-    }
-
-    fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
-        if (!object.flags.is_borrowed_reference_holder) return null;
-        if (object.borrowedReferenceHolderIndex()) |cached_index| {
-            if (cached_index < rt.borrowed_reference_holders.items.len and rt.borrowed_reference_holders.items[cached_index] == object) return cached_index;
-        }
-        for (rt.borrowed_reference_holders.items, 0..) |candidate, index| {
-            if (candidate == object) {
-                object.setBorrowedReferenceHolderIndex(index);
-                return index;
-            }
-        }
-        return null;
-    }
-
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_borrowed_reference_holder) return;
-        if (!self.mayContainBorrowedReferences()) rt.unregisterBorrowedReferenceHolder(self);
+        if (!self.mayContainBorrowedReferences()) property_state.unregisterHolder(rt, self);
     }
 
     /// The three payload shapes that can own a borrowed (weak) reference. The
     /// answer is exact, not a coarse filter: both the prune path and the
     /// matcher sweep above rely on the same predicate.
-    fn mayContainBorrowedReferences(self: *const Object) bool {
+    pub fn mayContainBorrowedReferences(self: *const Object) bool {
         if (self.payloadOf(.weak_ref)) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -2925,22 +2836,10 @@ pub const Object = extern struct {
         return false;
     }
 
-    const BorrowedIdentityMatcher = union(enum) {
-        single: usize,
-        runtime_batch: usize,
-
-        inline fn matches(self: BorrowedIdentityMatcher, rt: *JSRuntime, identity: usize) bool {
-            return switch (self) {
-                .single => |stored| stored == identity,
-                .runtime_batch => |start_index| rt.borrowed_weak_cleanup.matchesFrom(start_index, identity),
-            };
-        }
-    };
-
-    fn clearBorrowedReferencesToDestroyedIdentities(
+    pub fn clearBorrowedReferencesToDestroyedIdentities(
         self: *Object,
         rt: *JSRuntime,
-        matcher: BorrowedIdentityMatcher,
+        matcher: property_state.IdentityMatcher,
         finalization_enqueue_blocked: *bool,
     ) void {
         self.clearWeakIdentities(rt, matcher, finalization_enqueue_blocked);
@@ -2950,12 +2849,12 @@ pub const Object = extern struct {
     fn clearWeakIdentities(
         self: *Object,
         rt: *JSRuntime,
-        matcher: BorrowedIdentityMatcher,
+        matcher: property_state.IdentityMatcher,
         finalization_enqueue_blocked: *bool,
     ) void {
         if (self.payloadOf(.weak_ref)) |payload| {
             if (payload.weak_target_identity) |identity| {
-                if (matcher.matches(rt, identity)) rt.clearWeakIdentitySlot(&payload.weak_target_identity);
+                if (matcher.matches(rt, identity)) gc_weak.clearSlot(rt, &payload.weak_target_identity);
             }
         }
 
@@ -2971,7 +2870,7 @@ pub const Object = extern struct {
                     continue;
                 }
 
-                rt.releaseWeakIdentity(entry.key_identity);
+                gc_weak.release(rt, entry.key_identity);
             }
             payload.weak_entries.shrinkRetainingCapacity(write_index);
             if (write_index != old_len) self.clearCollectionIndex(rt);
@@ -3389,7 +3288,7 @@ pub const Object = extern struct {
     pub fn unregisterFinalizationRegistryCells(self: *Object, rt: *JSRuntime, token: JSValue) bool {
         std.debug.assert(self.class_id == class.ids.finalization_registry);
         const token_identity = weakIdentityFromValuePeek(rt, token) orelse return false;
-        if (!weakIdentityIsLive(rt, token_identity)) return false;
+        if (!gc_weak.isLive(rt, token_identity)) return false;
 
         const payload = self.payloadOf(.finalization_registry).?;
         const indexed = payload.token_cells.get(token_identity) orelse return false;
@@ -3478,16 +3377,15 @@ pub const Object = extern struct {
         const unregister_token_identity = try weakIdentityFromValue(rt, rooted_unregister_token);
         const entries = self.finalizationRegistryCellsSlot();
         const index = entries.items.len;
-        const inserted_holder = !self.isBorrowedReferenceHolder();
-        try rt.registerBorrowedReferenceHolder(self);
-        errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(self);
+        const inserted_holder = try property_state.registerHolder(rt, self);
+        errdefer if (inserted_holder) property_state.unregisterHolder(rt, self);
         try self.ensureFinalizationRegistryCellCapacity(rt, index + 1);
         entries.items.len = index + 1;
         errdefer entries.items.len = index;
-        if (target_identity) |identity| rt.retainWeakIdentity(identity);
-        errdefer if (target_identity) |identity| rt.releaseWeakIdentity(identity);
-        if (unregister_token_identity) |identity| rt.retainWeakIdentity(identity);
-        errdefer if (unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
+        if (target_identity) |identity| gc_weak.retain(rt, identity);
+        errdefer if (target_identity) |identity| gc_weak.release(rt, identity);
+        if (unregister_token_identity) |identity| gc_weak.retain(rt, identity);
+        errdefer if (unregister_token_identity) |identity| gc_weak.release(rt, identity);
         // §9.3: reserve the cleanup job slot at registration so sweep never
         // allocates a record. The cell owns the reservation until enqueue or
         // destroy.
@@ -3767,7 +3665,7 @@ pub const Object = extern struct {
 
     pub fn installByteStorage(self: *Object, rt: *JSRuntime, bytes: []u8) !void {
         if (self.payloadOf(.buffer)) |payload| {
-            const external_memory = try rt.reportExternalAlloc(bytes.len);
+            const external_memory = try rt.gc.reportExternalAlloc(bytes.len);
             payload.releaseStorage(rt);
             payload.shared_store = null;
             payload.bytes = bytes;
@@ -3789,7 +3687,7 @@ pub const Object = extern struct {
         const payload = self.payloadOf(.buffer) orelse return false;
         if (payload.shared_store != null or payload.external_deinit != null or
             payload.inline_length != 0 or payload.bytes.len == 0 or new_length == 0) return false;
-        var external_memory = try rt.reportExternalAlloc(new_length);
+        var external_memory = try rt.gc.reportExternalAlloc(new_length);
         errdefer external_memory.release();
         const old_length = payload.bytes.len;
         payload.invalidateViews();
@@ -3833,7 +3731,7 @@ pub const Object = extern struct {
         context: ?*anyopaque,
     ) !void {
         if (self.payloadOf(.buffer)) |payload| {
-            const external_memory = try rt.reportExternalAlloc(bytes.len);
+            const external_memory = try rt.gc.reportExternalAlloc(bytes.len);
             payload.releaseStorage(rt);
             payload.bytes = bytes;
             payload.inline_length = 0;
@@ -4328,17 +4226,17 @@ pub const Object = extern struct {
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         // Register BEFORE the payload is touched: this is the only fallible
         // step left, and at this point nothing has been mutated, so a failure
-        // needs no rollback. (`registerBorrowedReferenceHolder` is idempotent,
+        // needs no rollback. (`property_state.registerHolder` is idempotent,
         // which is why the old duplicate call after the store was dead weight.)
-        try rt.registerBorrowedReferenceHolder(self);
+        _ = try property_state.registerHolder(rt, self);
         const payload = self.payloadOf(.weak_ref) orelse {
             std.debug.assert(self.flags.class_payload_kind == .weak_ref);
             unreachable;
         };
         const old_identity = payload.weak_target_identity;
-        if (weak_target_identity) |identity| rt.retainWeakIdentity(identity);
+        if (weak_target_identity) |identity| gc_weak.retain(rt, identity);
         payload.weak_target_identity = weak_target_identity;
-        if (old_identity) |identity| rt.releaseWeakIdentity(identity);
+        if (old_identity) |identity| gc_weak.release(rt, identity);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -4346,21 +4244,19 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id == class.ids.weak_ref);
         const payload = self.payloadOf(.weak_ref) orelse return JSValue.undefinedValue();
         const identity = payload.weak_target_identity orelse return JSValue.undefinedValue();
-        if ((identity & 1) != 0) {
-            const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(u32)) return JSValue.undefinedValue();
-            const symbol_atom: atom.Atom = atom.Atom.fromRaw(@intCast(atom_id));
+        if (gc_weak.Identity.isSymbol(identity)) {
+            const symbol_atom = gc_weak.Identity.symbolAtom(identity) orelse return JSValue.undefinedValue();
             if (rt.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
             const target = rt.atoms.symbolValueIfLive(rt, symbol_atom);
             // A dead target must not enter [[KeptAlive]]: the object arm
-            // returns before `keepAliveWeakRefTarget` for the same reason.
+            // returns before `Checkpoint.keepAlive` for the same reason.
             if (target.is(.undefined_value)) return JSValue.undefinedValue();
-            try rt.keepAliveWeakRefTarget(identity, target);
+            try rt.microtasks.keepAlive(rt.nativeAllocator(), identity, target);
             return target;
         }
         const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
         const retained = target.value();
-        try rt.keepAliveWeakRefTarget(identity, retained);
+        try rt.microtasks.keepAlive(rt.nativeAllocator(), identity, retained);
         return retained;
     }
 
@@ -5082,13 +4978,13 @@ pub const Object = extern struct {
     /// constructor was installed. The cache-presence check and state lookup
     /// share one RealmContext lookup, mirroring a direct JSContext field read.
     pub inline fn installedRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) ?*RegExpLegacyStatics {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
         return ctx.regexp_legacy_statics;
     }
 
     pub fn ensureInstalledRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !?*RegExpLegacyStatics {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
+        const ctx = rt.contexts.forGlobal(self, .include_constructing) orelse return null;
         if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
         if (ctx.regexp_legacy_statics) |legacy| return legacy;
         const legacy = try rt.createNative(RegExpLegacyStatics);
@@ -5822,7 +5718,7 @@ pub const Object = extern struct {
         }
         if (self.class_id == class.ids.c_function) {
             const global = realm_global orelse return error.InvalidBuiltinRegistry;
-            const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+            const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
             self.setNativeFunctionRealm(realm);
             return;
         }
@@ -6099,15 +5995,6 @@ pub const Object = extern struct {
     }
 
     // ===== visit* / cycle GC =====
-
-    fn weakIdentityIsLive(rt: *const JSRuntime, identity: usize) bool {
-        if ((identity & 1) != 0) {
-            const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(u32)) return false;
-            return rt.atoms.kind(atom.Atom.fromRaw(@intCast(atom_id))) == .symbol;
-        }
-        return rt.liveObjectFromWeakIdentity(identity) != null;
-    }
 
     // mirror of value_semantics.objectFromValue (kind check included), keep
     // in sync — kept local: object.zig <-> value_semantics import cycle.
@@ -6541,9 +6428,9 @@ pub const Object = extern struct {
 
     /// Returns the weak identity for `stored`, registering objects in the
     /// runtime's weak identity registry on first use. Symbols encode as
-    /// `(atom << 1) | 1`; objects encode as `weak_id << 1`.
+    /// `gc_weak.Identity.ofSymbol`; objects as `gc_weak.Identity.ofObjectId`.
     pub fn weakIdentityFromValue(rt: *JSRuntime, stored: JSValue) !?usize {
-        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, atom_id.raw()) << 1) | 1;
+        if (stored.asSymbolAtom()) |atom_id| return gc_weak.Identity.ofSymbol(atom_id);
         const object = objectFromWeakCandidate(stored) orelse return null;
         return try rt.registerWeakObjectIdentity(object);
     }
@@ -6551,7 +6438,7 @@ pub const Object = extern struct {
     /// Like `weakIdentityFromValue` but never registers: returns null for
     /// objects that were never weakly referenced.
     pub fn weakIdentityFromValuePeek(rt: *const JSRuntime, stored: JSValue) ?usize {
-        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, atom_id.raw()) << 1) | 1;
+        if (stored.asSymbolAtom()) |atom_id| return gc_weak.Identity.ofSymbol(atom_id);
         const object = objectFromWeakCandidate(stored) orelse return null;
         return gc_weak.peekObject(rt, object);
     }
@@ -7509,11 +7396,11 @@ pub const Object = extern struct {
     /// no-duplicate precondition is the caller's responsibility.
     fn autoInitRealmForDefinition(self: *Object, rt: *JSRuntime, explicit_global: ?*Object) !*context_mod.RealmContext {
         if (explicit_global) |global| {
-            return rt.contextForGlobalIncludingConstructing(global) orelse error.InvalidBuiltinRegistry;
+            return rt.contexts.forGlobal(global, .include_constructing) orelse error.InvalidBuiltinRegistry;
         }
         if (self.bytecodeFunctionRealmContext()) |realm| return realm;
         if (self.nativeFunctionRealm()) |realm| return realm;
-        if (rt.contextForGlobalIncludingConstructing(self)) |realm| return realm;
+        if (rt.contexts.forGlobal(self, .include_constructing)) |realm| return realm;
         return error.InvalidBuiltinRegistry;
     }
 
@@ -7540,7 +7427,7 @@ pub const Object = extern struct {
         info: property.AutoInit,
     ) !property.AutoInitSlot {
         const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
-        const stored = try property.internAutoInit(rt, info);
+        const stored = try property_state.internAutoInit(rt, info);
         return property.AutoInitSlot.retainProp(&realm.header, stored);
     }
 
@@ -9886,18 +9773,18 @@ test "home object old to young writes survive minor collection" {
             const closure = try Object.create(rt, class.ids.bytecode_function, null);
             try (try roots.ref(0)).set(rt, closure.value());
             if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
             try std.testing.expect(!closure.gcHeader().meta().flags.young);
             const home = try Object.createPlainObject(rt, null);
             const before = @intFromPtr(home);
             try closure.setFunctionHomeObject(rt, home);
             try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(closure.gcHeader())));
-            _ = try @import("gc_trace_stw.zig").collectMinor(rt, null, .declared_only);
+            _ = try @import("gc_trace_stw.zig").collectMinor(rt, .declared_only);
             const stored = closure.functionHomeObject().?;
             try std.testing.expect(rt.gc.containsHeader(stored.gcHeader()));
             try std.testing.expectEqual(nursery, @intFromPtr(stored) != before);
             try closure.setFunctionHomeObject(rt, null);
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
             try std.testing.expect(!rt.gc.containsHeader(stored.gcHeader()));
         }
     }
@@ -10112,13 +9999,13 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     var roots_active = true;
     defer if (roots_active) live_roots.deactivate(rt);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(nested_symbol) != null);
 
     live_roots.deactivate(rt);
     roots_active = false;
     object_value = JSValue.undefinedValue();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(nested_symbol) == null);
 }
 
@@ -11084,4 +10971,39 @@ test "object payloads carry no private-name remap side tables" {
     try std.testing.expect(!@hasField(FunctionRarePayload, "private_remap_from"));
     try std.testing.expect(!@hasField(FunctionRarePayload, "private_remap_to"));
     try std.testing.expect(!@hasField(FunctionRarePayload, "super_constructor"));
+}
+
+/// Publish an initialized object to the GC with its allocation size
+/// supplied by the caller, which already computed the layout. The only
+/// object-creation threshold check is `collectBeforeObjectAllocation`,
+/// immediately before the body allocation (QuickJS `js_trigger_gc` in
+/// `JS_NewObjectFromShape`); registration never re-evaluates it.
+inline fn registerObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) !void {
+    // QuickJS `add_gc_object` has no owner check. A bare assert would still
+    // read the thread id in ReleaseFast, so the check exists only with safety.
+    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
+    try rt.gc.addInitializedWithSize(object.gcHeader(), bytes);
+}
+
+/// GC-list unlink and free-byte accounting for an object teardown, with
+/// the allocation size supplied by `destroyFromHeader` (the sole caller),
+/// which already computed the layout. The weak/borrowed side-table links
+/// were detached earlier in `destroyFromHeader`, because they borrow
+/// payload-owned storage.
+fn unregisterObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) void {
+    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
+    if (builtin.mode == .Debug) {
+        // Catch any future payload finalizer that re-registers mid-teardown.
+        if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
+        std.debug.assert(!object.flags.is_borrowed_reference_holder);
+    }
+    // The tracing sweeps detach and stamp condemned objects before their
+    // resource pass. In that state the generic unlink boundary would only
+    // rediscover facts already established by condemnation; retain its
+    // mandatory byte debit without paying the outlined call.
+    if (gc.headerCondemned(object.gcHeaderConst())) {
+        rt.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
+        return;
+    }
+    rt.gc.unlinkObjectWithBytes(object.gcHeader(), bytes);
 }

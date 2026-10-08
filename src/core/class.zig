@@ -8,6 +8,7 @@
 //! import either higher layer.
 
 const std = @import("std");
+const context_registry = @import("context_registry.zig");
 const atom = @import("atom.zig");
 const builtin = @import("builtin");
 
@@ -382,7 +383,7 @@ pub const Table = struct {
         if (self.next_dynamic_id > std.math.maxInt(ClassId)) return error.ClassIdExhausted;
         const id: ClassId = @intCast(self.next_dynamic_id);
         self.next_dynamic_id += 1;
-        try rt.ensureContextClassPrototypeCapacity(id);
+        try context_registry.ensureClassPrototypeCapacity(rt, id);
         try self.register(id, definition);
         return .{ .owner = rt, .id = id };
     }

@@ -16,6 +16,8 @@
 //! backend entry points directly.
 
 const std = @import("std");
+const gc_weak = @import("gc_weak.zig");
+const property_state = @import("property_state.zig");
 
 const core = @import("root.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -352,13 +354,12 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     var stored = entry;
     stored.hash = weakEntryHash(stored.key_identity);
     stored.hash_next = weak_no_entry;
-    rt.retainWeakIdentity(stored.key_identity);
-    errdefer rt.releaseWeakIdentity(stored.key_identity);
+    gc_weak.retain(rt, stored.key_identity);
+    errdefer gc_weak.release(rt, stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
     const index = entries_slot.items.len;
-    const inserted_holder = !object.isBorrowedReferenceHolder();
-    if (inserted_holder) try rt.registerBorrowedReferenceHolder(object);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(object);
+    const inserted_holder = try property_state.registerHolder(rt, object);
+    errdefer if (inserted_holder) property_state.unregisterHolder(rt, object);
     try ensureWeakIndexForInsert(rt, object, index + 1);
     try object.ensureWeakCollectionEntryCapacity(rt, index + 1);
     const refreshed_entries = object.weakCollectionEntriesSlot();
@@ -366,7 +367,7 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     errdefer refreshed_entries.items = refreshed_entries.items[0..index];
     refreshed_entries.items[index] = stored;
     linkWeakEntry(object, index);
-    // No second `registerBorrowedReferenceHolder` here: the registration above
+    // No second `property_state.registerHolder` here: the registration above
     // is idempotent and already covered by `errdefer`, whereas a repeat call on
     // the success path could only fail, and its failure would run that errdefer
     // and unregister a holder whose entry is already linked into the bucket.

@@ -388,14 +388,14 @@ test "no-GC scope nesting native allocation and error unwind" {
     try std.testing.expect(rt.active_no_gc_scope == &outer);
     // The prohibition belongs to one Runtime, not to the owner thread.
     const other_epoch = other.gc.collection_epoch;
-    _ = try other.collectFull(null, .declared_only);
+    _ = try other.collectForTest();
     try std.testing.expect(other.gc.collection_epoch > other_epoch);
     outer.deactivate();
     try std.testing.expect(rt.active_no_gc_scope == null);
     outer.activate(rt);
     outer.deactivate();
     const epoch = rt.gc.collection_epoch;
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.gc.collection_epoch > epoch);
 }
 
@@ -410,11 +410,11 @@ test "no-GC scope lifecycle and collection entry guards" {
     defer inner.deactivate();
     const mode = if (std.c.getenv("ZJS_NO_GC_INJECT")) |raw| std.fmt.parseInt(u8, std.mem.span(raw), 10) catch 0 else 0;
     switch (mode) {
-        1 => _ = try rt.collectFull(null, .declared_only),
-        2 => _ = try rt.pollGC(null, .safepoint),
-        3 => _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only),
-        4 => _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only),
-        5 => _ = try @import("../src/core/gc_driver.zig").continuePoll(rt, null, .safepoint),
+        1 => _ = try rt.collectForTest(),
+        2 => _ = try rt.pollGC(.safepoint),
+        3 => _ = try core.gc_trace_stw.collectCycles(rt, .declared_only),
+        4 => _ = try core.gc_trace_stw.collectMinor(rt, .declared_only),
+        5 => _ = try @import("../src/core/gc_driver.zig").pollGC(rt, .safepoint),
         8 => rt.destroy(),
         9 => outer.deactivate(),
         10 => {
@@ -527,11 +527,11 @@ test "exact value roots protect handle transfer and failed transfer keeps owners
     try handle.takeInto(output);
     try std.testing.expect(handle.slot == null);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.persistent_root_slots.items.len);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.gc.containsHeader(header));
     try std.testing.expect((try output.get(rt)).asStringBodyRaw().?.eqlBytes("exact-root-transfer"));
     try output.set(rt, core.JSValue.undefinedValue());
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.gc.containsHeader(header));
 }
 
@@ -577,7 +577,7 @@ test "exact value roots expose actual slots for collector repair" {
     };
     var repair = Repair{};
     var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &repair, .visit_value = Repair.value, .visit_object = Repair.object };
-    try rt.traceValueRootFrames(rt.active_value_roots, &visitor);
+    try core.runtime.ValueRootFrame.traceChain(rt.active_value_roots, &visitor);
     try std.testing.expectEqual(@as(usize, 1), repair.visits);
     try std.testing.expectEqual(@as(?i32, 20), (try reference.get(rt)).as(.int));
 }
@@ -618,11 +618,11 @@ test "exact value roots reject mutator writes and activation during trace and co
     try rt.registerRootProvider(provider);
     defer rt.unregisterRootProvider(provider);
     var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &probe, .visit_value = Probe.value, .visit_object = Probe.object };
-    try std.testing.expect(!rt.gc.hot.collecting);
+    try std.testing.expect(!rt.gc.isCollecting());
     try rt.roots.traceProviders(&visitor);
     try std.testing.expectEqual(@as(usize, 1), probe.writes_denied);
     try std.testing.expectEqual(@as(usize, 1), probe.activations_denied);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(probe.writes_denied > 0);
     try std.testing.expectEqual(probe.writes_denied, probe.activations_denied);
     try std.testing.expectEqual(@as(?i32, 7), (try reference.get(rt)).as(.int));
@@ -691,7 +691,7 @@ test "root tracing also freezes direct payload mark callbacks" {
     var payload: core.class.Payload = &probe;
     var visitor = core.class.PayloadVisitor{ .context = &probe };
     const object = try core.Object.createPlainObject(rt, null);
-    try std.testing.expect(!rt.gc.hot.collecting);
+    try std.testing.expect(!rt.gc.isCollecting());
     try std.testing.expect(rt.classes.markPayload(binding.id, rt, object, &payload, &visitor));
     try std.testing.expect(probe.denied);
     try std.testing.expect(!rt.roots.isTracing());
@@ -733,9 +733,9 @@ test "root tracing lifecycle guards" {
                 },
                 6 => self.frame.deactivate(self.rt),
                 7 => self.rt.destroy(),
-                8 => _ = self.rt.collectFull(null, .declared_only) catch return error.OutOfMemory,
-                9 => _ = self.rt.pollGC(null, .safepoint) catch return error.OutOfMemory,
-                10 => _ = core.gc_trace_stw.collectMinor(self.rt, null, .declared_only) catch return error.OutOfMemory,
+                8 => _ = self.rt.collectForTest() catch return error.OutOfMemory,
+                9 => _ = self.rt.pollGC(.safepoint) catch return error.OutOfMemory,
+                10 => _ = core.gc_trace_stw.collectMinor(self.rt, .declared_only) catch return error.OutOfMemory,
                 else => {},
             }
         }
@@ -763,7 +763,7 @@ test "exact value roots receive nursery relocation in every aliased slot" {
     try second.copyFrom(rt, first.readOnly());
     const before = @intFromPtr(object.gcHeader());
     try std.testing.expect(core.gc.Registry.isNurseryHeader(object.gcHeader()));
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     const moved = (try first.get(rt)).cycleMarkHeader().?;
     try std.testing.expect(@intFromPtr(moved) != before);
     try std.testing.expect(!core.gc.Registry.isNurseryHeader(moved));
@@ -791,9 +791,9 @@ test "readonly roots retain nursery aliases before writable roots move" {
         try writable.set(rt, borrowed[0]);
         try std.testing.expect(core.gc.Registry.isNurseryHeader(object.gcHeader()));
         if (minor) {
-            _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+            _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         } else {
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
         }
         try std.testing.expectEqual(borrowed[0].bits, (try writable.get(rt)).bits);
         try std.testing.expect(rt.gc.containsHeader(object.gcHeader()));
@@ -928,7 +928,7 @@ test "root protocol classifies cell carriers as stable references" {
         .visit_value = Probe.value,
         .visit_object = Probe.object,
     };
-    try rt.traceValueRootFrames(&frame, &visitor);
+    try core.runtime.ValueRootFrame.traceChain(&frame, &visitor);
     try std.testing.expectEqual(@as(usize, 2), probe.stable);
 }
 
@@ -966,14 +966,14 @@ test "nursery evacuation rollback restores roots after provider failure" {
     const provider = core.runtime.RootProvider{ .context = &probe, .trace = Probe.trace };
     try rt.registerRootProvider(provider);
     defer rt.unregisterRootProvider(provider);
-    try std.testing.expectError(error.OutOfMemory, rt.collectFull(null, .declared_only));
+    try std.testing.expectError(error.OutOfMemory, rt.collectForTest());
     try std.testing.expect(probe.saw_move);
     try std.testing.expectEqual(before, (try root.get(rt)).bits);
     try std.testing.expect(!core.gc.headerForwarded(object.gcHeader()));
     try std.testing.expectEqual(@as(?i32, 17), (try object.getProperty(core.atom.ids.name)).as(.int));
     try std.testing.expectEqual(before, (try object.getProperty(core.atom.ids.value)).bits);
     try rt.gc.verifyHeapAccounting(rt);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     const moved = try root.get(rt);
     try std.testing.expect(moved.bits != before);
     try std.testing.expectEqual(moved.bits, probe.alias.bits);
@@ -997,9 +997,9 @@ test "nursery weak identity follows live target and clears after death" {
         const identity = weak.slot.?.identity.?;
         const before = @intFromPtr(object.gcHeader());
         if (minor) {
-            _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+            _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         } else {
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
         }
         const moved = try root.get(rt);
         try std.testing.expect(@intFromPtr(moved.cycleMarkHeader().?) != before);
@@ -1008,7 +1008,7 @@ test "nursery weak identity follows live target and clears after death" {
         try std.testing.expectEqual(identity, try rt.registerWeakObjectIdentity(core.Object.fromHeader(moved.cycleMarkHeader().?)));
         try std.testing.expect(!rt.weak.object_ids.contains(before));
         try root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectForTest();
         try std.testing.expect(!weak.isAlive());
         try std.testing.expect(weak.get().is(.undefined_value));
         try std.testing.expectEqual(@as(usize, 0), rt.weak.object_ids.count());
@@ -1031,7 +1031,7 @@ test "weak handle callbacks run after the collection and may release handles" {
         fn cleared(runtime: *core.JSRuntime, context: ?*anyopaque) void {
             const index = @intFromPtr(context.?) - 1;
             probe.fired[index] += 1;
-            if (runtime.collectorBusy() or runtime.roots.isTracing()) probe.collecting_seen = true;
+            if (runtime.gc.isBusy() or runtime.roots.isTracing()) probe.collecting_seen = true;
             // Release its own handle and, from the first callback, the handle
             // whose callback is still queued: that callback must not run.
             probe.handles[index].deinit();
@@ -1041,7 +1041,7 @@ test "weak handle callbacks run after the collection and may release handles" {
             if (core.Object.createPlainObject(runtime, null)) |_| {
                 probe.allocated = true;
             } else |_| {}
-            _ = runtime.collectFull(null, .declared_only) catch {};
+            _ = runtime.collectForTest() catch {};
         }
     };
     Callback.probe = .{};
@@ -1049,7 +1049,7 @@ test "weak handle callbacks run after the collection and may release handles" {
         const object = try core.Object.createPlainObject(rt, null);
         handle.* = try core.runtime.WeakPersistentValue.init(rt, object.value(), Callback.cleared, @ptrFromInt(index + 1));
     }
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     const probe = &Callback.probe;
     try std.testing.expect(!probe.collecting_seen);
     try std.testing.expect(probe.allocated);
@@ -1057,6 +1057,32 @@ test "weak handle callbacks run after the collection and may release handles" {
     try std.testing.expectEqual(@as(usize, 1), probe.fired[0] + probe.fired[1]);
     try std.testing.expectEqual(@as(usize, 1), probe.fired[2] + probe.fired[3]);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.weak_root_slots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.weak_notify_queue.items.len);
+}
+
+test "weak handle callbacks run after a minor-only poll" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    defer rt.restoreDefaultRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize) / 2);
+    const Callback = struct {
+        var fired: usize = 0;
+        fn cleared(_: *core.JSRuntime, _: ?*anyopaque) void {
+            fired += 1;
+        }
+    };
+    Callback.fired = 0;
+    var weak = try core.runtime.WeakPersistentValue.init(rt, (try core.Object.createPlainObject(rt, null)).value(), Callback.cleared, null);
+    defer weak.deinit();
+    // Enough young garbage that the safepoint offers a minor.
+    for (0..core.gc.minor_young_threshold) |_| _ = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(rt.gc.shouldTryMinor());
+    const minors = rt.gc.generation.stats.minor_collections;
+    _ = try rt.pollGC(.safepoint);
+    try std.testing.expect(rt.gc.generation.stats.minor_collections > minors);
+    try std.testing.expect(!weak.isAlive());
+    try std.testing.expectEqual(@as(usize, 1), Callback.fired);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.weak_notify_queue.items.len);
 }
 
@@ -1078,14 +1104,14 @@ test "nursery ephemeron values repair their actual table slots" {
         const before = (try value_root.get(rt)).bits;
         try engine.exec.collection_ops.setWeakMapEntry(rt, table, try key_root.get(rt), try value_root.get(rt));
         if (!strong_value) try value_root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectForTest();
         const stored = table.weakCollectionEntries()[0].value;
         try std.testing.expect(stored.bits != before);
         try std.testing.expect(rt.gc.containsHeader(stored.cycleMarkHeader().?));
         if (strong_value) try std.testing.expectEqual((try value_root.get(rt)).bits, stored.bits);
         try key_root.set(rt, core.JSValue.undefinedValue());
         try value_root.set(rt, core.JSValue.undefinedValue());
-        _ = try rt.collectFull(null, .declared_only);
+        _ = try rt.collectForTest();
         try std.testing.expectEqual(@as(usize, 0), table.weakCollectionEntries().len);
         try std.testing.expect(!rt.gc.containsHeader(stored.cycleMarkHeader().?));
     }
@@ -1115,9 +1141,9 @@ test "nursery evacuation keeps Map object keys findable through the hash index" 
         }
         try std.testing.expect(map.collectionBucketHeads().len != 0);
         if (minor) {
-            _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+            _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         } else {
-            _ = try rt.collectFull(null, .declared_only);
+            _ = try rt.collectForTest();
         }
         for (0..key_count) |i| {
             try std.testing.expect(values[i].bits != before[i]);
@@ -1247,7 +1273,7 @@ const TailBufferForceGcProbe = struct {
         _ = size;
         const self: *TailBufferForceGcProbe = @ptrCast(@alignCast(ctx.?));
         self.fired += 1;
-        _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
+        _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
     }
 };
 
@@ -1262,7 +1288,7 @@ const DefineFieldForceGcProbe = struct {
         // Full cycle removal before every allocation — the force-GC shape of
         // `-Dzjs_force_gc=true` — so the collection lands inside the append
         // over-hang and the replace-branch shape mutation.
-        _ = self.rt.collectFull(null, .engine_active) catch {}; // engine-frames-active trigger
+        _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
     }
 };
 
@@ -1596,7 +1622,7 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
     _ = try rt.symbolValue(symbol_atom);
     try object.?.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), .all));
 
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(entry.slotOccupied());
     try std.testing.expect(entry.body != null);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -1604,8 +1630,8 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
 
     // Repeated minors keep it: the first one promoted the body, after which
     // the major's `visitAtom` rules are the only authority again.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
 
     // The shape edge is what keeps it across majors, not the young list.
@@ -1641,7 +1667,7 @@ test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they
         slot.* = try rt.atoms.newValueSymbol(name);
         _ = try rt.symbolValue(slot.*);
         try object.?.defineOwnProperty(rt, slot.*, core.Descriptor.data(core.JSValue.int32(1), .all));
-        if (index % 64 == 63) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        if (index % 64 == 63) _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     }
 
     var alive: usize = 0;
@@ -1686,7 +1712,7 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
     const symbol_atom = try rt.atoms.newValueSymbol("zjsS3WeakShellSymbol");
     const entry_index = symbol_atom.raw() - core.atom.first_dynamic_atom;
     {
-        var symbol_value = try rt.takeSymbolValue(symbol_atom);
+        var symbol_value = try rt.symbolValue(symbol_atom);
         var symbol_roots = core.runtime.rootValues(.{&symbol_value});
         symbol_roots.activate(rt);
         defer symbol_roots.deactivate(rt);
@@ -1851,13 +1877,13 @@ test "TGC S4-b: an external property buffer survives with its owner and dies one
     // Deletion probe: drop the `storageCell` edge from
     // `tracePropertyEdgesFallible` and this major reclaims the buffer under a
     // live owner (the reads below then walk a recycled cell).
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.property_storage));
     try std.testing.expect(rt.gc.containsHeader(storage));
     try expectS4bNamedProperties(rt, owner_slot.?, "s4b-live-", 6);
 
     owner_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.property_storage));
 }
 
@@ -1873,7 +1899,7 @@ test "TGC S4-b: an aged owner remembers a property buffer minted after its promo
     // Promote the owner before it owns any external storage: the minor's
     // sticky marks stop the trace at an old object, so from here every buffer
     // it adopts is an old-to-young edge that only a barrier can record.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!owner_slot.?.gcHeader().metaConst().flags.young);
 
     try defineS4bNamedProperties(rt, owner_slot.?, "s4b-grow-", 8);
@@ -1883,7 +1909,7 @@ test "TGC S4-b: an aged owner remembers a property buffer minted after its promo
     // Deletion probe: drop `rememberOwnerForBulkWrite` from
     // `appendPreparedPropertyEntryWork` / `ensurePropertyCapacity` and this
     // minor condemns the buffer while `prop_values` still names it.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(storage));
     try expectS4bNamedProperties(rt, owner_slot.?, "s4b-grow-", 8);
 }
@@ -1911,7 +1937,7 @@ test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" 
         // owner in the remembered map -- the condition that makes
         // `reclaimDoomedBlock` walk the corpses (test builds walk them
         // unconditionally under the lifecycle audit as well).
-        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         try std.testing.expect(!array_slot.?.gcHeader().metaConst().flags.young);
         const before_cells = rt.allocation_diagnostics.allocated_bytes;
 
@@ -1922,14 +1948,14 @@ test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" 
         try std.testing.expect(grown > before_cells);
 
         // The superseded buffers owe no destructor: bitmap route only.
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
         const one_cell = rt.allocation_diagnostics.allocated_bytes;
         try std.testing.expect(one_cell < grown);
         try std.testing.expect(one_cell > before_cells);
 
         array_slot = null;
-        _ = rt.collectForTest();
+        _ = try rt.collectForTest();
         try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
         if (round == 1) try std.testing.expectEqual(before_owner, rt.allocation_diagnostics.allocated_bytes);
     }
@@ -1950,7 +1976,7 @@ test "TGC S4-b: a growing dense array leaves every superseded element cell to th
     try fillS4bDenseArray(rt, array_slot.?, 40);
     try std.testing.expect(rt.gc.liveCountKind(.array_storage) > 4);
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
     try std.testing.expectEqual(@as(usize, 40), array_slot.?.arrayElements().len);
     for (array_slot.?.arrayElements(), 0..) |element, index| {
@@ -1958,7 +1984,7 @@ test "TGC S4-b: a growing dense array leaves every superseded element cell to th
     }
 
     array_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
 }
 
@@ -1972,7 +1998,7 @@ test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
     defer array_roots.deactivate(rt);
 
     try fillS4bDenseArray(rt, array_slot.?, 40);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
     const cell = core.Object.arrayStorageCellHeader(array_slot.?.arrayArm().*.values);
     try std.testing.expect(rt.gc.containsHeader(cell));
@@ -1983,7 +2009,7 @@ test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
     // the collector's edge must come from the arm: with the trace guarded on
     // `flags.fast_array` this major sweeps the cell the arm still names.
     array_slot.?.flags.fast_array = false;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.gc.containsHeader(cell));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
 
@@ -1994,7 +2020,7 @@ test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
     }
 
     array_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
 }
 
@@ -2015,7 +2041,7 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
 
     // The owner's trace reads the SAME cell as `?*VarRef` rather than
     // `JSValue`; the cell itself has no self-interpretation to disagree with.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
     const live_refs = arguments_slot.?.argumentsVarRefs();
     try std.testing.expectEqual(@as(usize, 2), live_refs.len);
@@ -2024,7 +2050,7 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
 
     arguments_slot = null;
     target_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
 }
 
@@ -2053,14 +2079,14 @@ test "TGC S4-b: storage over the block-cell ceiling takes the extent route and i
     // An extent's mark lives in the extent table, not a block bitmap: the same
     // `storageCell` edge has to reach it, and `sweepExtents` has to give it
     // back on the kind-dispatched pure-memory arm.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try expectS4bNamedProperties(rt, owner_slot.?, "s4b-extent-", 200);
     try std.testing.expectEqual(@as(usize, 400), array_slot.?.arrayElements().len);
     try std.testing.expectEqual(@as(?i32, 399), array_slot.?.arrayElements()[399].as(.int));
 
     owner_slot = null;
     array_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.property_storage));
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
 }
@@ -2086,7 +2112,7 @@ test "destroying an old remembered Object removes it from the remembered set" {
     var roots = core.runtime.rootObjects(.{&owner});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!owner.?.gcHeader().metaConst().flags.young);
     const young = try core.Object.create(rt, core.class.ids.object, null);
     rt.gc.generationalBarrier(owner.?.gcHeader(), young.gcHeader());
@@ -2115,7 +2141,7 @@ test "promise coallocation: state and reactions survive through the sole owner" 
     try std.testing.expect(@intFromPtr(payload) >= base + @sizeOf(core.Object));
     try std.testing.expect(@intFromPtr(payload) + @sizeOf(@TypeOf(payload.*)) <= base + core.Object.objectBodyBytes(core.class.ids.promise, false));
     const result_slot = promise.?.promiseResultSlot();
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!promise.?.gcHeader().metaConst().flags.young);
     var targets: [2]*core.gc.Header = undefined;
     for (&targets, 0..) |*header, index| {
@@ -2130,16 +2156,16 @@ test "promise coallocation: state and reactions survive through the sole owner" 
         }
     }
     temporary = null;
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     for (targets) |header| try std.testing.expect(rt.gc.containsHeader(header));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     for (targets) |header| try std.testing.expect(rt.gc.containsHeader(header));
     try std.testing.expectEqual(result_slot, promise.?.promiseResultSlot());
     try std.testing.expectEqual(@as(usize, 6), promise.?.promiseReactions().len);
     // Only the final reaction backing is a standalone payload cell.
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.payload));
     promise = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     for (targets) |header| try std.testing.expect(!rt.gc.containsHeader(header));
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
@@ -2153,7 +2179,7 @@ test "promise coallocation: accounting and allocation failure share the object c
     var roots = core.runtime.rootObjects(.{&promise});
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const raw_bytes = rt.gc.block_heap.rawBytesForCell(@intFromPtr(promise.?), core.gc.metadata_prefix_size).?;
     const expected = raw_bytes - core.gc.metadata_prefix_size;
     try std.testing.expectEqual(expected, promise.?.bodyBytes());
@@ -2227,7 +2253,7 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
     // Deletion probe: drop the `storageCell(payload)` edge from
     // `traceChildEdgesFallible` and this major reclaims every payload under a
     // live owner.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(expected_payloads, rt.gc.liveCountKind(.payload));
     try std.testing.expect(ordinary_slot.?.errorStack().?.same(target_slot.?.value()));
     try std.testing.expect(object_data_slot.?.objectData().?.same(target_slot.?.value()));
@@ -2245,7 +2271,7 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
     stack_slot = null;
     global_slot = null;
     regexp_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
 
@@ -2269,12 +2295,12 @@ test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
     defer source_roots.deactivate(rt);
     (try function_slot.?.functionSourceSlot(rt)).* = source_slot.?.value();
 
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.payload));
     try std.testing.expect(function_slot.?.functionSource().?.same(source_slot.?.value()));
 
     function_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
 
@@ -2290,7 +2316,7 @@ test "TGC S4-c: an aged promise remembers a reaction cell minted after its promo
 
     // Promote the promise (and its payload cell) before it owns a reaction
     // list, so every subsequent growth cell is an old-to-young edge.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!promise_slot.?.gcHeader().metaConst().flags.young);
 
     // Six subscribers walk past the initial capacity of four, so the live list
@@ -2305,7 +2331,7 @@ test "TGC S4-c: an aged promise remembers a reaction cell minted after its promo
     // Deletion probe: drop `rememberOwnerForBulkWrite` from
     // `appendPromiseReaction` and this minor condemns the reaction list while
     // the promise payload still names it.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(reactions_cell));
     try std.testing.expectEqual(@as(usize, 6), promise_slot.?.promiseReactions().len);
     for (promise_slot.?.promiseReactions()) |reaction| {
@@ -2356,7 +2382,7 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
     // Deletion probe: drop any of the three `storageCell` edges in
     // `object_payloads.zig` and this major reclaims the slice under a live
     // owner.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 2), bound_slot.?.boundArgs().len);
     try std.testing.expect(bound_slot.?.boundArgs()[0].same(target_slot.?.value()));
     try std.testing.expectEqual(@as(?i32, 7), bound_slot.?.boundArgs()[1].as(.int));
@@ -2373,7 +2399,7 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
     stack_slot = null;
     arguments_slot = null;
     target_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
 
@@ -2400,14 +2426,14 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
     // An extent's mark lives in the extent table, not a block bitmap: the
     // payload's `storageCell` edge has to reach it, and `sweepExtents` has to
     // give it back on the pure-memory arm rather than reading it as a String.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.gc.containsHeader(storage));
     try std.testing.expectEqual(@as(usize, 500), bound_slot.?.boundArgs().len);
     try std.testing.expect(bound_slot.?.boundArgs()[499].same(target_slot.?.value()));
 
     bound_slot = null;
     target_slot = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
 
@@ -2685,7 +2711,7 @@ test "gc stress finalization registry dead target queues pending job" {
     // held object's one-property transition shape.
     try std.testing.expectEqual(@as(usize, 7), rt.gc.liveCount());
 
-    rt.clearPendingFinalizationJobs();
+    rt.job_queue.discardKind(.finalization);
     registry_slot = null;
     cleanup_slot = null;
     ctx.destroy();
@@ -3103,12 +3129,12 @@ test "installed event loop keeps a released realm and its timer callbacks alive"
     const callback_header = callback.cycleMarkHeader().?;
     // The host drops its context reference while the loop is installed.
     ctx.destroy();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.gc.containsHeader(&ctx.header));
     try std.testing.expect(rt.gc.containsHeader(callback_header));
     // Clearing the scheduler releases both.
     loop.deinit();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.gc.containsHeader(callback_header));
 }
 
@@ -3734,7 +3760,7 @@ test "heap budget caps published cells without capping native alloc or external 
     const with_object = rt.gc.heap_budget.bytes;
     try std.testing.expect(with_object > before);
     object = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     const after_collect = rt.gc.heap_budget.bytes;
     try std.testing.expect(after_collect < with_object);
     const charge = with_object - after_collect;
@@ -3749,7 +3775,7 @@ test "heap budget caps published cells without capping native alloc or external 
     object = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expectEqual(after_collect + charge, rt.gc.heap_budget.bytes);
     object = null;
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expectEqual(after_collect, rt.gc.heap_budget.bytes);
 
     rt.setMemoryLimit(0);
@@ -3762,7 +3788,7 @@ test "heap budget caps published cells without capping native alloc or external 
     rt.freeNative(u8, native);
 
     const external_before = rt.gc.heap_budget.bytes;
-    var token = try rt.reportExternalAlloc(128);
+    var token = try rt.gc.reportExternalAlloc(128);
     defer token.release();
     try std.testing.expectEqual(external_before, rt.gc.heap_budget.bytes);
     try std.testing.expect(rt.gcStats().external_bytes >= 128);
@@ -3780,7 +3806,7 @@ test "heap limit collects once and then admits another object" {
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     const kept_object = try core.Object.create(rt, core.class.ids.object, null);
     var kept = kept_object.value();
@@ -3812,7 +3838,7 @@ test "heap limit retry keeps a local object the precise root set cannot name" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.setGCThreshold(std.math.maxInt(usize));
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     var live = try core.Object.create(rt, core.class.ids.object, null);
     std.mem.doNotOptimizeAway(&live);
@@ -3897,7 +3923,7 @@ test "production embedding public API allocation failures keep host ownership in
     // so this only stays a failing allocation if nothing in the call allocates
     // less than the pinned total. The explicit collection makes that footprint
     // the live set rather than whatever garbage the previous test left behind.
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
 
     rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
     defer rt.setNativeBytesLimitForTest(null);
@@ -4337,7 +4363,7 @@ test "production embedding can create independent realms" {
     }
 
     realm_global_handle.deinit();
-    _ = rt.collectForTest();
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.contextForGlobal(realm_global_object) == null);
 }
 
@@ -4445,7 +4471,7 @@ const S3HostDefineMajorProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!self.active) return;
         const before = self.rt.gc.block_heap.mark_epoch;
-        _ = self.rt.collectFull(null, .engine_active) catch {};
+        _ = self.rt.collectFull() catch {};
         if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
     }
 };
@@ -4465,15 +4491,9 @@ test "TGC S3: a host-defined property name stays reachable across a major taken 
     object_roots.activate(rt);
     defer object_roots.deactivate(rt);
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3HostDefineMajorProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = S3HostDefineMajorProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     rt.atoms.atom_audit_stale_edge = 0;
     probe.active = true;
@@ -4540,8 +4560,8 @@ const PrefilledRuntimeAllocator = struct {
 fn expectUnsetCompletionWait(rt: *core.JSRuntime) !void {
     const io = std.testing.io;
     const past = std.Io.Timestamp.now(io, .awake).subDuration(.{ .nanoseconds = std.time.ns_per_s });
-    try std.testing.expect(!rt.host_completion_event.isSet());
-    try std.testing.expect(!rt.waitForHostCompletionUntil(io, past));
+    try std.testing.expect(!rt.host_wait.completion.isSet());
+    try std.testing.expect(!rt.host_wait.waitUntil(io, past));
 }
 
 test "runtime init clears a prefilled host completion event" {
@@ -4557,9 +4577,9 @@ test "runtime init clears a prefilled host completion event" {
     try std.testing.expect(prefilled.served_body);
     try expectUnsetCompletionWait(created);
 
-    created.host_completion_event = .is_set;
-    try std.testing.expect(created.host_completion_event.isSet());
-    created.resetHostCompletionSignal();
+    created.host_wait.completion = .is_set;
+    try std.testing.expect(created.host_wait.completion.isSet());
+    created.host_wait.reset();
     try expectUnsetCompletionWait(created);
 }
 
@@ -4598,11 +4618,11 @@ test "runtime create initializes defaults and options on prefilled storage" {
         try std.testing.expectEqual(native_stack_size, rt.stack.native_size);
         try std.testing.expect(rt.stack.native_top != 0);
         try std.testing.expectEqual(if (native_stack_size == 0) 0 else rt.stack.native_top -| native_stack_size, rt.stack.native_limit);
-        try std.testing.expect(rt.can_block);
-        try std.testing.expect(!rt.runInterruptHandler());
+        try std.testing.expect(rt.host_wait.can_block);
+        try std.testing.expect(!rt.interrupt.poll());
         try std.testing.expect(interrupted);
 
-        try std.testing.expect(!rt.termination_requested.load(.monotonic));
+        try std.testing.expect(!rt.interrupt.termination_requested.load(.monotonic));
         try std.testing.expect(rt.exception.value.is(.uninitialized));
         try std.testing.expect(!rt.exception.uncatchable);
         try std.testing.expect(!rt.exception.out_of_memory);
@@ -4642,8 +4662,6 @@ fn expectRuntimeSelfReferences(rt: *core.JSRuntime) !void {
     defer rt.freeNative(u8, native_bytes);
     try std.testing.expectEqual(@intFromPtr(&rt.gc.cell_storage), @intFromPtr(&rt.gc.runtime.?.gc.cell_storage));
     try std.testing.expectEqual(@intFromPtr(&rt.gc.block_heap), @intFromPtr(rt.gc.address_registry.block_heap.?));
-    try std.testing.expectEqual(@intFromPtr(rt), @intFromPtr(rt.gc.heap_budget.owner_ctx.?));
-    try std.testing.expectEqual(@intFromPtr(rt), @intFromPtr(rt.gc.heap_budget.retry_ctx.?));
     try std.testing.expect(rt.gc.nonblock_objects != null);
     try std.testing.expect(rt.gc.cell_storage.slab.arena_observer != null);
 }
@@ -4667,10 +4685,6 @@ test "runtime collector construction owns rollback and defers allocation callbac
     try std.testing.expectEqual(baseline + 1, core.gc.Registry.nonblock_authorities_live_for_test);
     try std.testing.expectEqual(options.threshold, collector.heap_budget.gc_threshold);
     try std.testing.expectEqual(options.memory_limit, collector.heap_budget.limit);
-    try std.testing.expect(collector.heap_budget.retry == null);
-    try std.testing.expect(collector.heap_budget.retry_ctx == null);
-    try std.testing.expect(collector.heap_budget.owner_notify == null);
-    try std.testing.expect(collector.heap_budget.owner_ctx == null);
     try std.testing.expect(!collector.cell_storage.slab_enabled);
     try std.testing.expect(collector.cell_storage.block_heap == &collector.block_heap);
     try std.testing.expect(collector.cell_storage.nursery == &collector.nursery);
@@ -4709,14 +4723,8 @@ test "runtime subsystem allocators preserve probes and accounting" {
     };
     var calls: usize = 0;
     const budget = &rt.gc.heap_budget;
-    const saved_probe = budget.probe;
-    const saved_context = budget.probe_ctx;
-    budget.probe = Probe.observe;
-    budget.probe_ctx = &calls;
-    defer {
-        budget.probe = saved_probe;
-        budget.probe_ctx = saved_context;
-    }
+    const saved_probe = budget.installProbe(.{ .run = Probe.observe, .context = &calls });
+    defer budget.restoreProbe(saved_probe);
     const baseline = rt.allocation_diagnostics.allocated_bytes;
     const direct = try rt.allocNative(u8, 37);
     const direct_charge = rt.allocation_diagnostics.allocated_bytes - baseline;
@@ -4871,7 +4879,7 @@ test "context bootstrap names its realm and rejects another realms global" {
     try std.testing.expect(first.global == null);
     const second_global = try first.globalObject();
     try std.testing.expect(second_global != global);
-    try std.testing.expectEqual(first, rt.contextForGlobalIncludingConstructing(second_global).?);
+    try std.testing.expectEqual(first, rt.contexts.forGlobal(second_global, .include_constructing).?);
 }
 
 test "runtime termination crosses threads and idle recovery permits new execution" {
@@ -4928,7 +4936,7 @@ test "class registration reserves ids across allocation reentry and failure" {
         failure: ?anyerror = null,
         fn allocate(raw: ?*anyopaque, _: usize) void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.rt.gc.heap_budget.probe = null;
+            self.rt.gc.heap_budget.restoreProbe(null);
             for (0..200) |_| {
                 const binding = self.rt.registerClass(.{ .class_name = "Nested" }) catch |err| {
                     self.failure = err;
@@ -4940,12 +4948,8 @@ test "class registration reserves ids across allocation reentry and failure" {
         }
     };
     var probe = Probe{ .rt = rt };
-    rt.gc.heap_budget.probe = Probe.allocate;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = null;
-        rt.gc.heap_budget.probe_ctx = null;
-    }
+    _ = rt.gc.heap_budget.installProbe(.{ .run = Probe.allocate, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(null);
     const outer = try rt.registerClass(.{ .class_name = "Outer" });
     try std.testing.expect(probe.failure == null);
     try std.testing.expect(probe.first != null and probe.last != null);
@@ -5131,7 +5135,7 @@ test "microtask checkpoint roots notified exception through precise collection" 
         }
         fn report(runtime: *core.JSRuntime, value: core.JSValue, raw: ?*anyopaque) core.errors.HostError!void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            _ = runtime.collectFull(null, .declared_only) catch return error.SystemError;
+            _ = runtime.collectForTest() catch return error.SystemError;
             const object = core.Object.expect(value) catch return error.SystemError;
             if (!runtime.ownsObject(object)) return error.SystemError;
             self.observed = true;
@@ -5208,12 +5212,12 @@ test "microtask checkpoint WeakRef kept-alive spans jobs and clears only on comp
         observed: bool = false,
         fn keep(context: *core.JSContext, args: []const core.JSValue) core.JSValue {
             const identity = (core.Object.weakIdentityFromValue(context.runtime, args[0]) catch null) orelse return context.throwValue(core.JSValue.int32(-1));
-            context.runtime.keepAliveWeakRefTarget(identity, args[0]) catch return context.throwValue(core.JSValue.int32(-1));
+            context.runtime.microtasks.keepAlive(context.runtime.nativeAllocator(), identity, args[0]) catch return context.throwValue(core.JSValue.int32(-1));
             return core.JSValue.undefinedValue();
         }
         fn collect(context: *core.JSContext, _: []const core.JSValue) core.JSValue {
             const self: *@This() = @ptrCast(@alignCast(context.runtime.microtasks.userdata.?));
-            _ = context.runtime.collectFull(null, .declared_only) catch return context.throwValue(core.JSValue.int32(-1));
+            _ = context.runtime.collectForTest() catch return context.throwValue(core.JSValue.int32(-1));
             self.observed = context.runtime.ownsObject(self.object.?);
             return core.JSValue.undefinedValue();
         }
@@ -5224,8 +5228,8 @@ test "microtask checkpoint WeakRef kept-alive spans jobs and clears only on comp
     try rt.job_queue.enqueueFunc(ctx.core, Probe.collect, &.{});
     try rt.runMicrotasks();
     try std.testing.expect(probe.observed);
-    try std.testing.expectEqual(@as(usize, 0), rt.weakref_kept_alive.items.len);
-    _ = try rt.collectFull(null, .declared_only);
+    try std.testing.expectEqual(@as(usize, 0), rt.microtasks.weakref_kept_alive.items.len);
+    _ = try rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(probe.object.?));
 }
 
@@ -5419,7 +5423,7 @@ const BufferCollectionProbe = struct {
         // The copy is complete when provider growth allocates. Its source
         // may now change through a reentrant owner, without changing the copy.
         if (self.calls == 2) @memset(self.source_to_clear, core.JSValue.undefinedValue());
-        _ = self.runtime.collectFull(null, .declared_only) catch |err| {
+        _ = self.runtime.collectForTest() catch |err| {
             self.failure = err;
         };
     }
@@ -5438,31 +5442,26 @@ test "ValueRootBuffer protects copy and provider growth then owns liveness" {
     const source = try std.testing.allocator.alloc(core.JSValue, 1);
     defer std.testing.allocator.free(source);
     const first_id = try rt.atoms.newValueSymbol("root-buffer-first");
-    source[0] = try rt.takeSymbolValue(first_id);
+    source[0] = try rt.symbolValue(first_id);
     var probe = BufferCollectionProbe{ .runtime = rt, .source_to_clear = source };
     const epoch = rt.gc.collection_epoch;
-    rt.gc.heap_budget.probe = BufferCollectionProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = null;
-        rt.gc.heap_budget.probe_ctx = null;
-    }
+    _ = rt.gc.heap_budget.installProbe(.{ .run = BufferCollectionProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(null);
     var first = try core.runtime.ValueRootBuffer.initCopy(rt, source);
     defer first.deinit();
-    rt.gc.heap_budget.probe = null;
-    rt.gc.heap_budget.probe_ctx = null;
+    rt.gc.heap_budget.restoreProbe(null);
     if (probe.failure) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), probe.calls);
     try std.testing.expectEqual(epoch + 2, rt.gc.collection_epoch);
     try std.testing.expect(rt.atoms.name(first_id) != null);
     try std.testing.expect(rt.active_value_roots == null);
     source[0] = core.JSValue.undefinedValue();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_id) != null);
     try std.testing.expect(!first.values()[0].is(.undefined_value));
 
     const second_id = try rt.atoms.newValueSymbol("root-buffer-second");
-    source[0] = try rt.takeSymbolValue(second_id);
+    source[0] = try rt.symbolValue(second_id);
     var second = try core.runtime.ValueRootBuffer.initCopy(rt, source);
     defer second.deinit();
     source[0] = core.JSValue.undefinedValue();
@@ -5470,11 +5469,11 @@ test "ValueRootBuffer protects copy and provider growth then owns liveness" {
     first.deinit();
     first.deinit();
     try std.testing.expectEqual(@as(usize, 0), first.values().len);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_id) == null);
     try std.testing.expect(rt.atoms.name(second_id) != null);
     second.deinit();
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     try std.testing.expect(rt.atoms.name(second_id) == null);
     try std.testing.expectEqual(@as(usize, 0), rt.roots.value_root_buffers);
 }
@@ -5559,19 +5558,15 @@ test "ValueRootBuffer registration survives allocation probe reentry" {
     };
     var probe = Probe{ .runtime = rt };
     defer for (&probe.nested) |*buffer| buffer.deinit();
-    rt.gc.heap_budget.probe = Probe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = null;
-        rt.gc.heap_budget.probe_ctx = null;
-    }
+    _ = rt.gc.heap_budget.installProbe(.{ .run = Probe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(null);
     var outer = try core.runtime.ValueRootBuffer.initCopy(rt, &.{core.JSValue.int32(9)});
     defer outer.deinit();
     if (probe.failure) |err| return err;
     try std.testing.expect(probe.calls >= 2);
     try std.testing.expectEqual(@as(usize, 4), rt.roots.value_root_buffers);
     try std.testing.expectEqual(@as(usize, 5), rt.roots.providers().len);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
 }
 
 test "conservative scan retains nursery objects named only by native frames" {
@@ -5583,7 +5578,7 @@ test "conservative scan retains nursery objects named only by native frames" {
     // Only this frame names the object: no declared root.
     var held: *core.Object = object;
     std.mem.doNotOptimizeAway(&held);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .engine_active);
+    _ = try core.gc_trace_stw.collectMinor(rt, .engine_active);
     std.mem.doNotOptimizeAway(&held);
     try std.testing.expect(!core.gc.headerForwarded(held.gcHeader()));
     try std.testing.expect(rt.gc.containsHeader(held.gcHeader()));
@@ -5598,7 +5593,7 @@ test "nursery residents kept in place are traced again by the next minor" {
     // A ledger pin keeps the object on its nursery page, marked in place.
     try rt.gc.pinHeader(object.gcHeader());
     defer rt.gc.unpinHeader(object.gcHeader());
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(core.gc.Registry.isNurseryHeader(object.gcHeader()));
     // Grow into fresh young property storage holding fresh young values; only
     // the object names them.
@@ -5608,7 +5603,7 @@ test "nursery residents kept in place are traced again by the next minor" {
         const value = try core.Object.createPlainObject(rt, null);
         try object.defineOwnProperty(rt, key.*, core.Descriptor.data(value.value(), .all));
     }
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     for (keys) |key| {
         const value = try object.getProperty(key);
         try std.testing.expect(rt.gc.containsHeader(value.cycleMarkHeader().?));
@@ -5625,12 +5620,12 @@ test "a dead resident on a retained nursery page is not resurrected" {
     // The keeper retains the shared page; the corpse is unreachable.
     try rt.gc.pinHeader(keeper.gcHeader());
     defer rt.gc.unpinHeader(keeper.gcHeader());
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!rt.gc.containsHeader(corpse.gcHeader()) or !corpse.gcHeader().metaConst().alloc_info.heap_accounted);
     // A stale native word naming the corpse must not bring it back.
     var stale: *core.Object = corpse;
     std.mem.doNotOptimizeAway(&stale);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .engine_active);
+    _ = try core.gc_trace_stw.collectMinor(rt, .engine_active);
     std.mem.doNotOptimizeAway(&stale);
     try std.testing.expect(!rt.gc.headerMarked(stale.gcHeader()));
 }
@@ -5656,7 +5651,7 @@ test "nursery evacuation moves self-referencing owners with inline and external 
         for (0..extra) |i| try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(owner.value(), .all));
         try std.testing.expectEqual(!external, owner.hasSlots2Layout() and owner.prop_values == owner.trailingPropertyStorageBase());
         const before = values[0].bits;
-        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
         try std.testing.expect(values[0].bits != before);
         const moved = core.Object.fromHeader(values[0].cycleMarkHeader().?);
         // Inline storage follows the body; every self-reference names the copy.
@@ -5686,14 +5681,14 @@ test "the minor audit reports an old owner holding an unbarriered young child" {
     const array = try core.Object.createArray(rt, null);
     values[0] = array.value();
     try array.appendFastArrayPushValues(rt, &.{core.JSValue.int32(1)});
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!array.gcHeader().metaConst().flags.young);
     try std.testing.expect(!rt.gc.generation.isRemembered(array.gcHeader()));
 
     const child = try core.Object.createPlainObject(rt, null);
     array.arrayElements()[0] = child.value(); // no barrier
     const reports_before = core.gc.forensics.audit_reports;
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     // The child is gone; drop the dangling slot before anything reads it.
     array.arrayElements()[0] = core.JSValue.int32(0);
     try std.testing.expect(core.gc.forensics.audit_reports > reports_before);
@@ -5717,7 +5712,7 @@ test "dense array in-capacity append remembers an old array" {
     // Spare capacity past the count, then age the array.
     array.truncateArrayElements(rt, 2);
     array.setArrayLength(2);
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(!array.gcHeader().metaConst().flags.young);
     const child = try core.Object.createPlainObject(rt, null);
     try std.testing.expectEqual(
@@ -5725,7 +5720,7 @@ test "dense array in-capacity append remembers an old array" {
         engine.exec.array_ops.putDenseArrayElementOverwriteOwnedFast(rt, array.value(), core.JSValue.int32(2), child.value()),
     );
     const child_header = child.gcHeader();
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, .declared_only);
     try std.testing.expect(rt.gc.containsHeader(child_header));
     try std.testing.expect(array.arrayElements()[2].same(child.value()));
 }
@@ -5928,7 +5923,7 @@ test "weak holders are allocated old so the raw holder chain never names a nurse
     }
     const plain = try core.Object.createPlainObject(rt, null);
     try std.testing.expect(rt.gc.nursery.pageOf(@intFromPtr(plain.gcHeader())) != null);
-    _ = try rt.collectFull(null, .declared_only);
+    _ = try rt.collectForTest();
     inline for (0..holders.len) |index| {
         try std.testing.expectEqual(holders[index].value().bits, (try (try roots.ref(index)).get(rt)).bits);
     }
@@ -5973,15 +5968,9 @@ test "TGC S3: a module's export names stay rooted from compile to install" {
     defer ctx.destroy();
     _ = try ctx.globalObject();
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3HostDefineMajorProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = S3HostDefineMajorProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     rt.atoms.atom_audit_stale_edge = 0;
     probe.active = true;
@@ -6016,15 +6005,9 @@ test "TGC S3: a number property key stays rooted through proxy traps and accesso
         \\var p2 = new Proxy({}, h2);
     , .{});
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3HostDefineMajorProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = S3HostDefineMajorProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     rt.atoms.atom_audit_stale_edge = 0;
     probe.active = true;
@@ -6058,15 +6041,9 @@ test "TGC S3: a number property key stays rooted through primitive [[Set]] and s
         \\Object.setPrototypeOf(Number.prototype, new Proxy({}, { set(t, k) { seen = k; return true; } }));
     , .{});
 
-    const saved_trigger_fn = rt.gc.heap_budget.probe;
-    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3HostDefineMajorProbe{ .rt = rt };
-    rt.gc.heap_budget.probe = S3HostDefineMajorProbe.trigger;
-    rt.gc.heap_budget.probe_ctx = &probe;
-    defer {
-        rt.gc.heap_budget.probe = saved_trigger_fn;
-        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
-    }
+    const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = S3HostDefineMajorProbe.trigger, .context = &probe });
+    defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
     rt.atoms.atom_audit_stale_edge = 0;
     probe.active = true;

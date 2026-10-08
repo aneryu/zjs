@@ -45,7 +45,7 @@ pub const PromiseReactionPayload = struct {
 
     /// Replace the job-owned handler input with an already-owned completion.
     /// The job is traced, so storing the JSValue is the whole transfer.
-    pub fn replaceValueOwned(self: *PromiseReactionPayload, _: *core.JSRuntime, value: core.JSValue) void {
+    pub fn replaceValueOwned(self: *PromiseReactionPayload, value: core.JSValue) void {
         self.value = value;
     }
 };
@@ -76,7 +76,7 @@ pub const PromiseThenablePayload = struct {
     /// Store the abrupt completion produced by the one permitted invocation
     /// of the thenable. Retrying the job can now resume at rejection without
     /// invoking user code twice.
-    pub fn replaceCompletionOwned(self: *PromiseThenablePayload, _: *core.JSRuntime, value: core.JSValue) void {
+    pub fn replaceCompletionOwned(self: *PromiseThenablePayload, value: core.JSValue) void {
         self.completion = value;
     }
 };
@@ -93,6 +93,9 @@ pub const PromiseSettlementPayload = struct {
 };
 
 pub const DynamicImportPayload = struct {
+    /// Production: `exec/module.zig` `dynamicImportJobRun`. Kept as a field
+    /// because job-scheduling tests inject runners here to drive the retry
+    /// and realm-selection paths of an import job; cold path.
     pub const Runner = *const fn (
         context: *core.JSContext,
         output: ?*std.Io.Writer,
@@ -107,19 +110,12 @@ pub const DynamicImportPayload = struct {
     attributes: core.JSValue,
 };
 
-/// A zjs Atomics.waitAsync host completion. The opaque waiter stays owned by
-/// this typed entry until the Runtime thread successfully publishes the
-/// Promise settlement or drops the queue during teardown.
+/// A zjs Atomics.waitAsync host completion. The waiter stays owned by this
+/// typed entry until the Runtime thread successfully publishes the Promise
+/// settlement or drops the queue during teardown (`deinit` destroys it
+/// through `engine_services`).
 pub const AtomicsWaiterPayload = struct {
-    pub const Runner = *const fn (
-        context: *core.JSContext,
-        payload: *const AtomicsWaiterPayload,
-    ) core.errors.RuntimeError!void;
-    pub const Destroyer = *const fn (waiter: *anyopaque) void;
-
-    runner: Runner,
-    destroyer: Destroyer,
-    waiter: *anyopaque,
+    waiter: *engine_services.AtomicsWaiter,
     promise: core.JSValue,
 };
 
@@ -153,7 +149,9 @@ pub const Job = struct {
     realm: core.RealmRef,
     payload: Payload,
 
-    pub fn init(context: *core.JSContext, func: Func, args: []const core.JSValue) !Job {
+    /// Test-fixture job: runs a Zig callback. Production enqueues only the
+    /// typed ECMAScript and host-completion jobs below.
+    pub fn initGeneric(context: *core.JSContext, func: Func, args: []const core.JSValue) error{TooManyJobArgs}!Job {
         if (args.len > MaxArgs) return error.TooManyJobArgs;
         var job = Job{
             .runtime = context.runtime,
@@ -229,7 +227,7 @@ pub const Job = struct {
     /// Construct an allocation-free continuation after the caller has
     /// reserved a FIFO slot. Object/value duplication and RealmRef retain are
     /// no-fail ownership transfers in both supported JSValue layouts.
-    pub fn initPromiseSettlementNoFail(
+    pub fn initPromiseSettlement(
         context: *core.JSContext,
         target: core.JSValue,
         completion: core.JSValue,
@@ -270,20 +268,12 @@ pub const Job = struct {
         };
     }
 
-    pub fn initAtomicsWaiter(
-        context: *core.JSContext,
-        waiter: *anyopaque,
-        promise: core.JSValue,
-        runner: AtomicsWaiterPayload.Runner,
-        destroyer: AtomicsWaiterPayload.Destroyer,
-    ) Job {
+    pub fn initAtomicsWaiter(context: *core.JSContext, waiter: *engine_services.AtomicsWaiter, promise: core.JSValue) Job {
         std.debug.assert(promise.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .atomics_waiter = .{
-                .runner = runner,
-                .destroyer = destroyer,
                 .waiter = waiter,
                 .promise = promise,
             } },
@@ -350,7 +340,7 @@ pub const Job = struct {
             },
             .atomics_waiter => |*payload| {
                 payload.promise = core.JSValue.undefinedValue();
-                payload.destroyer(payload.waiter);
+                engine_services.destroyAtomicsWaiter(payload.waiter);
             },
             .finalization => |*payload| {
                 payload.callback = core.JSValue.undefinedValue();
@@ -542,7 +532,7 @@ pub const Queue = struct {
     /// Commit one already-prepared entry without allocation. The caller must
     /// reserve enough queue storage before entering its visible state-change
     /// phase.
-    pub fn enqueuePrepared(self: *Queue, job: Job) void {
+    fn enqueuePrepared(self: *Queue, job: Job) void {
         std.debug.assert(self.head + self.jobs.len + self.reserved_entries < self.capacity);
         self.append(job);
     }
@@ -564,23 +554,12 @@ pub const Queue = struct {
 
     pub fn enqueueFunc(self: *Queue, context: *core.JSContext, func: Func, args: []const core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(try Job.init(context, func, args));
+        self.enqueuePrepared(try Job.initGeneric(context, func, args));
     }
 
     pub fn enqueuePromise(self: *Queue, context: *core.JSContext, value: core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
         self.enqueuePrepared(Job.initPromise(context, value));
-    }
-
-    pub fn preparePromiseReaction(
-        self: *Queue,
-        context: *core.JSContext,
-        reaction: core.JSValue,
-        value: core.JSValue,
-        rejected: bool,
-    ) Job {
-        _ = self;
-        return Job.initPromiseReaction(context, reaction, value, rejected);
     }
 
     pub fn enqueuePromiseReaction(
@@ -622,10 +601,8 @@ pub const Queue = struct {
     pub fn enqueueAtomicsWaiter(
         self: *Queue,
         context: *core.JSContext,
-        waiter: *anyopaque,
+        waiter: *engine_services.AtomicsWaiter,
         promise: *core.JSValue,
-        runner: AtomicsWaiterPayload.Runner,
-        destroyer: AtomicsWaiterPayload.Destroyer,
     ) !void {
         // The waiter has left the global registry but is not owned by a job
         // yet. Root its real slot (including relocation on a failed enqueue)
@@ -638,12 +615,7 @@ pub const Queue = struct {
         roots.activate(self.runtime);
         defer roots.deactivate(self.runtime);
         try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(Job.initAtomicsWaiter(context, waiter, promise.*, runner, destroyer));
-    }
-
-    pub fn enqueueFinalization(self: *Queue, job: Job) !void {
-        try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initAtomicsWaiter(context, waiter, promise.*));
     }
 
     pub fn hasJobs(self: Queue) bool {
@@ -666,17 +638,6 @@ pub const Queue = struct {
         return job;
     }
 
-    pub fn takeAt(self: *Queue, index: usize) Job {
-        std.debug.assert(index < self.jobs.len);
-        if (index == 0) return self.takeFirst().?;
-        const job = self.jobs[index];
-        if (index + 1 < self.jobs.len) {
-            std.mem.copyForwards(Job, self.jobs[index .. self.jobs.len - 1], self.jobs[index + 1 ..]);
-        }
-        self.jobs = self.jobs[0 .. self.jobs.len - 1];
-        return job;
-    }
-
     /// Reinsert an active entry at the FIFO head after a retriable host
     /// completion failure. The active runner must have reserved this slot
     /// immediately after unlinking the entry, so the slot below the window is
@@ -692,11 +653,19 @@ pub const Queue = struct {
         self.jobs[0] = job;
     }
 
-    pub fn firstIndexOfKind(self: Queue, kind: Kind) ?usize {
-        for (self.jobs, 0..) |job, index| {
-            if (std.meta.activeTag(job.payload) == kind) return index;
+    /// Drop every queued entry of `kind`, keeping the others in FIFO order.
+    /// Reservations are untouched: their owners are still live.
+    pub fn discardKind(self: *Queue, kind: Kind) void {
+        var kept: usize = 0;
+        for (self.jobs) |*job| {
+            if (std.meta.activeTag(job.payload) == kind) {
+                job.deinit();
+            } else {
+                self.jobs[kept] = job.*;
+                kept += 1;
+            }
         }
-        return null;
+        self.jobs = self.jobs[0..kept];
     }
 
     pub fn countKind(self: Queue, kind: Kind) usize {
@@ -714,23 +683,62 @@ pub const Queue = struct {
     }
 };
 
-/// WeakRef [[KeptAlive]] (AddToKeptObjects), cleared when the microtask
-/// checkpoint ends. A target already kept is not appended again (keyed by
-/// its weak identity, which a moving collection does not change), so a long
-/// checkpoint of `deref()` calls grows the list by one entry per distinct
-/// target. Allocation failure is an error: dropping the keep-alive would let
-/// a later `deref()` in the same job observe the target dead.
-pub fn keepAliveWeakRef(rt: *core.JSRuntime, identity: usize, value: core.JSValue) error{OutOfMemory}!void {
-    const allocator = rt.nativeAllocator();
-    const entry = try rt.weakref_kept_identities.getOrPut(allocator, identity);
-    if (entry.found_existing) return;
-    errdefer _ = rt.weakref_kept_identities.remove(identity);
-    try rt.weakref_kept_alive.append(allocator, value);
-}
+/// Stack-local root for a Job after it has left `job_queue` and before its
+/// payload is released. The FIFO already owns the canonical edge walk in
+/// `Job.traceRoots`; this record only keeps that same walk published while
+/// exec runs the dequeued entry.
+///
+/// The chain is thread-local rather than a JSRuntime field: jobs execute on
+/// their Runtime's owner thread and nested drains must be LIFO. A nested
+/// drain for a different Runtime is harmless; tracing filters each record by
+/// its typed Runtime pointer.
+pub const ActiveJobRoot = struct {
+    previous: ?*const ActiveJobRoot = null,
+    runtime: *core.JSRuntime = undefined,
+    job: *Job = undefined,
 
-pub fn clearKeptAlive(rt: *core.JSRuntime) void {
-    rt.weakref_kept_alive.clearAndFree(rt.nativeAllocator());
-    rt.weakref_kept_identities.clearAndFree(rt.nativeAllocator());
+    pub inline fn activate(self: *ActiveJobRoot, rt: *core.JSRuntime, job: *Job) void {
+        rt.assertOwnerThread();
+        std.debug.assert(job.runtime == rt);
+        std.debug.assert(active_job_root_head != self);
+        self.previous = active_job_root_head;
+        self.runtime = rt;
+        self.job = job;
+        active_job_root_head = self;
+    }
+
+    /// Trace the dequeued jobs `rt` is running on this thread.
+    pub fn traceFor(rt: *core.JSRuntime, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        var active_job = active_job_root_head;
+        while (active_job) |root| : (active_job = root.previous) {
+            if (root.runtime == rt) try root.job.traceRoots(visitor);
+        }
+    }
+
+    /// Whether `rt` still has a dequeued job on this thread's chain.
+    pub fn anyFor(rt: *const core.JSRuntime) bool {
+        var current = active_job_root_head;
+        while (current) |root| : (current = root.previous) {
+            if (root.runtime == rt) return true;
+        }
+        return false;
+    }
+
+    pub inline fn deactivate(self: *ActiveJobRoot, rt: *core.JSRuntime) void {
+        rt.assertOwnerThread();
+        std.debug.assert(self.runtime == rt);
+        std.debug.assert(active_job_root_head == self);
+        active_job_root_head = self.previous;
+        self.previous = null;
+        self.runtime = undefined;
+        self.job = undefined;
+    }
+};
+
+threadlocal var active_job_root_head: ?*const ActiveJobRoot = null;
+
+comptime {
+    std.debug.assert(@sizeOf(ActiveJobRoot) == 3 * @sizeOf(usize));
 }
 
 const std = @import("std");
@@ -786,17 +794,17 @@ test "Promise settlement continuation owns target and direct symbol completion" 
 
     const target = try core.Object.create(runtime, core.class.ids.promise, null);
     const symbol_atom = try runtime.atoms.newValueSymbol("promise-settlement-continuation-symbol");
-    const completion = try runtime.takeSymbolValue(symbol_atom);
-    runtime.job_queue.enqueueReserved(Job.initPromiseSettlementNoFail(context, target.value(), completion, false));
+    const completion = try runtime.symbolValue(symbol_atom);
+    runtime.job_queue.enqueueReserved(Job.initPromiseSettlement(context, target.value(), completion, false));
     reservation_live = false;
 
-    _ = runtime.collectForTest();
+    _ = try runtime.collectForTest();
     try std.testing.expect(runtime.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(symbol_atom, runtime.job_queue.jobs[0].payload.promise_settlement.completion.asSymbolAtom().?);
 
     var job = runtime.job_queue.takeFirst().?;
     job.deinit();
-    _ = runtime.collectForTest();
+    _ = try runtime.collectForTest();
     try std.testing.expect(runtime.atoms.name(symbol_atom) == null);
 }
 
@@ -944,6 +952,64 @@ pub const Checkpoint = struct {
     userdata: ?*anyopaque = null,
     /// Borrowed only while an exec/host entry is on the stack.
     output: ?*std.Io.Writer = null,
+    /// WeakRef [[KeptAlive]]. Traced as a root and cleared when the
+    /// checkpoint ends.
+    weakref_kept_alive: std.ArrayListUnmanaged(core.JSValue) = .empty, // gc-slot: heap
+    /// Weak identities of `weakref_kept_alive`'s targets, so each is kept once.
+    weakref_kept_identities: std.AutoHashMapUnmanaged(usize, void) = .empty,
+
+    /// WeakRef [[KeptAlive]] (AddToKeptObjects), cleared when the checkpoint
+    /// ends. A target already kept is not appended again (keyed by its weak
+    /// identity, which a moving collection does not change), so a long
+    /// checkpoint of `deref()` calls grows the list by one entry per distinct
+    /// target. Allocation failure is an error: dropping the keep-alive would
+    /// let a later `deref()` in the same job observe the target dead.
+    pub fn keepAlive(self: *Checkpoint, allocator: std.mem.Allocator, identity: usize, value: core.JSValue) error{OutOfMemory}!void {
+        const entry = try self.weakref_kept_identities.getOrPut(allocator, identity);
+        if (entry.found_existing) return;
+        errdefer _ = self.weakref_kept_identities.remove(identity);
+        try self.weakref_kept_alive.append(allocator, value);
+    }
+
+    /// ClearKeptObjects: at the end of a checkpoint, of a standalone job, on
+    /// termination discard, and at Runtime teardown.
+    pub fn clearKeptObjects(self: *Checkpoint, allocator: std.mem.Allocator) void {
+        self.weakref_kept_alive.clearAndFree(allocator);
+        self.weakref_kept_identities.clearAndFree(allocator);
+    }
+
+    /// After a job that ran outside any checkpoint drain: that job was the
+    /// whole synchronous run, so its kept objects end with it.
+    pub fn endStandaloneJob(self: *Checkpoint, allocator: std.mem.Allocator) void {
+        if (!self.running) self.clearKeptObjects(allocator);
+    }
+
+    pub fn traceKeptAlive(self: *Checkpoint, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        for (self.weakref_kept_alive.items) |*kept| try visitor.value(kept);
+    }
+
+    /// Enter the outermost drain, or null when a drain is already running or
+    /// an open scope defers it. Reentry from the exception handler fails.
+    pub fn beginDrain(self: *Checkpoint) error{MicrotaskReentry}!?Drain {
+        if (self.reporting) return error.MicrotaskReentry;
+        if (self.running or self.scope_depth != 0) return null;
+        self.running = true;
+        return .{ .checkpoint = self };
+    }
+
+    pub const Drain = struct {
+        checkpoint: *Checkpoint,
+
+        /// The queue ran dry: the checkpoint is complete.
+        pub fn complete(self: Drain, allocator: std.mem.Allocator) void {
+            self.checkpoint.clearKeptObjects(allocator);
+        }
+
+        /// Leave the drain on every exit, after `complete` on success.
+        pub fn leave(self: Drain) void {
+            self.checkpoint.running = false;
+        }
+    };
 };
 
 fn discardTerminatedJobs(rt: *core.JSRuntime) void {
@@ -952,12 +1018,11 @@ fn discardTerminatedJobs(rt: *core.JSRuntime) void {
         var owned = job;
         owned.deinit();
     }
-    rt.clearWeakRefKeptAlive();
+    rt.microtasks.clearKeptObjects(rt.nativeAllocator());
 }
 
-/// Shared ordinary-job reporting for checkpoints and the module continuation
-/// scheduler. The latter retains its existing interleaving with TLA work.
-pub fn reportException(rt: *core.JSRuntime) core.errors.HostError!void {
+/// Ordinary-job exception reporting for a checkpoint step.
+fn reportException(rt: *core.JSRuntime) core.errors.HostError!void {
     const state = &rt.microtasks;
     if (rt.exception.out_of_memory) return error.OutOfMemory;
     if (rt.exception.uncatchable) return error.Interrupted;
@@ -1012,13 +1077,10 @@ pub fn checkTermination(rt: *core.JSRuntime) core.errors.HostError!void {
 }
 
 pub fn runCheckpoint(rt: *core.JSRuntime) core.errors.HostError!void {
-    const state = &rt.microtasks;
-    if (state.reporting) return error.MicrotaskReentry;
-    if (state.running or state.scope_depth != 0) return;
-    state.running = true;
-    defer state.running = false;
+    const drain = (try rt.microtasks.beginDrain()) orelse return;
+    defer drain.leave();
     while (try runCheckpointStep(rt) != .empty) {}
-    rt.clearWeakRefKeptAlive();
+    drain.complete(rt.nativeAllocator());
 }
 
 /// Finish is fallible because leaving the outermost scope may execute jobs.
