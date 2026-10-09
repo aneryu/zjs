@@ -6,8 +6,6 @@
 //! draining, while parser/compiler policy stays in their own modules.
 
 const std = @import("std");
-const atomics_ops = @import("atomics_ops.zig");
-
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
@@ -517,11 +515,7 @@ fn waitForModuleAwaitReaction(
             switch (try promise_ops.drainOnePendingJob(ctx, output)) {
                 .success => break :progress true,
                 .exception => return error.JSException,
-                .empty => break :progress try runOneModuleAwaitHostEvent(
-                    ctx,
-                    output,
-                    global,
-                ),
+                .empty => break :progress try module_mod.drainOneModuleHostEvent(ctx, output),
             }
         };
         if (!progressed) {
@@ -537,15 +531,6 @@ fn waitForModuleAwaitReaction(
         .value = settled,
         .rejected = rejected,
     };
-}
-
-fn runOneModuleAwaitHostEvent(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !bool {
-    if (try call_runtime.pollHostScheduler(ctx, output, global)) return true;
-    return atomics_ops.runNextAtomicsHostCompletion(ctx, false);
 }
 
 fn parserMode(mode: core.context.EvalMode) parser.Mode {

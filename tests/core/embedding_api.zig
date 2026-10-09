@@ -960,3 +960,89 @@ test "production embedding getProperty reports accessor exceptions" {
     const thrown = ctx.takePendingException();
     try std.testing.expect(thrown.is(.object));
 }
+
+const UnknownHostErrors = struct {
+    fn probe(_: *zjs.native.Call) anyerror!zjs.JSValue {
+        return error.ErrmapProbe;
+    }
+
+    fn evalError(_: *zjs.native.Call) anyerror!zjs.JSValue {
+        return error.EvalError;
+    }
+
+    fn typeError(_: *zjs.native.Call) anyerror!zjs.JSValue {
+        return error.TypeError;
+    }
+};
+
+fn expectOwnedUtf8(value: zjs.JSValue, expected: []const u8) !void {
+    const string = value.asString() orelse return error.TestExpectedEqual;
+    const text = try string.toOwnedUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+test "unknown zig error names match on promise rejection and sync throw" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    _ = try ctx.defineFunction("errmapProbe", zjs.native.managed(UnknownHostErrors.probe), .{});
+    _ = try ctx.defineFunction("errmapEval", zjs.native.managed(UnknownHostErrors.evalError), .{});
+    _ = try ctx.defineFunction("errmapType", zjs.native.managed(UnknownHostErrors.typeError), .{});
+
+    const sync_names = try ctx.eval(
+        \\function errmapShow(fn) {
+        \\  try { fn(); return "no-throw"; }
+        \\  catch (e) { return e.name + ":" + e.message; }
+        \\}
+        \\errmapShow(errmapProbe) + "|" + errmapShow(errmapEval) + "|" + errmapShow(errmapType)
+    , .{});
+    try expectOwnedUtf8(sync_names, "Error:ErrmapProbe|Error:EvalError|TypeError:");
+
+    _ = try ctx.eval(
+        \\globalThis.errmapAsyncProbe = "";
+        \\globalThis.errmapAsyncEval = "";
+        \\(async () => { try { await errmapProbe(); } catch (e) { globalThis.errmapAsyncProbe = e.name + ":" + e.message; } })();
+        \\(async () => { try { await errmapEval(); } catch (e) { globalThis.errmapAsyncEval = e.name + ":" + e.message; } })();
+    , .{});
+    try ctx.runJobs(null);
+    try expectOwnedUtf8(try ctx.eval("errmapAsyncProbe", .{}), "Error:ErrmapProbe");
+    try expectOwnedUtf8(try ctx.eval("errmapAsyncEval", .{}), "Error:EvalError");
+
+    const global_object = ctx.core.global orelse return error.TestExpectedEqual;
+    var corrupt: zjs.JSValue = zjs.JSValue.undefinedValue();
+    var eval_reason: zjs.JSValue = zjs.JSValue.undefinedValue();
+    var oom: zjs.JSValue = zjs.JSValue.undefinedValue();
+    var io: zjs.JSValue = zjs.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &corrupt, &eval_reason, &oom, &io });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    corrupt = try zjs.exec.exception_ops.promiseErrorValue(ctx.core, global_object, error.BytecodeCorrupt);
+    eval_reason = try zjs.exec.exception_ops.promiseErrorValue(ctx.core, global_object, error.EvalError);
+    oom = try zjs.exec.exception_ops.promiseErrorValue(ctx.core, global_object, error.OutOfMemory);
+    io = try zjs.exec.exception_ops.hostErrorValue(ctx.core, global_object, error.FileNotFound);
+
+    const global_value = global_object.value();
+    try ctx.defineDataProperty(global_value, "errmapCorrupt", corrupt, .{});
+    try ctx.defineDataProperty(global_value, "errmapEvalReason", eval_reason, .{});
+    try ctx.defineDataProperty(global_value, "errmapOom", oom, .{});
+    try ctx.defineDataProperty(global_value, "errmapIo", io, .{});
+
+    _ = try ctx.eval(
+        \\globalThis.errmapAwaitCorrupt = "";
+        \\globalThis.errmapAwaitEval = "";
+        \\globalThis.errmapAwaitOom = "";
+        \\globalThis.errmapAwaitIo = "";
+        \\(async () => { try { await Promise.reject(errmapCorrupt); } catch (e) { globalThis.errmapAwaitCorrupt = e.name + ":" + e.message; } })();
+        \\(async () => { try { await Promise.reject(errmapEvalReason); } catch (e) { globalThis.errmapAwaitEval = e.name + ":" + e.message; } })();
+        \\(async () => { try { await Promise.reject(errmapOom); } catch (e) { globalThis.errmapAwaitOom = e.name + ":" + e.message; } })();
+        \\(async () => { try { await Promise.reject(errmapIo); } catch (e) { globalThis.errmapAwaitIo = e.name + ":" + e.message; } })();
+    , .{});
+    try ctx.runJobs(null);
+    try expectOwnedUtf8(try ctx.eval("errmapAwaitCorrupt", .{}), "Error:BytecodeCorrupt");
+    try expectOwnedUtf8(try ctx.eval("errmapAwaitEval", .{}), "Error:EvalError");
+    try expectOwnedUtf8(try ctx.eval("errmapAwaitOom", .{}), "InternalError:out of memory");
+    try expectOwnedUtf8(try ctx.eval("errmapAwaitIo", .{}), "Error:FileNotFound");
+}

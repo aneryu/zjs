@@ -125,20 +125,26 @@ fn checkGlobalPrototype(eng: *TestEngine) void {
     );
 }
 
-// Own-property fingerprints of realm prototypes. Slot payloads are raw
-// bits and addresses taken after `gc.reclaimNow`. The checker never
-// dereferences them: a later collection may have freed the value.
+// Own-property fingerprints of realm prototypes. Relocatable JSValues and
+// object pointers live in slices the shared runtime traces, so a copying
+// collection rewrites the baseline before the next bit compare. `a`/`b`
+// still hold the non-relocatable residue (auto_init id, var_ref cell
+// address). The checker never dereferences a stored old bit pattern.
 const isolation_object_cap = 160;
 const isolation_label_cap = 96;
+const isolation_root_none: u32 = std.math.maxInt(u32);
 const IsolationSlot = struct {
     atom: core.atom.Atom,
     flags: u6,
     a: u64,
     b: u64,
+    value_root: u32 = isolation_root_none,
+    ptr_a: u32 = isolation_root_none,
+    ptr_b: u32 = isolation_root_none,
 };
 const IsolationObject = struct {
-    object: *core.Object,
-    proto: ?*core.Object,
+    object_root: u32,
+    proto_root: u32,
     shape_identity: u64,
     prop_count: u32,
     slots: []IsolationSlot,
@@ -183,6 +189,12 @@ const native_error_labels = [_][]const u8{
 var isolation_objects: [isolation_object_cap]IsolationObject = undefined;
 var isolation_object_count: usize = 0;
 var isolation_objects_ready: bool = false;
+var isolation_values: []core.JSValue = &.{};
+var isolation_value_len: usize = 0;
+var isolation_ptrs: []?*core.Object = &.{};
+var isolation_ptr_len: usize = 0;
+var isolation_root_token: u8 = 0;
+var isolation_roots_registered: bool = false;
 
 comptime {
     std.debug.assert(native_error_labels.len == @intFromEnum(core.error_names.NativeErrorKind.count));
@@ -244,6 +256,141 @@ fn fingerprintSlot(object: *core.Object, index: usize) struct { a: u64, b: u64 }
                 .b = if (slot.opaque_ptr) |pointer| @intFromPtr(pointer) else 0,
             };
         },
+    };
+}
+
+fn traceIsolationRoots(_: *anyopaque, visitor: *core.gc_roots.RootVisitor) core.gc_roots.RootTraceError!void {
+    if (isolation_value_len != 0) try visitor.values(isolation_values[0..isolation_value_len]);
+    for (isolation_ptrs[0..isolation_ptr_len]) |*slot| try visitor.optionalObject(slot);
+    if (isolation_global_prototype_ready) try visitor.optionalObject(&isolation_global_prototype);
+    if (shared_engine_baseline.properties) |entries| {
+        if (shared_engine_baseline.shape_props) |props| {
+            const count = @min(entries.len, props.len);
+            for (entries[0..count], props[0..count]) |*entry, prop| {
+                const flags = core.property.Flags.fromBits(prop.flags);
+                if (flags.deleted) continue;
+                switch (flags.kind) {
+                    .data => try visitor.value(&entry.slot.data),
+                    .accessor => {
+                        try visitor.optionalObject(&entry.slot.accessor.getter);
+                        try visitor.optionalObject(&entry.slot.accessor.setter);
+                    },
+                    .var_ref, .auto_init => {},
+                }
+            }
+        }
+    }
+    if (shared_engine_baseline.var_refs) |refs| {
+        for (refs) |*stored| {
+            if (stored.*) |*state| try visitor.value(&state.value);
+        }
+    }
+}
+
+fn ensureIsolationRoots(rt: *core.JSRuntime) void {
+    if (isolation_roots_registered) return;
+    rt.registerRootProvider(.{
+        .context = @ptrCast(&isolation_root_token),
+        .trace = traceIsolationRoots,
+    }) catch |err| std.debug.panic("registerRootProvider: {s}", .{@errorName(err)});
+    isolation_roots_registered = true;
+}
+
+fn releaseIsolationRoots(rt: *core.JSRuntime) void {
+    if (isolation_roots_registered) {
+        rt.unregisterRootProvider(.{
+            .context = @ptrCast(&isolation_root_token),
+            .trace = traceIsolationRoots,
+        });
+        isolation_roots_registered = false;
+    }
+    if (isolation_values.len != 0) std.heap.page_allocator.free(isolation_values);
+    isolation_values = &.{};
+    isolation_value_len = 0;
+    if (isolation_ptrs.len != 0) std.heap.page_allocator.free(isolation_ptrs);
+    isolation_ptrs = &.{};
+    isolation_ptr_len = 0;
+}
+
+fn pushRoot(comptime T: type, list: *[]T, len: *usize, item: T, empty: T) u32 {
+    if (len.* == list.len) {
+        const grown = std.heap.page_allocator.realloc(list.*, @max(list.len * 2, 64)) catch |err|
+            std.debug.panic("isolation root growth: {s}", .{@errorName(err)});
+        @memset(grown[len.*..], empty);
+        list.* = grown;
+    }
+    list.*[len.*] = item;
+    len.* += 1;
+    return @intCast(len.* - 1);
+}
+
+fn pushIsolationValue(value: core.JSValue) u32 {
+    return pushRoot(core.JSValue, &isolation_values, &isolation_value_len, value, core.JSValue.undefinedValue());
+}
+
+fn pushIsolationPtr(object: ?*core.Object) u32 {
+    return pushRoot(?*core.Object, &isolation_ptrs, &isolation_ptr_len, object, null);
+}
+
+fn installSlotRoots(object: *core.Object, index: usize, base: *IsolationSlot) void {
+    const flags = object.propFlagsAt(index);
+    base.flags = flags.bits();
+    base.value_root = isolation_root_none;
+    base.ptr_a = isolation_root_none;
+    base.ptr_b = isolation_root_none;
+    base.a = 0;
+    base.b = 0;
+    if (flags.deleted) return;
+    switch (flags.kind) {
+        .data => {
+            const value = object.asDataAt(index).?;
+            base.value_root = pushIsolationValue(value);
+            base.a = value.bits;
+        },
+        .accessor => {
+            const accessor = object.asAccessorAt(index).?;
+            base.ptr_a = pushIsolationPtr(accessor.getter);
+            base.ptr_b = pushIsolationPtr(accessor.setter);
+            base.a = if (accessor.getter) |getter| @intFromPtr(getter) else 0;
+            base.b = if (accessor.setter) |setter| @intFromPtr(setter) else 0;
+        },
+        .var_ref => {
+            const cell = object.asVarRefAt(index).?;
+            const value = cell.varRefValue();
+            base.value_root = pushIsolationValue(value);
+            base.a = @intFromPtr(cell);
+            base.b = value.bits;
+        },
+        .auto_init => {
+            const slot = object.propertyEntry(index).*.slot.auto_init;
+            base.a = @intFromEnum(slot.realm_and_id.id());
+            base.b = if (slot.opaque_ptr) |pointer| @intFromPtr(pointer) else 0;
+        },
+    }
+}
+
+const SlotBits = struct { a: u64, b: u64 };
+
+fn rootedBaselineBits(base: *const IsolationSlot) SlotBits {
+    const flags = core.property.Flags.fromBits(base.flags);
+    if (flags.deleted) return .{ .a = 0, .b = 0 };
+    var bits: SlotBits = .{ .a = base.a, .b = base.b };
+    if (base.value_root != isolation_root_none) {
+        const value_bits = isolation_values[base.value_root].bits;
+        if (flags.kind == .var_ref) bits.b = value_bits else bits.a = value_bits;
+    }
+    if (base.ptr_a != isolation_root_none) {
+        bits.a = if (isolation_ptrs[base.ptr_a]) |object| @intFromPtr(object) else 0;
+    }
+    if (base.ptr_b != isolation_root_none) {
+        bits.b = if (isolation_ptrs[base.ptr_b]) |object| @intFromPtr(object) else 0;
+    }
+    return bits;
+}
+
+fn isolationObject(watched: *const IsolationObject) *core.Object {
+    return isolation_ptrs[watched.object_root] orelse {
+        std.debug.panic("shared-test isolation gate: watched object was collected", .{});
     };
 }
 
@@ -311,7 +458,7 @@ fn eachIntrinsic(eng: *TestEngine, visit: IntrinsicVisit) void {
 fn noteObject(object: *core.Object, label: []const u8) void {
     var index: usize = 0;
     while (index < isolation_object_count) : (index += 1) {
-        if (isolation_objects[index].object == object) return;
+        if (isolation_ptrs[isolation_objects[index].object_root] == object) return;
     }
     if (isolation_object_count == isolation_object_cap) {
         std.debug.panic("shared-test isolation gate: prototype table cap {d}", .{isolation_object_cap});
@@ -323,17 +470,12 @@ fn noteObject(object: *core.Object, label: []const u8) void {
     @memcpy(label_buf[0..label_len], label[0..label_len]);
     var slot_index: usize = 0;
     while (slot_index < slot_count) : (slot_index += 1) {
-        const bits = fingerprintSlot(object, slot_index);
-        slots[slot_index] = .{
-            .atom = object.propAtomAt(slot_index),
-            .flags = object.propFlagsAt(slot_index).bits(),
-            .a = bits.a,
-            .b = bits.b,
-        };
+        slots[slot_index] = .{ .atom = object.propAtomAt(slot_index), .flags = 0, .a = 0, .b = 0 };
+        installSlotRoots(object, slot_index, &slots[slot_index]);
     }
     isolation_objects[isolation_object_count] = .{
-        .object = object,
-        .proto = object.getPrototype(),
+        .object_root = pushIsolationPtr(object),
+        .proto_root = pushIsolationPtr(object.getPrototype()),
         .shape_identity = object.shape_ref.identity,
         .prop_count = object.shape_ref.prop_count,
         .slots = slots,
@@ -417,7 +559,7 @@ fn captureIsolationBaseline(eng: *TestEngine) void {
     isolation_objects_ready = true;
 }
 
-fn releaseIsolationBaseline() void {
+fn releaseIsolationBaseline(rt: *core.JSRuntime) void {
     var index: usize = 0;
     while (index < isolation_object_count) : (index += 1) {
         const slots = isolation_objects[index].slots;
@@ -426,6 +568,7 @@ fn releaseIsolationBaseline() void {
     }
     isolation_object_count = 0;
     isolation_objects_ready = false;
+    releaseIsolationRoots(rt);
 }
 
 fn liveHasAtom(object: *core.Object, atom_id: core.atom.Atom) bool {
@@ -468,9 +611,9 @@ fn panicShapeDiff(rt: *core.JSRuntime, object: *core.Object, watched: *const Iso
 }
 
 fn compareIsolationObject(rt: *core.JSRuntime, watched: *IsolationObject) void {
-    const object = watched.object;
+    const object = isolationObject(watched);
     const label = isolationLabel(watched);
-    if (object.getPrototype() != watched.proto) panicPrototype(label);
+    if (object.getPrototype() != isolation_ptrs[watched.proto_root]) panicPrototype(label);
     const live_count: usize = object.shape_ref.prop_count;
     if (live_count != watched.prop_count) panicShapeDiff(rt, object, watched);
 
@@ -484,14 +627,13 @@ fn compareIsolationObject(rt: *core.JSRuntime, watched: *IsolationObject) void {
         const base_flags = core.property.Flags.fromBits(base.flags);
         const live_bits = fingerprintSlot(object, index);
         if (isLegalMaterialization(base_flags, live_flags)) {
-            base.flags = live_flags.bits();
-            base.a = live_bits.a;
-            base.b = live_bits.b;
+            installSlotRoots(object, index, base);
             materialized = true;
             continue;
         }
+        const base_bits = rootedBaselineBits(base);
         if (live_flags.bits() != base.flags or
-            (!live_flags.deleted and (live_bits.a != base.a or live_bits.b != base.b)))
+            (!live_flags.deleted and (live_bits.a != base_bits.a or live_bits.b != base_bits.b)))
         {
             panicChanged(label, rt, live_atom);
         }
@@ -552,6 +694,7 @@ pub fn sharedTestEngine() *TestEngine {
         _ = eng.eval(";") catch |err| std.debug.panic("baseline eval: {s}", .{@errorName(err)});
         clearPendingState(eng);
         publishLazyIntrinsicPrototypes(eng);
+        ensureIsolationRoots(eng.runtime);
         if (eng.context.global) |g| {
             shared_engine_baseline.property_count = g.shape_ref.prop_count;
             shared_engine_baseline.shape_prop_count = g.shape_ref.prop_count;
@@ -586,11 +729,11 @@ pub fn sharedTestEngine() *TestEngine {
             }
         }
         gc.reclaimNow(eng.runtime);
+        captureGlobalPrototype(eng);
+        captureIsolationBaseline(eng);
         shared_engine_baseline.allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
         shared_engine_baseline.allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
         shared_engine_baseline.module_count = eng.context.modules.count();
-        captureGlobalPrototype(eng);
-        captureIsolationBaseline(eng);
         registerSharedEngineProcessTeardown();
     }
     return &shared_engine_storage.?;
@@ -618,13 +761,13 @@ pub fn deinitSharedTestEngine() void {
     // Last `endSharedTest` already restored the baseline; the snapshot itself
     // is now only page-allocator storage (var refs, properties, shape props),
     // so releasing it just frees those arrays before the engine goes away.
-    releaseSharedEngineBaselineSnapshot();
+    releaseSharedEngineBaselineSnapshot(eng.runtime);
     var owned = eng.*;
     shared_engine_storage = null;
     owned.deinit();
 }
 
-fn releaseSharedEngineBaselineSnapshot() void {
+fn releaseSharedEngineBaselineSnapshot(rt: *core.JSRuntime) void {
     if (shared_engine_baseline.var_refs) |var_refs| {
         std.heap.page_allocator.free(var_refs);
         shared_engine_baseline.var_refs = null;
@@ -643,7 +786,7 @@ fn releaseSharedEngineBaselineSnapshot() void {
     shared_engine_baseline.shape_deleted_count = 0;
     isolation_global_prototype = null;
     isolation_global_prototype_ready = false;
-    releaseIsolationBaseline();
+    releaseIsolationBaseline(rt);
 }
 
 pub fn endSharedTest() void {

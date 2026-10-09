@@ -151,14 +151,8 @@ pub noinline fn embedderErrorToValue(ctx: *core.JSContext, err: anyerror) core.J
     return nativeExc();
 }
 
-fn embedderErrorInfo(err: anyerror) struct { name: []const u8, message: []const u8 } {
-    // Engine sentinels carry their standard error type and message; any
-    // other (embedder-defined) error name becomes `Error: <name>`.
-    if (exception_ops.runtimeErrorInfo(err)) |info| return .{ .name = info.name, .message = info.message };
-    return switch (err) {
-        error.EvalError => .{ .name = "EvalError", .message = "" },
-        else => .{ .name = "Error", .message = @errorName(err) },
-    };
+fn embedderErrorInfo(err: anyerror) exception_ops.ErrorInfo {
+    return exception_ops.runtimeErrorInfo(err) orelse exception_ops.unknownErrorInfo(err);
 }
 
 /// What a native body needs from its VM caller without a per-call

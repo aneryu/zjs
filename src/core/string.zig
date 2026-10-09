@@ -1205,12 +1205,11 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
 /// one body comparison through `js_string_memcmp`.
 ///
 /// Flat strings only. qjs's inline OP_CMP_EQ / OP_CMP_STRICT_EQ arms fire on
-/// `JS_TAG_STRING`, and a rope carries the distinct
-/// `JS_TAG_STRING_ROPE`, so ropes never reach `js_string_eq` from the dispatch
-/// loop. Keeping the same restriction here is what lets this stay allocation-,
-/// iterator- and frame-free: `compareStringValues` below must open a 60-slot
-/// `StringValueIterator` pair for the rope case before it can even test the
-/// lengths, which is the cost this bypasses for the flat-flat majority.
+/// `JS_TAG_STRING`, and a rope carries the distinct `JS_TAG_STRING_ROPE`, so
+/// ropes never reach `js_string_eq` from the dispatch loop. That restriction
+/// keeps this allocation-, iterator- and frame-free. Rope equality goes
+/// through `stringValuesEqual`, which compares lengths before opening a
+/// `StringValueIterator` pair; the flat path bypasses that walk.
 pub fn flatStringsEq(a: *const String, b: *const String) bool {
     return flatStringsEqNear(a, b) orelse flatStringsEqMixedWidth(a, b);
 }
@@ -1252,8 +1251,8 @@ fn flatStringsEqMixedWidth(a: *const String, b: *const String) bool {
     return true;
 }
 
-/// Equality, including the length mismatch that ordering still has to walk
-/// far enough to report. Non-strings are not equal.
+/// String equality. Non-strings are unequal. Different lengths return false
+/// before the leaf walk that ordering uses to report the same mismatch.
 pub fn stringValuesEqual(a: JSValue, b: JSValue) bool {
     if (!a.isString() or !b.isString()) return false;
     if (a.same(b)) return true;

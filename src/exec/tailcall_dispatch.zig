@@ -4416,7 +4416,9 @@ fn opCompareEq(comptime opc: u8) Handler {
                     break :blk null;
                 }
                 // qjs js_string_eq: loose and strict agree for two strings; `same`
-                // short-circuits the shared-body case.
+                // short-circuits the shared body. stringValuesEqual repeats
+                // isString and same() on the rope arm. Removing this call grows
+                // the strict framed handlers, so both checks stay.
                 if (lhs.isString() and rhs.isString()) {
                     if (lhs.same(rhs)) break :blk true;
                     // Flat pair is qjs's inline arm (length, identity, one memcmp);

@@ -1542,21 +1542,7 @@ pub fn createModuleAwaitReactionPromise(
     global: *core.Object,
     awaited: core.JSValue,
 ) !core.JSValue {
-    const promise_constructor = try exec.promise_ops.promiseDefaultConstructor(context, global);
-    var awaited_promise = exec.promise_ops.promiseResolveStaticCall(
-        context,
-        output,
-        global,
-        promise_constructor,
-        &.{awaited},
-        null,
-        null,
-    ) catch |err| blk: {
-        // Await step 2 (`? PromiseResolve`) throws into the module body.
-        if (!exec.exception_ops.isCatchableError(context, err)) return err;
-        const reason = try exec.exception_ops.promiseErrorValue(context, global, err);
-        break :blk try core.promise.rejectedWithPrototype(context, reason, exec.promise_ops.promisePrototypeFromGlobal(runtime, global));
-    };
+    var awaited_promise = try awaitPromise(context, output, global, awaited);
     var reaction_promise = core.JSValue.undefinedValue();
     var resolve = core.JSValue.undefinedValue();
     var reject = core.JSValue.undefinedValue();
@@ -2043,7 +2029,7 @@ fn runOneModuleMicrotask(runtime: *core.JSRuntime, output: ?*std.Io.Writer) !job
     return jobs_mod.runCheckpointStep(runtime);
 }
 
-fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool {
+pub fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool {
     const global = try exec.zjs_vm.contextGlobal(context);
     if (try exec.call_runtime.pollHostScheduler(context, output, global)) return true;
     return exec.atomics_ops.runNextAtomicsHostCompletion(context, false);

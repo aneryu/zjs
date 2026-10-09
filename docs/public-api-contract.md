@@ -463,8 +463,12 @@ sentinels and are materialized by the engine. Any other error name the
 engine knows (`exception_ops.runtimeErrorInfo`: `TypeError`, `RangeError`,
 `SyntaxError`, `ReferenceError`, `URIError` and the engine's own names such
 as `NotExtensible` or `InvalidUtf8`) becomes an error of the class and with
-the message the engine uses for it; `EvalError` becomes an `EvalError` with
-an empty message; any other error name becomes `Error: <name>`. If an
+the message the engine uses for it. A Zig error absent from that map,
+including `EvalError`, becomes `Error` whose message is the Zig error name
+(`exception_ops.unknownErrorInfo`). Promise rejection
+(`exception_ops.promiseErrorValue`) and every listed host I/O error except
+`OutOfMemory` (`hostIoErrorInfo`) use that same fallback. `OutOfMemory`
+stays `InternalError: out of memory`. If an
 exception is already pending when a non-sentinel
 error is returned, the pending exception wins. A native function must never
 unwind through the VM in any other way.

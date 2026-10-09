@@ -312,7 +312,7 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: HostEr
         return ctx.takeException();
     }
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
-    const error_info: ErrorInfo = runtimeErrorInfo(err) orelse .{ .name = "Error", .message = "" };
+    const error_info = runtimeErrorInfo(err) orelse unknownErrorInfo(err);
     return createSentinelError(ctx, global, err, error_info) catch |create_err| {
         // Promise jobs must be able to retain an abrupt completion after user
         // code has run. Under a fully exhausted heap, use the same allocation-
@@ -701,6 +701,11 @@ pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
     };
 }
 
+/// Zig error absent from `runtimeErrorInfo`: one `Error` whose message is the Zig name.
+pub fn unknownErrorInfo(err: anyerror) ErrorInfo {
+    return .{ .name = "Error", .message = @errorName(err) };
+}
+
 /// Concrete host-I/O producer surface. Keep this exact rather than accepting
 /// `anyerror`: a Zig stdlib change must make this switch fail to compile until
 /// the JS conversion policy is reviewed.
@@ -741,7 +746,7 @@ fn hostIoErrorInfo(err: HostIoError) ErrorInfo {
         error.Unexpected,
         error.WouldBlock,
         error.WriteFailed,
-        => .{ .name = "Error", .message = @errorName(err) },
+        => unknownErrorInfo(err),
     };
 }
 

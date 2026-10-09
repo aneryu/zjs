@@ -1706,3 +1706,209 @@ test "import bytes module creates a Uint8Array over a plain ArrayBuffer" {
 
     try std.testing.expectEqualStrings("true\ntrue\n3\n65\nfalse false\n97\n", output.buffered());
 }
+
+// ES2025 Await / ExecuteAsyncModule order, also what Node 24 prints.
+// `ctx.eval(.module)` with the loader cleared is `runEvalModule`; with a
+// loader, and `evalModuleGraph`, it is the graph scheduler. Both must
+// print the same order. A dependency chain needs the loader.
+test "bare module eval and the module graph share top-level await order" {
+    const cases = [_]struct { name: []const u8, source: []const u8, expect: []const u8 }{
+        .{
+            .name = "tla-single.mjs",
+            .source =
+            \\globalThis.print ??= console.log;
+            \\const log = [];
+            \\const note = (x) => log.push(x);
+            \\queueMicrotask(() => note("q1"));
+            \\Promise.resolve().then(() => note("p1"));
+            \\note("sync");
+            \\await 0;
+            \\note("after0");
+            \\queueMicrotask(() => note("q2"));
+            \\Promise.resolve().then(() => note("p2"));
+            \\await Promise.resolve("R");
+            \\note("afterR");
+            \\queueMicrotask(() => note("q3"));
+            \\Promise.resolve().then(() => note("p3"));
+            \\await 0;
+            \\print(log.join(","));
+            ,
+            .expect = "sync,q1,p1,after0,q2,p2,afterR,q3,p3\n",
+        },
+        .{
+            .name = "tla-fulfilled.mjs",
+            .source =
+            \\globalThis.print ??= console.log;
+            \\const log = [];
+            \\const p = Promise.resolve("F");
+            \\p.then(() => log.push("p-then"));
+            \\queueMicrotask(() => log.push("q"));
+            \\const v = await p;
+            \\log.push("after:" + v);
+            \\queueMicrotask(() => log.push("q-after"));
+            \\Promise.resolve().then(() => log.push("p-after"));
+            \\await 0;
+            \\print(log.join(","));
+            ,
+            .expect = "p-then,q,after:F,q-after,p-after\n",
+        },
+        .{
+            .name = "tla-pending.mjs",
+            .source =
+            \\globalThis.print ??= console.log;
+            \\const log = [];
+            \\let resolve;
+            \\const p = new Promise((r) => {
+            \\  resolve = r;
+            \\});
+            \\p.then(() => log.push("p-then"));
+            \\queueMicrotask(() => log.push("q-before"));
+            \\Promise.resolve().then(() => {
+            \\  log.push("resolver");
+            \\  queueMicrotask(() => log.push("q-from-resolver"));
+            \\  p.then(() => log.push("p-then-late"));
+            \\  resolve("L");
+            \\});
+            \\const v = await p;
+            \\log.push("after:" + v);
+            \\queueMicrotask(() => log.push("q-after"));
+            \\Promise.resolve().then(() => log.push("p-after"));
+            \\await 0;
+            \\print(log.join(","));
+            ,
+            .expect = "q-before,resolver,q-from-resolver,p-then,after:L,p-then-late,q-after,p-after\n",
+        },
+        .{
+            .name = "tla-thenable.mjs",
+            .source =
+            \\globalThis.print ??= console.log;
+            \\const log = [];
+            \\queueMicrotask(() => log.push("q0"));
+            \\const thenable = {
+            \\  then(resolve) {
+            \\    log.push("then-call");
+            \\    Promise.resolve().then(() => {
+            \\      log.push("then-job");
+            \\      resolve("T");
+            \\    });
+            \\  },
+            \\};
+            \\Promise.resolve().then(() => log.push("p0"));
+            \\const v = await thenable;
+            \\log.push("after:" + v);
+            \\queueMicrotask(() => log.push("q1"));
+            \\Promise.resolve().then(() => log.push("p1"));
+            \\await 0;
+            \\print(log.join(","));
+            ,
+            .expect = "q0,p0,then-call,then-job,after:T,q1,p1\n",
+        },
+        .{
+            .name = "tla-thenable-turn.mjs",
+            .source =
+            \\globalThis.print ??= console.log;
+            \\const log = [];
+            \\queueMicrotask(() => log.push("q0"));
+            \\const thenable = {
+            \\  then(resolve) {
+            \\    log.push("then-sync");
+            \\    queueMicrotask(() => log.push("q-in-then"));
+            \\    Promise.resolve().then(() => log.push("p-in-then"));
+            \\    resolve("S");
+            \\    log.push("then-after-resolve");
+            \\  },
+            \\};
+            \\Promise.resolve().then(() => log.push("p0"));
+            \\const v = await thenable;
+            \\log.push("after:" + v);
+            \\queueMicrotask(() => log.push("q-after"));
+            \\await 0;
+            \\print(log.join(","));
+            ,
+            .expect = "q0,p0,then-sync,then-after-resolve,q-in-then,p-in-then,after:S,q-after\n",
+        },
+    };
+    for (cases) |case| {
+        try expectBareModuleOrder(case.name, case.source, case.expect);
+        try expectGraphModuleOrder(case.name, case.source, case.expect);
+    }
+
+    const dependency =
+        \\globalThis.__log = globalThis.__log || [];
+        \\const note = (x) => globalThis.__log.push(x);
+        \\note("b-sync");
+        \\queueMicrotask(() => note("b-q"));
+        \\Promise.resolve().then(() => note("b-p"));
+        \\await 0;
+        \\note("b-after");
+        \\queueMicrotask(() => note("b-q-end"));
+        \\Promise.resolve().then(() => note("b-p-end"));
+        \\export const v = 1;
+    ;
+    const entry =
+        \\globalThis.print ??= console.log;
+        \\import { v } from "./b.mjs";
+        \\const note = (x) => globalThis.__log.push(x);
+        \\note("a-sync:" + v);
+        \\queueMicrotask(() => note("a-q"));
+        \\Promise.resolve().then(() => note("a-p"));
+        \\await 0;
+        \\note("a-after");
+        \\await 0;
+        \\print(globalThis.__log.join(","));
+    ;
+    try expectBareModuleRejected("tla-dep-a.mjs", entry);
+    var modules = helpers.MemoryModules{
+        .modules = &.{
+            .{ .specifier = "./b.mjs", .path = "b.mjs", .source = dependency },
+        },
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var buf: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buf);
+    _ = try js.evalModuleGraphInMemory(entry, &output, "tla-dep-a.mjs", &modules, std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "b-sync,b-q,b-p,b-after,b-q-end,b-p-end,a-sync:1,a-q,a-p,a-after\n",
+        output.buffered(),
+    );
+}
+
+fn expectBareModuleOrder(label: []const u8, source: []const u8, expect: []const u8) !void {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var buf: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buf);
+    _ = try evalBareModule(&js, label, source, &output);
+    try std.testing.expectEqualStrings(expect, output.buffered());
+}
+
+fn expectGraphModuleOrder(label: []const u8, source: []const u8, expect: []const u8) !void {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var buf: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buf);
+    _ = try js.evalModuleGraph(source, &output, label, std.testing.io, std.testing.allocator, 4096);
+    try std.testing.expectEqualStrings(expect, output.buffered());
+}
+
+fn expectBareModuleRejected(label: []const u8, source: []const u8) !void {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var buf: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buf);
+    try std.testing.expectError(error.JSException, evalBareModule(&js, label, source, &output));
+}
+
+/// `evalWithOptions` installs test262 globals, and that install puts the file
+/// loader back. Install first, then clear the loader so `.module` is
+/// `runEvalModule` rather than `evalModuleGraph`.
+fn evalBareModule(js: *helpers.TestEngine, label: []const u8, source: []const u8, output: *std.Io.Writer) !core.JSValue {
+    try js.ensureTest262GlobalsInstalled();
+    js.context.module_source_loader = null;
+    return js.evalWithOptions(source, .{
+        .mode = .module,
+        .filename = label,
+        .output = output,
+    });
+}

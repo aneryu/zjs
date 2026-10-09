@@ -131,12 +131,13 @@ What the example relies on:
   destroy or store it), `c.output()` the host writer of the current
   invocation.
 - Returning a Zig error becomes a catchable JS exception: `TypeError`,
-  `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`
-  map to that class (`EvalError` with an empty message); `error.JSException`
+  `RangeError`, `SyntaxError`, `ReferenceError`, and `URIError`
+  map to that class; `error.JSException`
   means the function already threw (`c.throwTypeError("...")` /
   `c.throwError(name, message)` install the exception and return it);
   `OutOfMemory`, `Interrupted`, `Timeout`, `StackOverflow`, `ProcessExit`
-  and `UnhandledPromiseRejection` are engine sentinels; any other error name
+  and `UnhandledPromiseRejection` are engine sentinels; any other error name,
+  including `EvalError`,
   becomes `Error: <name>` (see the
   [public API contract](public-api-contract.md) for the full mapping). A function that returns plain `Value` cannot fail.
 - `defineFunction` installs the function on the global as a writable,
