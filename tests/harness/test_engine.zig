@@ -134,6 +134,8 @@ pub const TestEngine = struct {
 
     pub fn deinit(self: *TestEngine) void {
         var wrapper = zjs.borrowContext(self.context);
+        // Best-effort drain. A finished test can still have a job that fails
+        // (heap-limit OutOfMemory, for one); teardown must not crash on it.
         wrapper.runJobs(null) catch {};
         self.event_loop.deinit();
         self.allocator.destroy(self.event_loop);
@@ -144,15 +146,11 @@ pub const TestEngine = struct {
     }
 
     pub fn eval(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValue {
-        return self.evalMode(source_text, .script);
+        return self.evalWithOptions(source_text, .{ .mode = .script });
     }
 
     pub fn evalModule(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValue {
-        return self.evalMode(source_text, .module);
-    }
-
-    pub fn evalMode(self: *TestEngine, source_text: []const u8, mode: core.EvalMode) RuntimeError!core.JSValue {
-        return self.evalWithOptions(source_text, .{ .mode = mode });
+        return self.evalWithOptions(source_text, .{ .mode = .module });
     }
 
     pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
@@ -187,18 +185,6 @@ pub const TestEngine = struct {
 
     pub fn evalWithOutput(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.JSValue {
         return self.evalWithOptions(source_text, .{ .output = output });
-    }
-
-    pub fn evalFileWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8) RuntimeError!core.JSValue {
-        return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename });
-    }
-
-    pub fn evalFileWithOutputModeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, strict: bool) RuntimeError!core.JSValue {
-        return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename, .parse_strict = strict, .runtime_strict = strict });
-    }
-
-    pub fn evalFileWithOutputModeRuntimeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, runtime_strict: bool) RuntimeError!core.JSValue {
-        return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename, .runtime_strict = runtime_strict });
     }
 
     /// Evaluate a module graph whose sources come from `modules` instead of

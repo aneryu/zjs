@@ -1799,7 +1799,36 @@ fn iteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, 
     try object.setProperty(rt, core.Atom.taggedInt(@intCast(index)), rooted_value);
 }
 
-fn iteratorZipCloseWithCompletion(
+/// Close-phase engine failures outrank the completion being closed.
+/// `OutOfMemory` (the error or `exceptionIsOutOfMemory`) and an uncatchable
+/// interruption are not JavaScript throw completions, so IteratorClose must
+/// not discard them. Every other `return()` failure follows ES §7.4.11:
+/// a throw completion keeps the original error; a normal completion keeps
+/// the close failure.
+fn noteCloseFailure(completion: *IteratorCloseCompletion, ctx: *core.JSContext, err: HostError) void {
+    if (ctx.exceptionIsUncatchable()) {
+        // Leave the interruption pending. `restore` will not replace it.
+        completion.err = err;
+        return;
+    }
+    if (err == error.OutOfMemory or ctx.exceptionIsOutOfMemory()) {
+        completion.capture(ctx, error.OutOfMemory);
+        completion.out_of_memory = true;
+        return;
+    }
+    if (completion.err == null) {
+        completion.capture(ctx, err);
+    } else if (ctx.hasException()) {
+        ctx.clearException();
+    }
+}
+
+fn closeIntroducedOutOfMemory(completion: *const IteratorCloseCompletion, original_oom: bool) bool {
+    const err = completion.err orelse return false;
+    return !original_oom and err == error.OutOfMemory;
+}
+
+fn iteratorCloseIntoCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1809,19 +1838,7 @@ fn iteratorZipCloseWithCompletion(
     caller_frame: ?*frame_mod.Frame,
 ) void {
     iteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame) catch |err| {
-        if (ctx.exceptionIsUncatchable()) {
-            // Keep the interruption pending; `restore` leaves it alone.
-            completion.err = err;
-            return;
-        }
-        // Leave the context clean: the next iterator's `return()` must not
-        // run with this exception pending. Callers restore the completion
-        // once every iterator is closed.
-        if (completion.err == null) {
-            completion.capture(ctx, err);
-        } else if (ctx.hasException()) {
-            ctx.clearException();
-        }
+        noteCloseFailure(completion, ctx, err);
     };
 }
 
@@ -1848,7 +1865,7 @@ pub fn iteratorZipCloseAllWithCompletion(
         values[1] = iteratorZipGetIndex(objectFromValue(values[0]).?, index);
         try iteratorZipSetIndex(ctx.runtime, objectFromValue(values[0]).?, index, core.JSValue.undefinedValue());
         if (values[1].is(.undefined_value) or values[1].is(.null_value)) continue;
-        iteratorZipCloseWithCompletion(ctx, output, global, completion, values[1], caller_function, caller_frame);
+        iteratorCloseIntoCompletion(ctx, output, global, completion, values[1], caller_function, caller_frame);
     }
 }
 
@@ -1928,7 +1945,7 @@ pub fn iteratorZipCloseAllAndPropagate(
         return close_err;
     };
     if (extra_iterator != null) {
-        iteratorZipCloseWithCompletion(ctx, output, global, &completion, values[1], caller_function, caller_frame);
+        iteratorCloseIntoCompletion(ctx, output, global, &completion, values[1], caller_function, caller_frame);
     }
     completion.restore(ctx);
     return completion.err orelse err;
@@ -1958,7 +1975,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     var completion = IteratorCloseCompletion.initThrow(ctx, err);
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
-    iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
+    iteratorCloseIntoCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
     completion.restore(ctx);
     return completion.err orelse err;
 }
@@ -1976,11 +1993,7 @@ noinline fn iteratorHelperCloseWithCompletionAndPropagate(
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame) catch |close_err| {
-        // IteratorClose with a throw completion (§7.4.11 step 5): the
-        // original error wins over anything return() throws or returns;
-        // only an uncatchable interruption or OOM overrides it.
-        if (close_err == error.OutOfMemory or ctx.exceptionIsUncatchable()) return close_err;
-        if (ctx.hasException()) ctx.clearException();
+        noteCloseFailure(&completion, ctx, close_err);
     };
     completion.restore(ctx);
     return completion.err orelse err;
@@ -2713,8 +2726,7 @@ pub fn iteratorHelperNext(
     switch (kind) {
         .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame),
         .concat => return iteratorConcatHelperNext(ctx, output, global, &values, caller_function, caller_frame),
-        .take => return iteratorTakeHelperNext(ctx, output, global, &values, iterator, caller_function, caller_frame),
-        .drop => return iteratorDropHelperNext(ctx, output, global, &values, iterator, caller_function, caller_frame),
+        .take, .drop => return iteratorLimitHelperNext(ctx, output, global, &values, iterator, kind, caller_function, caller_frame),
         .map, .filter, .flatMap => return iteratorMapHelperNext(ctx, output, global, &values, iterator, kind, caller_function, caller_frame),
     }
 }
@@ -2728,11 +2740,8 @@ noinline fn iteratorConcatHelperNext(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     while (true) {
-        if (objectFromValue(values[0]).?.iteratorData()) |inner_iterator| {
-            const inner_next = objectFromValue(values[0]).?.iteratorInnerNext() orelse return error.TypeError;
-            const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
-            if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
-            iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
+        if (try iteratorHelperInnerYield(ctx, output, global, values, caller_function, caller_frame)) |value| {
+            return try createIteratorResult(ctx.runtime, global, value, false);
         }
 
         const records = objectFromValue(objectFromValue(values[0]).?.iteratorTargetSlot().* orelse return error.TypeError) orelse return error.TypeError;
@@ -2749,57 +2758,70 @@ noinline fn iteratorConcatHelperNext(
     }
 }
 
-noinline fn iteratorTakeHelperNext(
+/// `take` closes when the limit is already 0, then decrements and yields one
+/// value. `drop` skips with a done-only step and clears (does not close) if a
+/// skipped step is done. The yielding step is the same.
+noinline fn iteratorLimitHelperNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     values: *[3]core.JSValue,
     iterator: core.JSValue,
+    kind: IteratorHelperKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const next_method = objectFromValue(values[0]).?.iteratorNext() orelse return error.TypeError;
+    const helper = objectFromValue(values[0]).?;
+    const next_method = helper.iteratorNext() orelse return error.TypeError;
     var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
     next_call.activateRoots();
     defer next_call.deinit();
-    if ((objectFromValue(values[0]).?.iteratorIndexSlot().*) == 0) {
-        try iteratorHelperClose(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame);
-        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    switch (kind) {
+        .take => {
+            if (helper.iteratorIndexSlot().* == 0) {
+                try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+            }
+            helper.iteratorIndexSlot().* -= 1;
+        },
+        .drop => {
+            while (helper.iteratorIndexSlot().* > 0) : (helper.iteratorIndexSlot().* -= 1) {
+                if (try iteratorStepDoneWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame)) {
+                    iteratorHelperClear(ctx.runtime, helper);
+                    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                }
+            }
+        },
+        else => unreachable,
     }
-    objectFromValue(values[0]).?.iteratorIndexSlot().* -= 1;
     const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
     if (step.done) {
-        iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
+        iteratorHelperClear(ctx.runtime, helper);
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     return try createIteratorResult(ctx.runtime, global, step.value, false);
 }
 
-noinline fn iteratorDropHelperNext(
+/// Value yielded by the helper's inner iterator, or null when there is no
+/// inner iterator or it just finished. `createIteratorResult` stays with the
+/// caller so a result-allocation failure is not an inner-step failure.
+fn iteratorHelperInnerYield(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     values: *[3]core.JSValue,
-    iterator: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const next_method = objectFromValue(values[0]).?.iteratorNext() orelse return error.TypeError;
-    var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
-    next_call.activateRoots();
-    defer next_call.deinit();
-    while ((objectFromValue(values[0]).?.iteratorIndexSlot().*) > 0) : (objectFromValue(values[0]).?.iteratorIndexSlot().* -= 1) {
-        if (try iteratorStepDoneWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame)) {
-            iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
-            return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-        }
+) !?core.JSValue {
+    const helper = objectFromValue(values[0]).?;
+    const inner_iterator = helper.iteratorData() orelse return null;
+    const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
+    const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
+    if (inner_step.done) {
+        iteratorHelperClearInner(ctx.runtime, helper);
+        return null;
     }
-    const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
-    if (step.done) {
-        iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
-        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    }
-    return try createIteratorResult(ctx.runtime, global, step.value, false);
+    return inner_step.value;
 }
 
 noinline fn iteratorMapHelperNext(
@@ -2830,16 +2852,15 @@ noinline fn iteratorMapHelperNext(
     defer callback_call.deinit();
     while (true) {
         if (kind == .flatMap) {
-            if (objectFromValue(values[0]).?.iteratorData()) |inner_iterator| {
-                const inner_next = objectFromValue(values[0]).?.iteratorInnerNext() orelse return error.TypeError;
-                // IteratorStepValue(inner) is IfAbruptCloseIterator(_, iterated).
-                const inner_step = iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame) catch |err| {
-                    iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
-                    return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, objectFromValue(values[0]).?, err, caller_function, caller_frame);
-                };
-                if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
+            // A missing inner `next` is not an inner-step failure: it returns
+            // before the close. IteratorStepValue(inner) is IfAbruptCloseIterator.
+            const helper = objectFromValue(values[0]).?;
+            if (helper.iteratorData() != null and helper.iteratorInnerNext() == null) return error.TypeError;
+            const yielded = iteratorHelperInnerYield(ctx, output, global, values, caller_function, caller_frame) catch |err| {
                 iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
-            }
+                return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, objectFromValue(values[0]).?, err, caller_function, caller_frame);
+            };
+            if (yielded) |value| return try createIteratorResult(ctx.runtime, global, value, false);
         }
         const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         if (step.done) {
@@ -2864,6 +2885,68 @@ noinline fn iteratorMapHelperNext(
     }
 }
 
+const IteratorFlattenableMode = enum {
+    /// flatMap: non-objects and a non-callable @@iterator are NotIterable; a
+    /// non-object call result is InvalidIteratorResult.
+    reject_primitives,
+    /// Iterator.from: strings call @@iterator. Other non-objects are
+    /// NotAnObject; a non-callable method is NotAFunction; a non-object call
+    /// result is NotAnObject.
+    iterate_strings,
+};
+
+fn getIteratorFlattenable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: core.JSValue,
+    mode: IteratorFlattenableMode,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (mode == .reject_primitives and objectFromValue(source) == null) return error.NotIterable;
+
+    // Scalar `rootValues` frames are compiled out of production builds. A
+    // moving collection inside the @@iterator getter must update these slots,
+    // so this is a real ValueRootFrame (exact-roots runs host_quiescent).
+    var values = [_]core.JSValue{ source, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    // Iterator.from's lookup passes a null caller (getIteratorMethod). flatMap
+    // forwards the helper's caller into the @@iterator get.
+    values[1] = if (mode == .iterate_strings)
+        try call_runtime.getIteratorMethod(ctx, output, global, values[0])
+    else
+        try object_ops.getValueProperty(ctx, output, global, values[0], core.atom.ids.Symbol_iterator, caller_function, caller_frame);
+
+    if (mode == .iterate_strings and values[0].isString()) {
+        return try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
+    }
+    if (mode == .iterate_strings and objectFromValue(values[0]) == null) return error.NotAnObject;
+    if (values[1].is(.undefined_value) or values[1].is(.null_value)) return values[0];
+    if (!call_runtime.isCallableValue(values[1])) {
+        return if (mode == .reject_primitives) error.NotIterable else error.NotAFunction;
+    }
+
+    // flatMap already called through a CallSite rooted at its address.
+    // Iterator.from called through callValueOrBytecodeRoot. Keep both.
+    values[2] = if (mode == .reject_primitives) blk: {
+        var iterator_call = CallSite.initInternal(ctx, output, global, values[0], values[1], caller_function, caller_frame);
+        iterator_call.activateRoots();
+        defer iterator_call.deinit();
+        break :blk try iterator_call.call(&.{});
+    } else try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
+    if (objectFromValue(values[2]) == null) {
+        return if (mode == .reject_primitives) error.InvalidIteratorResult else error.NotAnObject;
+    }
+    return values[2];
+}
+
 noinline fn iteratorHelperSetInner(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2873,28 +2956,8 @@ noinline fn iteratorHelperSetInner(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    _ = objectFromValue(mapped) orelse return error.NotIterable;
-    var values = [_]core.JSValue{ helper.value(), mapped, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
-    var slots: []core.JSValue = &values;
-    const borrowed = [_]core.JSValue{global.value()};
-    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-    const symbol_key = core.atom.ids.Symbol_iterator;
-    values[2] = try object_ops.getValueProperty(ctx, output, global, values[1], symbol_key, caller_function, caller_frame);
-    values[3] = if (values[2].is(.undefined_value) or values[2].is(.null_value))
-        values[1]
-    else blk: {
-        if (!call_runtime.isCallableValue(values[2])) return error.NotIterable;
-        var iterator_call = CallSite.initInternal(ctx, output, global, values[1], values[2], caller_function, caller_frame);
-        iterator_call.activateRoots();
-        defer iterator_call.deinit();
-        const value = try iterator_call.call(&.{});
-        _ = objectFromValue(value) orelse return error.InvalidIteratorResult;
-        break :blk value;
-    };
-    try iteratorHelperSetInnerFromIterator(ctx, output, global, objectFromValue(values[0]).?, values[3], caller_function, caller_frame);
+    const iterator = try getIteratorFlattenable(ctx, output, global, mapped, .reject_primitives, caller_function, caller_frame);
+    try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, iterator, caller_function, caller_frame);
 }
 
 fn iteratorHelperSetInnerFromIterator(
@@ -2942,7 +3005,7 @@ pub noinline fn iteratorHelperReturn(
     }
     if (objectFromValue(values[0]).?.generatorExecuting()) return error.GeneratorRunning;
     if (helperState(objectFromValue(values[0]).?) == .fresh) {
-        // §27.1.2.1 step 4: a helper that never started completes BEFORE its
+        // §27.1.2.1.2: a helper that never started completes BEFORE its
         // underlying iterator closes, so a re-entrant next()/return() from
         // that close sees a finished helper. concat has opened no iterator yet.
         const helper_object = objectFromValue(values[0]).?;
@@ -3236,36 +3299,10 @@ fn iteratorFromSourceForIteratorFrom(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
 
-    // Iterator.from is two steps, in this order (ES Iterator.from):
-    //   1. GetIteratorFlattenable(O, iterate-string-primitives) — resolve the
-    //      source to an iterator, through @@iterator when it has one.
-    //   2. OrdinaryHasInstance(%Iterator%, the RESOLVED iterator) — wrap
-    //      unless the resolved iterator is already an %Iterator%.
-    //
-    // Both parts used to be wrong here: the instance test ran against the
-    // SOURCE rather than the resolved iterator, and only the branch where the
-    // source had no @@iterator could produce a wrapper. So a class that is
-    // iterable, returns itself from @@iterator, and is not an %Iterator% —
-    // the exact shape of test262 sm/Iterator/from/
-    // return-wrapper-if-not-iterator-instance — came back unwrapped, and none
-    // of the iterator helpers were reachable on it.
-    values[2] = blk: {
-        values[1] = try call_runtime.getIteratorMethod(ctx, output, global, values[0]);
-        if (values[0].isString()) {
-            break :blk try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
-        }
-        const source_object = object_ops.objectFromValue(values[0]) orelse return error.NotAnObject;
-        if (values[1].is(.undefined_value) or values[1].is(.null_value)) {
-            break :blk source_object.value();
-        }
-        if (!call_runtime.isCallableValue(values[1])) return error.NotAFunction;
-        const iterator = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
-        _ = object_ops.objectFromValue(iterator) orelse return error.NotAnObject;
-        break :blk iterator;
-    };
-
-    // GetIteratorFlattenable ends with GetIteratorDirect, so `next` is read
-    // before the %Iterator% instance check.
+    // ES Iterator.from: GetIteratorFlattenable(source, iterate-string-primitives),
+    // then GetIteratorDirect (the `next` read below), then
+    // OrdinaryHasInstance(%Iterator%, the resolved iterator).
+    values[2] = try getIteratorFlattenable(ctx, output, global, values[0], .iterate_strings, caller_function, caller_frame);
     values[3] = try object_ops.getValueProperty(ctx, output, global, values[2], core.atom.ids.next, caller_function, caller_frame);
     const wrap = !try object_ops.iteratorIsOnIteratorPrototypeChain(ctx, output, global, values[2], caller_function, caller_frame);
     return .{ .iterator = values[2], .next_method = values[3], .wrap = wrap };
@@ -3351,42 +3388,75 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: ?*core.Object,
 }
 
 /// IteratorClose (ES §7.4.11) for a THROW completion: the pending exception
-/// (if any) survives, and every failure of `return()` is discarded — except
-/// an interruption raised inside it, which stays pending and is returned so
-/// the caller unwinds instead of throwing something catchable over it.
+/// survives, and a JavaScript failure of `return()` is discarded. An
+/// uncatchable interruption or a close-phase `OutOfMemory` is returned
+/// instead, so the caller unwinds with that engine failure.
 pub fn iteratorCloseForThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-) error{Interrupted}!void {
+) error{ Interrupted, OutOfMemory }!void {
     if (ctx.exceptionIsUncatchable()) return;
-    const globals = [_]core.JSValue{global.value()};
-    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
-    const live: []core.JSValue = &values;
-    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .mutable = &live } };
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-    const had_exception = ctx.hasException();
-    const was_out_of_memory = ctx.exceptionIsOutOfMemory();
-    if (had_exception) values[2] = ctx.takeException();
-    callReturnIgnoringErrors(ctx, output, global, &values);
+    const original_oom = ctx.exceptionIsOutOfMemory();
+    var completion = IteratorCloseCompletion.initThrow(ctx, if (original_oom) error.OutOfMemory else error.JSException);
+    completion.activateRoots(ctx.runtime);
+    defer completion.deinit(ctx.runtime);
+    iteratorCloseIntoCompletion(ctx, output, global, &completion, iterator_value, null, null);
     if (ctx.exceptionIsUncatchable()) return error.Interrupted;
-    if (ctx.hasException()) ctx.clearException();
-    if (had_exception) {
-        _ = ctx.throwValue(values[2]);
-        if (was_out_of_memory) ctx.markExceptionOutOfMemory();
+    if (closeIntroducedOutOfMemory(&completion, original_oom)) {
+        completion.restore(ctx);
+        return error.OutOfMemory;
     }
+    completion.restore(ctx);
 }
 
-/// `values[0].return()` with every failure discarded: the incoming throw
-/// completion wins over GetMethod/Call failures (§7.4.11 step 5).
-fn callReturnIgnoringErrors(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, values: *[3]core.JSValue) void {
-    values[1] = object_ops.getValueProperty(ctx, output, global, values[0], core.atom.ids.return_, null, null) catch return;
-    if (values[1].is(.undefined_value) or values[1].is(.null_value)) return;
-    if (!call_runtime.isCallableValue(values[1])) return;
-    _ = call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, null, null) catch return;
+test "for-of throw completion keeps the original error when return throws" {
+    const eval_entry = @import("eval_entry.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const value = try eval_entry.eval(ctx,
+        \\let thrown = "none";
+        \\let broken = "none";
+        \\const it = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: 1, done: false }; },
+        \\  return() { throw new Error("close"); },
+        \\};
+        \\try { for (const _ of it) throw new Error("body"); }
+        \\catch (e) { thrown = e.message; }
+        \\try { for (const _ of it) break; }
+        \\catch (e) { broken = e.message; }
+        \\thrown + "|" + broken
+    , .{});
+    var text = std.ArrayList(u8).empty;
+    defer text.deinit(rt.nativeAllocator());
+    try value_ops.appendRawString(rt, &text, value);
+    try std.testing.expectEqualStrings("body|close", text.items);
+}
+
+test "iterator close OOM overrides a pending throw completion" {
+    const Probe = struct {
+        fn thunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, _: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
+            return @import("builtin_dispatch.zig").embedderErrorToValue(ctx, error.OutOfMemory);
+        }
+    };
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const global = try @import("zjs_vm.zig").contextGlobal(ctx);
+    const iterator = try core.Object.createPlainObject(rt, null);
+    const method = try core.function.nativeFunction(ctx, "oomReturn", 0);
+    const entry = try rt.allocNativeEntry(.{ .target = core.NativeEntry.code(&Probe.thunk), .kind = .managed, .state = null });
+    objectFromValue(method).?.installNativeEntry(entry);
+    try iterator.defineOwnProperty(rt, core.atom.ids.return_, core.Descriptor.data(method, .all));
+    try std.testing.expectError(error.TypeError, exception_ops.throwTypeErrorMessage(ctx, global, "body"));
+    const err = iteratorCloseWithCompletionAndPropagate(ctx, null, global, iterator.value(), error.JSException, null, null);
+    try std.testing.expectEqual(error.OutOfMemory, err);
+    try std.testing.expect(ctx.exceptionIsOutOfMemory());
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {
@@ -3930,21 +4000,13 @@ pub fn closeStackTopForOfIteratorForPendingError(
     // InternalError here: that would clear its uncatchable execution flag and
     // allow an outer catch/finally to consume it.
     if (ctx.exceptionIsUncatchable()) return;
-    // The pending exception is taken and re-thrown unchanged below, so its
-    // category has to survive the round trip: `takeException` and `throwValue`
-    // both reset the exception flags. Uncatchability dodges this by returning
-    // above; out-of-memory cannot (the iterators still have to be closed), so
-    // read the flag here and restore it with the value. Without this an
-    // uncaught OOM inside a for-of body reaches the embedder as a plain
-    // `error.JSException`.
-    const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
-    const had_exception = ctx.hasException();
-    // Off the runtime's exception slot, the value is held across user
-    // `return()` calls: root it like `iteratorCloseForThrow` does.
-    var pending_exception = if (had_exception) ctx.takeException() else core.JSValue.undefinedValue();
-    var pending_roots = core.runtime.rootValues(.{&pending_exception});
-    pending_roots.activate(ctx.runtime);
-    defer pending_roots.deactivate(ctx.runtime);
+    // The completion roots the pending exception across every `return()`.
+    // A close-phase OOM or uncatchable interruption replaces it; other
+    // close failures are discarded and the walk continues.
+    const original_oom = ctx.exceptionIsOutOfMemory();
+    var completion = IteratorCloseCompletion.initThrow(ctx, if (original_oom) error.OutOfMemory else error.JSException);
+    completion.activateRoots(ctx.runtime);
+    defer completion.deinit(ctx.runtime);
     var before = stack.len();
     while (findTopClosableForOfRecordIndexBefore(stack, before)) |record_index| {
         // Transfer the record's iterator ownership out before invoking user
@@ -3953,18 +4015,15 @@ pub fn closeStackTopForOfIteratorForPendingError(
         // again for the same abrupt completion.
         const iterator_value = stack.values[record_index];
         stack.values[record_index] = core.JSValue.undefinedValue();
-        iteratorClose(ctx, output, global, iterator_value, null, null) catch |err| {
-            // A close failure is discarded (the pending throw wins) unless it
-            // is an interruption, which must keep unwinding uncaught.
-            if (ctx.exceptionIsUncatchable()) return err;
-        };
-        if (ctx.hasException()) ctx.clearException();
+        iteratorCloseIntoCompletion(ctx, output, global, &completion, iterator_value, null, null);
+        if (ctx.exceptionIsUncatchable()) return completion.err orelse error.Interrupted;
+        if (closeIntroducedOutOfMemory(&completion, original_oom)) {
+            completion.restore(ctx);
+            return error.OutOfMemory;
+        }
         before = record_index;
     }
-    if (had_exception) {
-        _ = ctx.throwValue(pending_exception);
-        if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
-    }
+    completion.restore(ctx);
 }
 
 /// Index of the highest for-of record lying entirely below `before` with no

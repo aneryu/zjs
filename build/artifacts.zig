@@ -45,7 +45,7 @@ fn addCli(
     root_source: []const u8,
     engine: *std.Build.Module,
     host: ?*std.Build.Module,
-    hot_layout: bool,
+    layout: enum { default, hot },
 ) Cli {
     const b = ctx.b;
     const exe = b.addExecutable(.{
@@ -60,7 +60,7 @@ fn addCli(
     });
     config.forceLlvmBackendOnDebug(exe);
     if (host) |mod| exe.root_module.addImport("zjs_host", mod);
-    if (hot_layout) applyHotLayout(b, ctx.target, exe);
+    if (layout == .hot) applyHotLayout(b, ctx.target, exe);
     return .{ .exe = exe, .install = b.addInstallArtifact(exe, .{}) };
 }
 
@@ -92,13 +92,13 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
 
     const engine = addEngine(ctx, ctx.engine_options, omit_frames);
     const host = config.addHost(ctx, engine);
-    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", engine, host, true);
+    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", engine, host, .hot);
     addInstallStep(b, "zjs", "Build and install zjs (follows -Doptimize; default Debug)", zjs.install);
     b.getInstallStep().dependOn(&zjs.install.step);
 
     // Second install name so a later `-Doptimize=ReleaseSmall` (or similar)
     // does not overwrite an already-installed `zjs` from a previous invocation.
-    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", engine, host, true);
+    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", engine, host, .hot);
     addInstallStep(b, "zjs-size", "Build zjs-size: same engine as zjs under a second install name (follows -Doptimize)", zjs_size.install);
 
     // Same engine with per-opcode dispatch scopes compiled in.
@@ -107,13 +107,13 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     profile_engine_inputs.enable_opcode_profile = true;
     const profile_engine_options = config.addEngineOptions(b, profile_engine_inputs);
     const profile_engine = addEngine(ctx, profile_engine_options, omit_frames);
-    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", profile_engine, config.addHost(ctx, profile_engine), true);
+    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", profile_engine, config.addHost(ctx, profile_engine), .hot);
     addInstallStep(b, "zjs-profile", "Build and install zjs with per-opcode dispatch scopes (follows -Doptimize)", zjs_profile.install);
 
-    const allocator_bench = addCli(ctx, "runtime-allocator-bench", "tools/runtime/allocator_bench.zig", engine, null, false);
+    const allocator_bench = addCli(ctx, "runtime-allocator-bench", "tools/runtime/allocator_bench.zig", engine, null, .default);
     addInstallStep(b, "runtime-allocator-bench", "Build the Runtime allocator comparison probe", allocator_bench.install);
 
-    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", engine, host, false);
+    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", engine, host, .default);
     addInstallStep(b, "run-test262", "Build and install run-test262 (follows -Doptimize)", run_test262.install);
 
     return .{

@@ -869,6 +869,82 @@ pub const Object = extern struct {
         rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
         self.syncTraceShapePropertyFlags(index, flags);
     }
+
+    // ===== identity / storage =====
+    pub fn arrayLength(self: *const Object) u32 {
+        return if (self.isArray()) self.arrayArm().*.length else 0;
+    }
+
+    /// Set the JS-observable `.length` only. Faithful to qjs `set_array_length`:
+    /// growing length above capacity keeps `fast_array`
+    /// (the slots `[array_count, length)` simply become holes), it does NOT
+    /// drop to sparse and it NEVER touches `array_count`. Callers that must
+    /// also shrink the dense extent pair this with `truncateArrayElements`.
+    pub fn setArrayLength(self: *Object, length: u32) void {
+        std.debug.assert(self.isArray());
+        self.arrayArm().*.length = length;
+    }
+
+    pub fn hasExoticMethods(self: *const Object) bool {
+        return self.flags.has_exotic_methods;
+    }
+
+    pub inline fn isArray(self: *const Object) bool {
+        return self.class_id == class.ids.array;
+    }
+
+    inline fn supportsPlainNamedPropertyStorage(self: *const Object) bool {
+        if (!self.isArray()) return true;
+        // During intrinsic installation %Array.prototype% is a real Array but
+        // owns no dense element buffer. Its only class-union pointer is the
+        // cold ordinary payload used while standard globals are bootstrapped.
+        return !self.flags.fast_array and
+            self.flags.class_payload_kind == .ordinary and
+            self.arrayArm().*.capacity == 0;
+    }
+
+    fn assertPlainAppendTarget(self: *const Object) void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+    }
+
+    pub inline fn isProxy(self: *const Object) bool {
+        return self.class_id == class.ids.proxy;
+    }
+
+    /// Global-object identity is a class, independent of the owning realm
+    /// context's state and lifetime.
+    pub inline fn isGlobal(self: *const Object) bool {
+        return self.class_id == class.ids.global_object;
+    }
+
+    pub inline fn hasPropertyStorage(self: *const Object) bool {
+        return self.prop_values != emptyPropertyStorageBase();
+    }
+
+    pub inline fn hasSlots2Layout(self: *const Object) bool {
+        return self.flags.slots2_layout;
+    }
+
+    pub inline fn propertyStorageIsInline(self: *const Object) bool {
+        return self.hasSlots2Layout() and self.prop_values == trailingPropertyStorageBase(self);
+    }
+
+    pub inline fn needsSlowPropertyAccess(self: *const Object) bool {
+        return classNeedsSlowPropertyAccess(self.class_id, self.flags.has_exotic_methods);
+    }
+
+    pub fn exoticMethods(self: *const Object, rt: *const JSRuntime) ?*const ExoticMethods {
+        if (!self.flags.has_exotic_methods) return null;
+        return exoticMethodsForClassId(self.class_id) orelse blk: {
+            const record = rt.classes.record(self.class_id) orelse return null;
+            const raw = record.def.exotic_methods orelse return null;
+            break :blk @ptrCast(@alignCast(raw));
+        };
+    }
+
     // ===== create / construction =====
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -2944,86 +3020,11 @@ pub const Object = extern struct {
     }
 
     pub fn iteratorLength(self: *const Object) u32 {
-        if (self.payloadOf(.iterator)) |payload| return payload.length;
-        return 0;
+        return (self.payloadOf(.iterator) orelse return 0).length;
     }
 
     pub fn setIteratorLength(self: *Object, length: u32) void {
         self.iteratorLengthSlot().* = length;
-    }
-
-    pub fn arrayLength(self: *const Object) u32 {
-        return if (self.isArray()) self.arrayArm().*.length else 0;
-    }
-
-    /// Set the JS-observable `.length` only. Faithful to qjs `set_array_length`:
-    /// growing length above capacity keeps `fast_array`
-    /// (the slots `[array_count, length)` simply become holes), it does NOT
-    /// drop to sparse and it NEVER touches `array_count`. Callers that must
-    /// also shrink the dense extent pair this with `truncateArrayElements`.
-    pub fn setArrayLength(self: *Object, length: u32) void {
-        std.debug.assert(self.isArray());
-        self.arrayArm().*.length = length;
-    }
-
-    pub fn hasExoticMethods(self: *const Object) bool {
-        return self.flags.has_exotic_methods;
-    }
-
-    pub inline fn isArray(self: *const Object) bool {
-        return self.class_id == class.ids.array;
-    }
-
-    inline fn supportsPlainNamedPropertyStorage(self: *const Object) bool {
-        if (!self.isArray()) return true;
-        // During intrinsic installation %Array.prototype% is a real Array but
-        // owns no dense element buffer. Its only class-union pointer is the
-        // cold ordinary payload used while standard globals are bootstrapped.
-        return !self.flags.fast_array and
-            self.flags.class_payload_kind == .ordinary and
-            self.arrayArm().*.capacity == 0;
-    }
-
-    fn assertPlainAppendTarget(self: *const Object) void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-    }
-
-    pub inline fn isProxy(self: *const Object) bool {
-        return self.class_id == class.ids.proxy;
-    }
-
-    /// Global-object identity is a class, independent of the owning realm
-    /// context's state and lifetime.
-    pub inline fn isGlobal(self: *const Object) bool {
-        return self.class_id == class.ids.global_object;
-    }
-
-    pub inline fn hasPropertyStorage(self: *const Object) bool {
-        return self.prop_values != emptyPropertyStorageBase();
-    }
-
-    pub inline fn hasSlots2Layout(self: *const Object) bool {
-        return self.flags.slots2_layout;
-    }
-
-    pub inline fn propertyStorageIsInline(self: *const Object) bool {
-        return self.hasSlots2Layout() and self.prop_values == trailingPropertyStorageBase(self);
-    }
-
-    pub inline fn needsSlowPropertyAccess(self: *const Object) bool {
-        return classNeedsSlowPropertyAccess(self.class_id, self.flags.has_exotic_methods);
-    }
-
-    pub fn exoticMethods(self: *const Object, rt: *const JSRuntime) ?*const ExoticMethods {
-        if (!self.flags.has_exotic_methods) return null;
-        return exoticMethodsForClassId(self.class_id) orelse blk: {
-            const record = rt.classes.record(self.class_id) orelse return null;
-            const raw = record.def.exotic_methods orelse return null;
-            break :blk @ptrCast(@alignCast(raw));
-        };
     }
 
     pub fn iteratorTarget(self: *const Object) ?JSValue {
@@ -3091,8 +3092,7 @@ pub const Object = extern struct {
     }
 
     pub fn iteratorAtomKeys(self: *const Object) []const atom.Atom {
-        if (self.payloadOf(.iterator)) |payload| return payload.atom_keys;
-        return &.{};
+        return (self.payloadOf(.iterator) orelse return &.{}).atom_keys;
     }
 
     pub fn iteratorIndexSlot(self: *Object) *usize {
@@ -3133,13 +3133,11 @@ pub const Object = extern struct {
     }
 
     pub fn collectionEntries(self: *const Object) []CollectionEntry {
-        if (self.payloadOf(.collection)) |payload| return payload.entries.items;
-        return &.{};
+        return (self.payloadOf(.collection) orelse return &.{}).entries.items;
     }
 
     pub fn collectionEntriesCapacity(self: *const Object) usize {
-        if (self.payloadOf(.collection)) |payload| return payload.entries.capacity;
-        return 0;
+        return (self.payloadOf(.collection) orelse return 0).entries.capacity;
     }
 
     pub fn collectionBucketHeadsSlot(self: *Object) *[]usize {
@@ -3152,8 +3150,7 @@ pub const Object = extern struct {
     }
 
     pub fn collectionBucketHeads(self: *const Object) []usize {
-        if (self.payloadOf(.collection)) |payload| return payload.bucket_heads;
-        return &.{};
+        return (self.payloadOf(.collection) orelse return &.{}).bucket_heads;
     }
 
     pub fn collectionActiveCountSlot(self: *Object) *usize {
@@ -3161,13 +3158,13 @@ pub const Object = extern struct {
     }
 
     pub fn collectionActiveCount(self: *const Object) usize {
-        if (self.payloadOf(.collection)) |payload| return payload.active_count;
-        return 0;
+        return (self.payloadOf(.collection) orelse return 0).active_count;
     }
 
     /// Park a cursor inside this collection's entry array. Mirrors the
     /// `mr->ref_count++` an enumerator takes on the record it is sitting on
-    /// (js_map_iterator_next quickjs.c, js_map_forEach quickjs.c).
+    /// (js_map_iterator_next quickjs.c, js_map_forEach quickjs.c). In zjs this
+    /// is a cursor pin, not a refcount.
     pub fn retainCollectionCursor(self: *Object) void {
         const payload = self.collectionPayload() orelse return;
         payload.live_cursors += 1;
@@ -3176,17 +3173,16 @@ pub const Object = extern struct {
     /// Mirrors `map_decref_record`. The
     /// `collectionPayload() orelse return` guard is the zjs form of qjs's
     /// `JS_IsLiveObject(rt, it->obj)` check in js_map_iterator_finalizer:
-    /// during a cycle-collector resource pass the target map
+    /// during tracing-GC teardown the target map
     /// may already have shed its payload, and then there is nothing left to
-    /// unpin.
+    /// unpin. In zjs this releases a cursor pin, not a refcount.
     pub fn releaseCollectionCursor(self: *Object) void {
         const payload = self.collectionPayload() orelse return;
         if (payload.live_cursors != 0) payload.live_cursors -= 1;
     }
 
     pub fn collectionLiveCursors(self: *const Object) usize {
-        if (self.payloadOf(.collection)) |payload| return payload.live_cursors;
-        return 0;
+        return (self.payloadOf(.collection) orelse return 0).live_cursors;
     }
 
     /// Pins that are not parked iterators: `forEach` and the Set methods hold
@@ -3198,14 +3194,14 @@ pub const Object = extern struct {
 
     /// Logical position of the physical entry 0 (see `entries_base`).
     pub fn collectionEntriesBase(self: *const Object) usize {
-        if (self.payloadOf(.collection)) |payload| return payload.entries_base;
-        return 0;
+        return (self.payloadOf(.collection) orelse return 0).entries_base;
     }
 
     /// Park this Map/Set iterator's cursor on its target collection, once.
     /// Mirrors `mr->ref_count++` in js_map_iterator_next:
     /// taken when the iterator settles on a position, not when it is created,
-    /// so an iterator that never stepped pins nothing.
+    /// so an iterator that never stepped pins nothing. In zjs this is a
+    /// cursor pin, not a refcount.
     pub fn retainCollectionIteratorCursor(self: *Object) void {
         const payload = self.payloadOf(.iterator) orelse return;
         if (payload.collection_cursor_held) return;
@@ -3221,7 +3217,8 @@ pub const Object = extern struct {
     /// Drop a Map/Set iterator's hold on its target collection: releases the
     /// entry-array cursor and then the target reference itself. Mirrors
     /// js_map_iterator_next's end-of-enumeration arm,
-    /// which decrefs the current record before dropping `it->obj`.
+    /// which decrefs the current record before dropping `it->obj`. In zjs
+    /// that decref is a cursor pin, not a refcount.
     pub fn detachCollectionIteratorTarget(self: *Object, _: *JSRuntime) void {
         const payload = self.payloadOf(.iterator) orelse return;
         if (payload.target == null) return;
@@ -3265,8 +3262,7 @@ pub const Object = extern struct {
     }
 
     pub fn weakCollectionEntries(self: *const Object) []WeakCollectionEntry {
-        if (self.payloadOf(.collection)) |payload| return payload.weak_entries.items;
-        return &.{};
+        return (self.payloadOf(.collection) orelse return &.{}).weak_entries.items;
     }
 
     pub fn ensureWeakCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
@@ -3296,8 +3292,7 @@ pub const Object = extern struct {
     }
 
     pub fn finalizationRegistryCells(self: *const Object) []FinalizationRegistryCell {
-        if (self.payloadOf(.finalization_registry)) |payload| return payload.cells.items;
-        return &.{};
+        return (self.payloadOf(.finalization_registry) orelse return &.{}).cells.items;
     }
 
     pub fn unregisterFinalizationRegistryCells(self: *Object, rt: *JSRuntime, token: JSValue) bool {
@@ -3423,13 +3418,13 @@ pub const Object = extern struct {
         rt.gc.generationalBarrier(self.gcHeader(), rooted_held_value.cycleMarkHeader());
     }
 
+    // ===== disposable_stack* =====
     pub fn disposableStackDisposedSlot(self: *Object) *bool {
         return &payloadPresent(self.payloadOf(.disposable_stack)).disposed;
     }
 
     pub fn disposableStackDisposed(self: *const Object) bool {
-        if (self.payloadOf(.disposable_stack)) |payload| return payload.disposed;
-        return false;
+        return (self.payloadOf(.disposable_stack) orelse return false).disposed;
     }
 
     pub fn appendDisposableResource(
@@ -3541,15 +3536,7 @@ pub const Object = extern struct {
             rt.gc.rememberOwnerForBulkWrite(target.gcHeader());
     }
 
-    pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
-        const value_slot = self.varRefValueSlot();
-        value_slot.* = next_value;
-        // The slot lives in this object's own var_ref payload, so the object is
-        // the owner. (Not to be confused with `VarRef.setVarRefValue`, which
-        // stores into a cell and takes the barrier there.)
-        rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
-    }
-
+    // ===== optional value / promise rare =====
     pub fn setOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) !void {
         slot.* = next_value;
         // The receiver is the owner, which is what the generational barrier
@@ -3601,6 +3588,16 @@ pub const Object = extern struct {
 
     pub fn setFunctionPromiseFinallyConstructor(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
         try self.setRareOptionalValue(rt, "promise_finally_constructor", next_value);
+    }
+
+    // ===== var_ref* =====
+    pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
+        const value_slot = self.varRefValueSlot();
+        value_slot.* = next_value;
+        // The slot lives in this object's own var_ref payload, so the object is
+        // the owner. (Not to be confused with `VarRef.setVarRefValue`, which
+        // stores into a cell and takes the barrier there.)
+        rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
     }
 
     pub fn varRefValueSlot(self: *Object) *?JSValue {
@@ -3674,8 +3671,7 @@ pub const Object = extern struct {
     }
 
     pub fn byteStorage(self: *const Object) []u8 {
-        if (self.payloadOf(.buffer)) |payload| return payload.bytes;
-        return &.{};
+        return (self.payloadOf(.buffer) orelse return &.{}).bytes;
     }
 
     pub fn installByteStorage(self: *Object, rt: *JSRuntime, bytes: []u8) !void {
@@ -3804,8 +3800,7 @@ pub const Object = extern struct {
     }
 
     pub fn arrayBufferDetached(self: *const Object) bool {
-        if (self.payloadOf(.buffer)) |payload| return payload.detached;
-        return false;
+        return (self.payloadOf(.buffer) orelse return false).detached;
     }
 
     pub fn arrayBufferMaxByteLengthSlot(self: *Object) *?usize {
@@ -3821,8 +3816,7 @@ pub const Object = extern struct {
     }
 
     pub fn typedArrayByteOffset(self: *const Object) usize {
-        if (self.payloadOf(.typed_array)) |payload| return payload.byte_offset;
-        return 0;
+        return (self.payloadOf(.typed_array) orelse return 0).byte_offset;
     }
 
     pub fn typedArrayElementSizeSlot(self: *Object) *u32 {
@@ -3853,12 +3847,6 @@ pub const Object = extern struct {
         return self.payloadOf(.typed_array);
     }
 
-    /// Read-only Map/Set payload view for the CLI print inspector (entry
-    /// order, active flags, live count); no mutation, no cursor.
-    pub fn collectionPayloadBorrowed(self: *const Object) ?*const CollectionPayload {
-        return self.payloadOf(.collection);
-    }
-
     pub fn typedArrayKindSlot(self: *Object) *typed_array_names.Kind {
         if (self.payloadOf(.typed_array)) |payload| return &payload.kind;
         std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));
@@ -3874,6 +3862,7 @@ pub const Object = extern struct {
         return .none;
     }
 
+    // ===== regexp* =====
     pub fn regexpSource(self: *const Object) ?JSValue {
         if (self.regExpPayloadConst()) |payload| {
             const source = payload.source orelse return null;
@@ -4060,6 +4049,7 @@ pub const Object = extern struct {
         }
     }
 
+    // ===== bound* =====
     pub fn boundTargetSlot(self: *Object) *?JSValue {
         if (self.payloadOf(.bound_function)) |payload| return &payload.target;
         std.debug.assert(self.class_id == class.ids.bound_function);
@@ -4087,10 +4077,10 @@ pub const Object = extern struct {
     }
 
     pub fn boundArgs(self: *const Object) []JSValue {
-        if (self.payloadOf(.bound_function)) |payload| return payload.args;
-        return &.{};
+        return (self.payloadOf(.bound_function) orelse return &.{}).args;
     }
 
+    // ===== proxy* =====
     pub fn ensureProxyPayload(self: *Object, rt: *JSRuntime) !void {
         std.debug.assert(self.isProxy());
         if (self.payloadOf(.proxy) != null) return;
@@ -4145,6 +4135,7 @@ pub const Object = extern struct {
         return (self.payloadOf(.proxy) orelse return null).handler;
     }
 
+    // ===== arguments* =====
     /// Allocate the mapped-arguments pointer table behind a typed Interface.
     ///
     /// The shared array union still owns a JSValue-sized backing allocation so
@@ -4223,6 +4214,7 @@ pub const Object = extern struct {
         return cells[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
+    // ===== object_data* / weak_ref* =====
     pub fn objectDataSlot(self: *Object) *?JSValue {
         return &payloadPresent(self.payloadOf(.object_data)).data;
     }
@@ -4563,8 +4555,7 @@ pub const Object = extern struct {
     }
 
     pub fn promiseReactions(self: *const Object) []JSValue {
-        if (self.payloadOf(.promise)) |payload| return payload.reactions;
-        return &.{};
+        return (self.payloadOf(.promise) orelse return &.{}).reactions;
     }
 
     pub fn promiseReactionsCapacitySlot(self: *Object) *usize {
@@ -4576,10 +4567,10 @@ pub const Object = extern struct {
     }
 
     pub fn promiseIsRejected(self: *const Object) bool {
-        if (self.payloadOf(.promise)) |payload| return payload.is_rejected;
-        return false;
+        return (self.payloadOf(.promise) orelse return false).is_rejected;
     }
 
+    // ===== generator* =====
     /// Install the qjs-style variable-sized execution record for a detached
     /// generator shell. The trailing operand stack and scalar execution state
     /// are returned by one allocator operation.
@@ -4623,7 +4614,6 @@ pub const Object = extern struct {
         }
     }
 
-    // ===== generator* =====
     pub fn generatorThisSlot(self: *Object) *JSValue {
         return &self.generatorLiveExecution().this_value;
     }
@@ -4749,8 +4739,7 @@ pub const Object = extern struct {
     }
 
     pub fn generatorDone(self: *const Object) bool {
-        if (self.payloadOf(.generator)) |payload| return payload.done;
-        return false;
+        return (self.payloadOf(.generator) orelse return false).done;
     }
 
     /// End the resident generator/async-function execution record exactly once.
@@ -4806,8 +4795,7 @@ pub const Object = extern struct {
     }
 
     pub fn generatorStarted(self: *const Object) bool {
-        if (self.payloadOf(.generator)) |payload| return payload.started;
-        return false;
+        return (self.payloadOf(.generator) orelse return false).started;
     }
 
     pub fn generatorJustYieldedSlot(self: *Object) *bool {
@@ -4815,8 +4803,7 @@ pub const Object = extern struct {
     }
 
     pub fn generatorJustYielded(self: *const Object) bool {
-        if (self.payloadOf(.generator)) |payload| return payload.just_yielded;
-        return false;
+        return (self.payloadOf(.generator) orelse return false).just_yielded;
     }
 
     pub fn generatorYieldStarSuspendedSlot(self: *Object) *bool {
@@ -4828,8 +4815,7 @@ pub const Object = extern struct {
     }
 
     pub fn generatorSuspendKind(self: *const Object) GeneratorSuspendKind {
-        if (self.payloadOf(.generator)) |payload| return @enumFromInt(payload.suspend_kind);
-        return .none;
+        return @enumFromInt((self.payloadOf(.generator) orelse return .none).suspend_kind);
     }
 
     pub fn asyncGeneratorStateSlot(self: *Object) *generator_state.AsyncGeneratorState {
@@ -4841,8 +4827,7 @@ pub const Object = extern struct {
     }
 
     pub fn asyncGeneratorQueue(self: *const Object) []AsyncGeneratorRequest {
-        if (self.payloadOf(.generator)) |payload| return payload.async_queue.items;
-        return &.{};
+        return (self.payloadOf(.generator) orelse return &.{}).async_queue.items;
     }
 
     // ===== function* =====
@@ -5772,8 +5757,7 @@ pub const Object = extern struct {
 
     /// Install the construction realm named by a true C_FUNCTION. `RealmRef`
     /// is a plain traced pointer wrapper (`retain` just wraps, `deinit` just
-    /// nulls), so the same-realm early return is an optimisation, not the
-    /// self-destruction guard it was in the refcounted era.
+    /// nulls), so the same-realm early return is an optimisation.
     pub fn setNativeFunctionRealm(self: *Object, realm: *context_mod.RealmContext) void {
         std.debug.assert(self.class_id == class.ids.c_function);
         const payload = self.functionPayload().?;
@@ -5904,7 +5888,8 @@ pub const Object = extern struct {
     /// if it still has one. Mirrors js_map_iterator_finalizer:
     /// the finalizer decrefs the parked record before
     /// releasing `it->obj`, guarded by a liveness check because the map's own
-    /// teardown may have run first.
+    /// teardown may have run first. In zjs that decref is a cursor pin, not
+    /// a refcount.
     fn releaseIteratorCollectionCursor(class_id: class.ClassId, payload: *IteratorPayload) void {
         if (!payload.collection_cursor_held) return;
         payload.collection_cursor_held = false;
@@ -5916,7 +5901,7 @@ pub const Object = extern struct {
         if (collection.iterator_cursors != 0) collection.iterator_cursors -= 1;
     }
 
-    pub fn collectionPayload(self: *Object) ?*CollectionPayload {
+    pub fn collectionPayload(self: anytype) ?PayloadPtr(@TypeOf(self), .collection) {
         return self.payloadOf(.collection);
     }
 
@@ -5994,7 +5979,7 @@ pub const Object = extern struct {
         self.bytecodeArm().*.function_bytecode = null;
     }
 
-    // ===== visit* / cycle GC =====
+    // ===== visit* / GC trace =====
 
     // mirror of value_semantics.objectFromValue (kind check included), keep
     // in sync — kept local: object.zig <-> value_semantics import cycle.
@@ -7494,19 +7479,6 @@ pub const Object = extern struct {
         flags: property.Flags,
         realm_global: ?*Object,
     ) !void {
-        try self.defineAutoInitPropertyWithRealmAndNative(rt, atom_id, name, length, flags, realm_global, 0);
-    }
-
-    pub fn defineAutoInitPropertyWithRealmAndNative(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        length: i32,
-        flags: property.Flags,
-        realm_global: ?*Object,
-        native_builtin_id: i32,
-    ) !void {
         self.assertPlainAppendTarget();
         // No descriptor conversion: the placeholder carries no JSValue, only
         // the (name, length, builtin id) record in the runtime auto-init
@@ -7514,7 +7486,7 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = name,
             .length = length,
-            .native_builtin_id = native_builtin_id,
+            .native_builtin_id = 0,
         }) });
     }
 
@@ -7643,13 +7615,6 @@ pub const Object = extern struct {
         self.markIndexedProperties(rt);
         return true;
     }
-
-    /// Historical owned-value counterpart of `appendDenseArrayIndex`, kept as a
-    /// name for QuickJS's consuming OP_put_array_el store. Under the tracing GC
-    /// an append neither retains nor releases, so the two spellings had become
-    /// byte-identical bodies behind a `comptime take_ownership` that selected
-    /// between `new_value` and `new_value`.
-    pub const appendDenseArrayIndexOwned = appendDenseArrayIndex;
 
     /// qjs `js_array_push` store. Caller already
     /// proved `JS_CLASS_ARRAY && fast_array && can_extend_fast_array &&
@@ -8767,7 +8732,7 @@ pub const Object = extern struct {
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
     /// class_id==object, !hasExoticMethods, !is_array, extensible.
     ///
-    /// Ownership contract (any value shape, refcounted included — qjs
+    /// Ownership contract (any value shape — qjs
     /// OP_define_field, quickjs.c, has no value-form gate):
     /// `data_value` is CONSUMED on success and NOT consumed on ANY failure.
     /// The hot caller (defineFieldFast) turns every error into a cold-shell

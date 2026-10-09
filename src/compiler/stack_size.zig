@@ -95,9 +95,36 @@ pub const Options = struct {
 };
 
 const FinalArtifactValidator = struct {
-    config: FinalArtifactValidation,
+    config: ?FinalArtifactValidation = null,
     pc: usize = 0,
     owner_index: usize = 0,
+    /// An artifact mismatch is remembered so the stack walk keeps its
+    /// error priority. `finish` reports it only if that walk succeeds.
+    poisoned: bool = false,
+
+    fn note(self: *FinalArtifactValidator, err: Error) Error!void {
+        switch (err) {
+            error.InvalidFinalArtifact => self.poisoned = true,
+            else => return err,
+        }
+    }
+
+    fn before(self: *FinalArtifactValidator, bytecode: []const u8, limit: usize) Error!void {
+        if (self.poisoned or self.config == null) return;
+        self.validateBefore(bytecode, limit) catch |err| try self.note(err);
+    }
+
+    fn at(
+        self: *FinalArtifactValidator,
+        bytecode: []const u8,
+        pos: usize,
+        h: opcode.decode.Header,
+    ) Error!void {
+        if (self.poisoned or self.config == null) return;
+        if (self.pc == pos) {
+            self.validateKnownInstruction(bytecode, h) catch |err| try self.note(err);
+        }
+    }
 
     /// F0b: driven by the decoded header. The operand kinds carry what
     /// this used to rediscover from the format, and the two closure-slot
@@ -134,20 +161,22 @@ const FinalArtifactValidator = struct {
                 return error.InvalidFinalArtifact;
         }
 
+        // before/at/finish return before this call when config is null.
+        const config = self.config orelse unreachable;
         const lay = h.layout();
         if (lay.atom_slot) |i| {
-            if (self.owner_index >= self.config.atom_owners.len)
+            if (self.owner_index >= config.atom_owners.len)
                 return error.InvalidFinalArtifact;
             const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
                 return error.InvalidFinalArtifact;
-            if (atom.Atom.fromRaw(encoded) != self.config.atom_owners[self.owner_index])
+            if (atom.Atom.fromRaw(encoded) != config.atom_owners[self.owner_index])
                 return error.InvalidFinalArtifact;
             self.owner_index += 1;
         }
         if (lay.var_ref_slot) |i| {
             const idx = opcode.decode.operandAt(h, bytecode, i, u32) catch
                 return error.InvalidFinalArtifact;
-            if (idx >= self.config.closure_var_count)
+            if (idx >= config.closure_var_count)
                 return error.InvalidFinalArtifact;
         }
         self.pc += size;
@@ -177,9 +206,16 @@ const FinalArtifactValidator = struct {
     }
 
     fn finish(self: *FinalArtifactValidator, bytecode: []const u8) Error!void {
-        try self.validateBefore(bytecode, bytecode.len);
-        if (self.pc != bytecode.len or self.owner_index != self.config.atom_owners.len)
-            return error.InvalidFinalArtifact;
+        if (self.config == null) return;
+        if (!self.poisoned) {
+            self.validateBefore(bytecode, bytecode.len) catch |err| try self.note(err);
+            if (!self.poisoned and
+                (self.pc != bytecode.len or self.owner_index != self.config.?.atom_owners.len))
+            {
+                self.poisoned = true;
+            }
+        }
+        if (self.poisoned) return error.InvalidFinalArtifact;
     }
 };
 
@@ -216,15 +252,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
     // sentinel fill. `seed` publishes catch_pos before it publishes the pc
     // to pending_pc, and every later read is guarded by a visited
     // stack_level_tab entry.
-    var final_validator: ?FinalArtifactValidator = if (options.final_artifact) |config|
-        .{ .config = config }
-    else
-        null;
-    // Before this proof was fused, the stack verifier completed first and
-    // the artifact walk ran only after it succeeded.  Keep that public
-    // error priority: an artifact mismatch is remembered while the graph
-    // walk continues, then reported only if the stack proof succeeds.
-    var final_artifact_invalid = false;
+    var final_validator: FinalArtifactValidator = .{ .config = options.final_artifact };
 
     // Seed: entry pc=0 with stack level 0.
     try work.seed(0, 0, -1);
@@ -243,12 +271,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         // a reclaimed or re-encoded id must not silently change what this
         // pass believes an instruction is.
         const h = try opcode.decode.headerAt(.final, bytecode, pos);
-        if (!final_artifact_invalid) {
-            if (final_validator) |*validator| {
-                validator.validateBefore(bytecode, pos) catch |err|
-                    try noteFinalArtifactError(&final_artifact_invalid, err);
-            }
-        }
+        try final_validator.before(bytecode, pos);
         if (h.form == .invalid) return error.InvalidOpcode;
         // Both proofs now share the one decoded header instead of a
         // separately looked-up metadata row.
@@ -284,14 +307,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         stack_len = @intCast(new_stack_i32);
         if (stack_len > stack_len_max) stack_len_max = stack_len;
 
-        if (!final_artifact_invalid) {
-            if (final_validator) |*validator| {
-                if (validator.pc == pos) {
-                    validator.validateKnownInstruction(bytecode, h) catch |err|
-                        try noteFinalArtifactError(&final_artifact_invalid, err);
-                }
-            }
-        }
+        try final_validator.at(bytecode, pos, h);
 
         // QuickJS dispatches directly on the numeric opcode. Apart from
         // avoiding string comparisons, this keeps all control-flow
@@ -347,14 +363,12 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
                     },
                     else => stack_len,
                 };
-                catch_pos = maybePopCatchPos(bytecode, work.stack_level_tab, work.catch_pos_tab, catch_pos, catch_level);
+                catch_pos = work.maybePopCatchPos(bytecode, catch_pos, catch_level);
             },
             .nip_catch => {
                 if (catch_pos < 0) return error.InvalidOpcode;
                 const catch_idx: usize = @intCast(catch_pos);
-                stack_len = work.stack_level_tab[catch_idx];
-                if (!opcode.decode.matchesFormAt(bytecode, @intCast(catch_idx), .@"catch")) stack_len += 1;
-                stack_len += 1;
+                stack_len = work.catchBaseLevel(bytecode, catch_idx) + 1;
                 catch_pos = work.catch_pos_tab[catch_idx];
             },
             else => {},
@@ -364,13 +378,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         try work.seed(pos_next, stack_len, catch_pos);
     }
 
-    if (!final_artifact_invalid) {
-        if (final_validator) |*validator| {
-            validator.finish(bytecode) catch |err|
-                try noteFinalArtifactError(&final_artifact_invalid, err);
-        }
-    }
-    if (final_artifact_invalid) return error.InvalidFinalArtifact;
+    try final_validator.finish(bytecode);
     return stack_len_max;
 }
 
@@ -396,23 +404,22 @@ const Worklist = struct {
             return error.StackMismatch;
         }
     }
-};
 
-fn noteFinalArtifactError(invalid: *bool, err: Error) Error!void {
-    switch (err) {
-        error.InvalidFinalArtifact => invalid.* = true,
-        else => return err,
+    /// Level recorded at a catch (or for-of) entry, plus one when that
+    /// entry is not itself a `catch` instruction.
+    fn catchBaseLevel(self: *const Worklist, bytecode: []const u8, idx: usize) u16 {
+        var level = self.stack_level_tab[idx];
+        if (!opcode.decode.matchesFormAt(bytecode, @intCast(idx), .@"catch")) level += 1;
+        return level;
     }
-}
 
-fn maybePopCatchPos(bytecode: []const u8, stack_level_tab: []const u16, catch_pos_tab: []const i32, catch_pos: i32, catch_level: u16) i32 {
-    if (catch_pos < 0) return catch_pos;
-    const catch_idx: usize = @intCast(catch_pos);
-    var level = stack_level_tab[catch_idx];
-    if (bytecode[catch_idx] != opcode.op.@"catch") level += 1;
-    if (catch_level == level) return catch_pos_tab[catch_idx];
-    return catch_pos;
-}
+    fn maybePopCatchPos(self: *const Worklist, bytecode: []const u8, catch_pos: i32, catch_level: u16) i32 {
+        if (catch_pos < 0) return catch_pos;
+        const catch_idx: usize = @intCast(catch_pos);
+        if (catch_level == self.catchBaseLevel(bytecode, catch_idx)) return self.catch_pos_tab[catch_idx];
+        return catch_pos;
+    }
+};
 
 test "stack_size: empty bytecode is reachable falloff" {
     try std.testing.expectError(error.ReachableFalloff, compute(&.{}, .{}));

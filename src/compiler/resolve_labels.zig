@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
 const temp_stream = @import("temp_stream.zig");
@@ -53,18 +52,13 @@ const JumpSlot = struct {
     follows_fusable_compare: bool = false,
 };
 
-const BindEntry = struct {
-    bound_offset: u32,
-    label_index: u32,
-    initially_referenced: bool,
-    match_barrier: bool,
-    dead_skipped: bool = false,
-};
-
-fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
-    if (lhs.bound_offset != rhs.bound_offset)
-        return lhs.bound_offset < rhs.bound_offset;
-    return lhs.label_index < rhs.label_index;
+fn fillLabelBind(slot: labels.LabelSlot, label_index: usize) temp_stream.BindEntry {
+    return .{
+        .input_offset = slot.bound_offset,
+        .label_index = @intCast(label_index),
+        .initially_referenced = slot.ref_count != 0,
+        .match_barrier = slot.flags.match_barrier,
+    };
 }
 
 const Form = opcode.logical.LogicalOpcode;
@@ -150,33 +144,16 @@ fn readI32(code: []const u8, position: u32) Error!i32 {
 /// offset-primary bind/source cursors.  Keep this proof on every entry path:
 /// the main walk relies on sorted sources and coherent bound-label metadata.
 fn validateProductMetadata(product: *const resolve_variables.ResolvedProduct) Error!void {
-    if (product.code_len > product.code.len or
-        product.atom_len > product.atom_operands.len or
-        product.label_len > product.label_slots.len or
-        product.source_len > product.source_slots.len)
-    {
-        return error.InvalidBytecode;
-    }
-
-    var previous_source: u32 = 0;
-    for (product.source_slots[0..product.source_len], 0..) |source, index| {
-        if (source.temp_offset > product.code_len or source.line <= 0 or source.col <= 0 or
-            (index != 0 and source.temp_offset < previous_source))
-        {
-            return error.InvalidBytecode;
+    try temp_stream.validateStreams(resolve_variables.ResolvedProduct, product, struct {
+        fn extra(s: *const resolve_variables.ResolvedProduct) temp_stream.Error!void {
+            for (s.source_slots[0..s.source_len]) |source| {
+                if (source.line <= 0 or source.col <= 0) return error.InvalidBytecode;
+            }
+            for (s.label_slots[0..s.label_len]) |slot| {
+                if (slot.first_reloc != labels.no_reloc) return error.InvalidBytecode;
+            }
         }
-        previous_source = source.temp_offset;
-    }
-
-    for (product.label_slots[0..product.label_len]) |slot| {
-        if (slot.first_reloc != labels.no_reloc) return error.InvalidBytecode;
-        if (slot.flags.bound) {
-            if (slot.bound_offset == labels.unbound or slot.bound_offset > product.code_len)
-                return error.InvalidBytecode;
-        } else if (slot.bound_offset != labels.unbound) {
-            return error.InvalidBytecode;
-        }
-    }
+    }.extra);
 }
 
 const PatternToken = struct {
@@ -267,7 +244,7 @@ const Resolver = struct {
     input_sources: []const builder.SourceSlot,
 
     addr: []u32 = &.{},
-    binds: []BindEntry = &.{},
+    binds: []temp_stream.BindEntry = &.{},
     jump_slots: []JumpSlot = &.{},
 
     relocs: []FinalReloc = &.{},
@@ -371,29 +348,14 @@ const Resolver = struct {
             @memset(self.addr, labels.unbound);
         }
 
-        var bind_count: usize = 0;
-        for (self.product.label_slots[0..self.product.label_len]) |slot| {
-            if (slot.flags.bound) bind_count += 1;
-        }
-        if (bind_count != 0) {
-            self.binds = self.memory.alloc(BindEntry, bind_count) catch
-                return error.OutOfMemory;
-            var index: usize = 0;
-            for (self.product.label_slots[0..self.product.label_len], 0..) |slot, label_index| {
-                if (!slot.flags.bound) continue;
-                self.binds[index] = .{
-                    .bound_offset = slot.bound_offset,
-                    .label_index = @intCast(label_index),
-                    // Stage 4's match barriers are defined by the immutable
-                    // input target topology, not by refcounts later consumed
-                    // while branches are threaded or folded.
-                    .initially_referenced = slot.ref_count != 0,
-                    .match_barrier = slot.flags.match_barrier,
-                };
-                index += 1;
-            }
-            sort_erased.heap(BindEntry, self.binds, {}, bindLessThan);
-        }
+        // Stage 4's match barriers are defined by the immutable input
+        // target topology, not by refcounts later consumed while branches
+        // are threaded or folded.
+        self.binds = try temp_stream.buildBindIndex(
+            self.memory,
+            self.product.label_slots[0..self.product.label_len],
+            fillLabelBind,
+        );
         self.refreshBindFrontier();
 
         if (self.product.jump_size != 0) {
@@ -766,7 +728,7 @@ const Resolver = struct {
         var high = self.binds.len;
         while (low < high) {
             const middle = low + (high - low) / 2;
-            if (self.binds[middle].bound_offset < position)
+            if (self.binds[middle].input_offset < position)
                 low = middle + 1
             else
                 high = middle;
@@ -777,7 +739,7 @@ const Resolver = struct {
     fn hasBindInRange(self: *const Resolver, start: u32, end: u32) bool {
         if (start >= end) return false;
         var index = self.lowerBoundBind(start);
-        while (index < self.binds.len and self.binds[index].bound_offset < end) : (index += 1) {
+        while (index < self.binds.len and self.binds[index].input_offset < end) : (index += 1) {
             std.debug.assert(self.binds[index].label_index < self.product.label_len);
             // Absolute-PC patch targets become transparent after losing every
             // input reference. Explicit parser-label binds retain the physical
@@ -988,7 +950,7 @@ const Resolver = struct {
     /// a bind cursor left behind its start.
     fn retireSpannedDeadBinds(self: *Resolver, position: u32) Error!void {
         while (self.bind_cursor < self.binds.len and
-            self.binds[self.bind_cursor].bound_offset < position)
+            self.binds[self.bind_cursor].input_offset < position)
         {
             const entry = self.binds[self.bind_cursor];
             if (entry.label_index >= self.product.label_len)
@@ -1008,7 +970,7 @@ const Resolver = struct {
 
     inline fn refreshBindFrontier(self: *Resolver) void {
         self.next_bind_offset = if (self.bind_cursor < self.binds.len)
-            self.binds[self.bind_cursor].bound_offset
+            self.binds[self.bind_cursor].input_offset
         else
             std.math.maxInt(u64);
     }
@@ -1028,7 +990,7 @@ const Resolver = struct {
     noinline fn processBindsAtCold(self: *Resolver, position: u32) Error!void {
         try self.retireSpannedDeadBinds(position);
         while (self.bind_cursor < self.binds.len and
-            self.binds[self.bind_cursor].bound_offset == position)
+            self.binds[self.bind_cursor].input_offset == position)
         {
             const entry = self.binds[self.bind_cursor];
             self.bind_cursor += 1;
@@ -1134,7 +1096,7 @@ const Resolver = struct {
             target_slot.bound_offset >= position) return false;
         var index = self.lowerBoundBind(position);
         var saw_bind = false;
-        while (index < self.binds.len and self.binds[index].bound_offset == position) : (index += 1) {
+        while (index < self.binds.len and self.binds[index].input_offset == position) : (index += 1) {
             const label_index = self.binds[index].label_index;
             if (label_index >= self.product.label_len) return error.InvalidBytecode;
             if (self.product.label_slots[label_index].ref_count > 0) return false;
@@ -1185,10 +1147,10 @@ const Resolver = struct {
         }
 
         var index = self.bind_cursor;
-        if (index < self.binds.len and self.binds[index].bound_offset < start)
+        if (index < self.binds.len and self.binds[index].input_offset < start)
             return error.InvalidBytecode;
         while (index < self.binds.len and
-            self.binds[index].bound_offset < slot.bound_offset) : (index += 1)
+            self.binds[index].input_offset < slot.bound_offset) : (index += 1)
         {
             const entry = self.binds[index];
             if (entry.dead_skipped) continue;
@@ -1298,7 +1260,7 @@ const Resolver = struct {
         while (true) {
             if (position > self.product.code_len) return error.InvalidBytecode;
             if (self.bind_cursor < self.binds.len and
-                self.binds[self.bind_cursor].bound_offset < position)
+                self.binds[self.bind_cursor].input_offset < position)
             {
                 return error.InvalidBytecode;
             }
@@ -1307,7 +1269,7 @@ const Resolver = struct {
             var bind_end = bind_start;
             var has_live_bind = false;
             while (bind_end < self.binds.len and
-                self.binds[bind_end].bound_offset == position)
+                self.binds[bind_end].input_offset == position)
             {
                 const label_index = self.binds[bind_end].label_index;
                 if (label_index >= self.product.label_len)

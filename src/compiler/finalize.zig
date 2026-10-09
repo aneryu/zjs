@@ -443,16 +443,12 @@ fn validateFinalArtifactShape(
     fd: *const function_def_mod.FunctionDef,
     lowered: *const bytecode_function.Bytecode,
 ) FinalizeError!void {
-    if (fd.arg_count < 0 or @as(usize, @intCast(fd.arg_count)) != fd.args.len) return error.InvalidBytecode;
-    if (fd.var_count < 0 or @as(usize, @intCast(fd.var_count)) != fd.vars.len) return error.InvalidBytecode;
-    if (fd.defined_arg_count < 0 or fd.defined_arg_count > fd.arg_count) return error.InvalidBytecode;
+    // arg/var/defined_arg counts and their u16 limits are already
+    // `validatePreLoweringArtifactShape`, which ran before lowering.
     if (fd.cpool_count < 0 or @as(usize, @intCast(fd.cpool_count)) != fd.cpool.len) return error.InvalidBytecode;
     if (fd.closure_var_count < 0 or @as(usize, @intCast(fd.closure_var_count)) != fd.closure_var.len) return error.InvalidBytecode;
 
-    if (fd.args.len > std.math.maxInt(u16) or
-        fd.vars.len > std.math.maxInt(u16) or
-        @as(usize, @intCast(fd.defined_arg_count)) > std.math.maxInt(u16) or
-        fd.cpool.len > std.math.maxInt(i32) or
+    if (fd.cpool.len > std.math.maxInt(i32) or
         fd.closure_var.len > std.math.maxInt(i32) or
         lowered.code.len > std.math.maxInt(i32) or
         lowered.pc2line_buf.len > std.math.maxInt(i32))
@@ -494,7 +490,7 @@ fn createFunctionBytecodeAfterChildren(
     if (fd.finalization_state != .prepared) return error.InvalidBytecode;
     compiler.compileFunction(&lowered, fd) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
+        error.InvalidBytecode, error.NoFunctionDef => return error.InvalidBytecode,
         error.BytecodeOverflow => return error.BytecodeOverflow,
         error.ClosureVarNotFound => return error.ClosureVarNotFound,
         error.Interrupted => return error.Interrupted,
@@ -527,8 +523,6 @@ fn createFunctionBytecodeAfterChildren(
     const slice = fb[0..1];
     var shell_owned = true;
     errdefer if (shell_owned) fb_mod.FunctionBytecode.destroyProductionShell(rt, fb, layout.famBytes());
-    const dbg = fb.debugInfoMut().?;
-    const hot_extension = layout.hotExtensionPtrMut(fb).?;
 
     // Populate owner-free FAM storage. Code bytes contain numeric atom IDs,
     // while every row/value slot is initialized with its non-owning null
@@ -554,7 +548,26 @@ fn createFunctionBytecodeAfterChildren(
     const byte_code = layout.byteCodeSliceMut(fb);
     @memcpy(byte_code, lowered.code);
 
-    // --- No-fail owner commit. No `try` or allocation is allowed below. ---
+    commitOwners(fd, compile_context, &lowered, rt, fb, layout, vardefs, closure_var, cpool, &shell_owned, disasm_enabled);
+    return slice;
+}
+
+/// Owner commit. `void` makes a `try` in this body a compile error.
+fn commitOwners(
+    fd: *function_def_mod.FunctionDef,
+    compile_context: CompileContext,
+    lowered: *bytecode_function.Bytecode,
+    rt: *runtime.JSRuntime,
+    fb: *fb_mod.FunctionBytecode,
+    layout: fb_mod.FunctionLayout,
+    vardefs: []fb_mod.BytecodeVarDef,
+    closure_var: []fb_mod.BytecodeClosureVar,
+    cpool: []JSValue,
+    shell_owned: *bool,
+    disasm_enabled: bool,
+) void {
+    const dbg = fb.debugInfoMut().?;
+    const hot_extension = layout.hotExtensionPtrMut(fb).?;
     fb.applyFlags(.{
         .is_strict_mode = fd.is_strict_mode,
         .runtime_strict_mode = compile_context.policy.runtime_strict,
@@ -634,11 +647,10 @@ fn createFunctionBytecodeAfterChildren(
     // on the next line owns the edge that keeps them alive. Nothing
     // allocates between the two registrations.
     for (cpool) |*slot| bigint_mod.BigInt.registerReservedValue(rt, slot.*);
-    shell_owned = false;
+    shell_owned.* = false;
     rt.gc.addInitializedWithSizeNoFail(&fb.header, fb.heapByteSizeWithLayout(layout));
 
     if (disasm_enabled) printDisassembly(fb, rt.atoms);
-    return slice;
 }
 
 /// `ZJS_DISASM` output, outlined so its 64 KiB buffer is not part of every
@@ -687,12 +699,10 @@ fn publishLoweredMetadata(
         .super_allowed = def.super_allowed,
         .arguments_allowed = def.arguments_allowed,
     };
-    if (def.var_count >= 0) {
-        function.var_count = @intCast(def.var_count);
-    }
-    if (def.arg_count >= 0) {
-        function.arg_count = @intCast(def.arg_count);
-    }
+    // validatePreLoweringArtifactShape already rejected a negative count
+    // and a count that does not fit in u16.
+    function.var_count = @intCast(def.var_count);
+    function.arg_count = @intCast(def.arg_count);
 
     // Phase 3b: pc2line from remapped Bytecode source slots.
     try encodePc2Line(function);

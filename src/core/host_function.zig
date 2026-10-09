@@ -716,18 +716,6 @@ pub const builtin_method_ids = struct {
             to_date_string = 133,
             to_time_string = 134,
             to_primitive = 135,
-            // Engine-internal record ids (not installed as Date.prototype
-            // properties; the registry installs only the named methods above).
-            // The exec VM-coercion glue (`exec/date_ops.zig`) captures
-            // `[[DateValue]]` before coercing setter arguments, then routes the
-            // already-coerced apply through the record table's func-object-free
-            // arm using these selectors so it never names the builtin body
-            // directly. `set_year_with_captured_ms`: args[0]=captured ms,
-            // args[1]=coerced year. `set_parts_with_captured_ms`: args[0]=captured
-            // ms, args[1]=int32 decoded setter id (25..31), args[2..]=coerced
-            // field args.
-            set_year_with_captured_ms = 136,
-            set_parts_with_captured_ms = 137,
             // UTC/local twins and the qjs fmt=3 `toLocale*` shapes. QuickJS
             // gives every name its own JS_CFUNC_MAGIC_DEF entry with an
             // `is_local` magic bit (js_date_proto_funcs).
@@ -1049,6 +1037,56 @@ pub const builtin_method_id_lookup = struct {
         pub const legacy_match_all_method_id: u32 = 43;
         pub const legacy_replace_method_id: u32 = 44;
 
+        /// Legacy decoded ids that `string_ops` switches on. The numeric values
+        /// are the historical method numbers; `prototype_method_rows` must
+        /// agree with them.
+        pub const LegacyId = enum(u32) {
+            char_at = 0,
+            substring = 1,
+            to_upper_case = 2,
+            to_lower_case = 3,
+            index_of = 4,
+            includes = 5,
+            starts_with = 6,
+            ends_with = 7,
+            trim = 8,
+            concat = 10,
+            anchor = 11,
+            big = 12,
+            blink = 13,
+            bold = 14,
+            fixed = 15,
+            fontcolor = 16,
+            fontsize = 17,
+            italics = 18,
+            link = 19,
+            small = 20,
+            trim_start = 21,
+            trim_end = 22,
+            strike = 23,
+            sub = 24,
+            substr = 25,
+            sup = 26,
+            split = legacy_split_method_id,
+            last_index_of = 28,
+            char_code_at = 29,
+            at = 30,
+            code_point_at = 31,
+            slice = 32,
+            repeat = 33,
+            pad_start = 34,
+            pad_end = 35,
+            locale_compare = 36,
+            normalize = legacy_normalize_method_id,
+            is_well_formed = 38,
+            to_well_formed = 39,
+            search = legacy_search_method_id,
+            match = legacy_match_method_id,
+            replace_all = legacy_replace_all_method_id,
+            match_all = legacy_match_all_method_id,
+            replace = legacy_replace_method_id,
+        };
+
         const static_method_names = std.StaticStringMap(StaticMethod).initComptime(.{
             .{ "fromCharCode", .from_char_code },
             .{ "fromCodePoint", .from_code_point },
@@ -1174,6 +1212,12 @@ pub const builtin_method_id_lookup = struct {
                     if (row.method == other.method) @compileError("duplicate string prototype method");
                     if (row.decoded == other.decoded) @compileError("duplicate legacy string method id");
                 }
+                // `@field` is a compile error when the row's tag has no LegacyId.
+                const legacy = @field(LegacyId, @tagName(row.method));
+                if (@intFromEnum(legacy) != row.decoded) @compileError("string LegacyId drift for " ++ @tagName(row.method));
+            }
+            if (@typeInfo(LegacyId).@"enum".fields.len != prototype_method_rows.len) {
+                @compileError("string LegacyId count drifted from prototype_method_rows");
             }
         }
 

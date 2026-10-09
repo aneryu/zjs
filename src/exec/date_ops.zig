@@ -47,47 +47,6 @@ fn callDateStaticBody(
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, args, null, null)) orelse error.TypeError;
 }
 
-/// Capture a Date instance's `[[DateValue]]` as an f64 by routing the `getTime`
-/// body through the table (the spec captures `t` before coercing setter args).
-fn captureDateValueMs(ctx: *core.JSContext, this_value: core.JSValue) !f64 {
-    const captured_value = try callDateBody(ctx, this_value, .get_time, &.{});
-    return value_ops.numberValue(captured_value) orelse std.math.nan(f64);
-}
-
-/// Route `setYear` with a pre-captured `[[DateValue]]` and coerced year through
-/// the table's captured-setter arm (`setYearNumber` body). The captured ms and
-/// year are packed as the leading args the record handler unpacks.
-fn callDateSetYearWithCapturedMs(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    captured_ms: f64,
-    year_number: f64,
-) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(PrototypeMethod.set_year_with_captured_ms) };
-    const packed_args = [_]core.JSValue{ core.JSValue.float64(captured_ms), core.JSValue.float64(year_number) };
-    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, &packed_args, null, null)) orelse error.TypeError;
-}
-
-/// Route a date-parts setter with a pre-captured `[[DateValue]]` and coerced
-/// field args through the table's captured-setter arm
-/// (`methodCallArgsWithCapturedMs` body). Layout: args[0]=captured ms,
-/// args[1]=int32 setter `PrototypeMethod` id, args[2..]=coerced field args.
-fn callDateSetPartsWithCapturedMs(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    method: PrototypeMethod,
-    captured_ms: f64,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(PrototypeMethod.set_parts_with_captured_ms) };
-    var packed_args: [6]core.JSValue = undefined;
-    packed_args[0] = core.JSValue.float64(captured_ms);
-    packed_args[1] = core.JSValue.int32(@intCast(@intFromEnum(method)));
-    const count = @min(args.len, packed_args.len - 2);
-    @memcpy(packed_args[2 .. 2 + count], args[0..count]);
-    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, packed_args[0 .. 2 + count], null, null)) orelse error.TypeError;
-}
-
 const DateToPrimitiveHint = enum {
     string,
     number,
@@ -109,10 +68,10 @@ pub fn dateSetYear(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    const captured_ms = try captureDateValueMs(ctx, values[1]);
+    const captured_ms = try dateValue(object_ops.objectFromValue(values[1]).?);
     const year_value = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, values[2]);
     const year_number = value_ops.numberValue(year_value) orelse std.math.nan(f64);
-    return try callDateSetYearWithCapturedMs(ctx, values[1], captured_ms, year_number);
+    return try setYearNumber(values[1], captured_ms, year_number);
 }
 
 pub fn dateSetTime(
@@ -155,47 +114,6 @@ pub fn dateUtcCall(
         slot.* = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
     }
     return try callDateStaticBody(ctx, .utc, values[1..][0..count]);
-}
-
-pub fn dateCapturedSetterCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method: PrototypeMethod,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    // qjs set_date_field coerces exactly `min_int(argc, end_field -
-    // first_field)` arguments; extra arguments are not
-    // coerced (their valueOf must not run).
-    const field_count: usize = switch (method) {
-        .set_milliseconds => 1,
-        .set_seconds => 2,
-        .set_minutes => 3,
-        .set_hours => 4,
-        .set_date => 1,
-        .set_month => 2,
-        .set_full_year => 3,
-        else => return null,
-    };
-    const object = object_ops.objectFromValue(this_value) orelse return null;
-    if (object.class_id != core.class.ids.date) return null;
-
-    var values: [6]core.JSValue = @splat(core.JSValue.undefinedValue());
-    values[0] = global.value();
-    values[1] = this_value;
-    const count = @min(args.len, field_count);
-    @memcpy(values[2..][0..count], args[0..count]);
-    const live: []core.JSValue = &values;
-    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-    const captured_ms = try captureDateValueMs(ctx, values[1]);
-    for (values[2..][0..count]) |*slot| {
-        slot.* = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
-    }
-    return try callDateSetPartsWithCapturedMs(ctx, values[1], method, captured_ms, values[2..][0..count]);
 }
 
 pub fn dateToJsonCall(
@@ -323,13 +241,7 @@ pub const internal_entries = dateEntries: {
         dateEntry("toDateString", 0, @intFromEnum(PrototypeMethod.to_date_string)),
         dateEntry("toTimeString", 0, @intFromEnum(PrototypeMethod.to_time_string)),
         dateEntry("[Symbol.toPrimitive]", 1, @intFromEnum(PrototypeMethod.to_primitive)),
-        // Engine-internal captured-setter records (no JS property; the registry
-        // installs only the named methods above). Reached solely from the
-        // `func_obj == null` arm so `exec/date_ops.zig` can route the
-        // capture-then-apply setter bodies through the table.
-        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_year_with_captured_ms)),
-        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)),
-        // Local/UTC method split + qjs fmt=3 locale shapes (see
+        // Local/UTC field setters and qjs fmt=3 locale shapes (see
         // `isBuiltinsLocalMethod`); handled entirely inside `dateCall`.
         dateEntry("getUTCDay", 0, @intFromEnum(PrototypeMethod.get_utc_day)),
         dateEntry("setUTCMilliseconds", 1, @intFromEnum(PrototypeMethod.set_utc_milliseconds)),
@@ -442,11 +354,6 @@ fn dateStaticOrPrototypeCall(host_call: builtin_dispatch.NativeCall, callable_gl
     }
     if (std.enums.fromInt(PrototypeMethod, id)) |method| {
         const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
-        switch (method) {
-            // Only reachable through `isInternalBodyCall`.
-            .set_year_with_captured_ms, .set_parts_with_captured_ms => return error.TypeError,
-            else => {},
-        }
         if (isBuiltinsLocalMethod(method)) {
             return dateExtendedPrototypeCall(ctx, output, active_global, host_call.this_value, method, args);
         }
@@ -456,19 +363,13 @@ fn dateStaticOrPrototypeCall(host_call: builtin_dispatch.NativeCall, callable_gl
     return staticCall(ctx.runtime, static_method, args);
 }
 
-/// The UTC/local twins and `toLocale*` shapes are coerced by
-/// `dateExtendedPrototypeCall` here; every other prototype method goes
-/// through the exec dispatcher (`object_ops.datePrototypeMethod`).
+/// Field setters (local and UTC) and the `toLocale*` / `getUTCDay` shapes are
+/// coerced by `dateExtendedPrototypeCall`. Every other prototype method goes
+/// through `object_ops.datePrototypeMethod`.
 fn isBuiltinsLocalMethod(method: PrototypeMethod) bool {
+    if (setterSpan(method) != null) return true;
     return switch (method) {
         .get_utc_day,
-        .set_utc_milliseconds,
-        .set_utc_seconds,
-        .set_utc_minutes,
-        .set_utc_hours,
-        .set_utc_date,
-        .set_utc_month,
-        .set_utc_full_year,
         .to_locale_string,
         .to_locale_date_string,
         .to_locale_time_string,
@@ -479,28 +380,13 @@ fn isBuiltinsLocalMethod(method: PrototypeMethod) bool {
 
 /// Run a date method *body* directly for an engine-internal table call that
 /// holds no function object and has already coerced its arguments. Reached only
-/// from `dateCall`'s `func_obj == null` arm. `id` is a `.date` record id:
-/// `StaticMethod.{utc,parse,now}` run the static body on the pre-coerced args;
-/// the captured-setter selectors unpack the captured `[[DateValue]]` (and, for
-/// the parts variant, the setter method id) the exec glue threaded through
-/// `args`; every other prototype method runs the plain `methodCallArgs` body.
+/// from `dateCall`'s `func_obj == null` arm. Prototype ids run `methodCallArgs`;
+/// `StaticMethod.{utc,parse,now}` run the static body.
 fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, args: []const core.JSValue) HostError!core.JSValue {
     const result = blk: {
-        if (std.enums.fromInt(PrototypeMethod, id)) |method| switch (method) {
-            .set_year_with_captured_ms => {
-                const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
-                const year_number = args[1].asNumber() orelse std.math.nan(f64);
-                break :blk setYearNumber(this_value, captured_ms, year_number);
-            },
-            .set_parts_with_captured_ms => {
-                const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
-                const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
-                const setter = std.enums.fromInt(PrototypeMethod, setter_id) orelse break :blk error.TypeError;
-                break :blk methodCallArgsWithCapturedMs(this_value, setter, captured_ms, args[2..]);
-            },
-            else => break :blk methodCallArgs(rt, this_value, method, args),
-        };
-        // `StaticMethod.{utc,parse,now}`: the glue pre-coerced any args.
+        if (std.enums.fromInt(PrototypeMethod, id)) |method| {
+            break :blk methodCallArgs(rt, this_value, method, args);
+        }
         const static_method = std.enums.fromInt(StaticMethod, id) orelse break :blk error.TypeError;
         break :blk staticCall(rt, static_method, args);
     };
@@ -512,7 +398,7 @@ fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, 
 /// the time value *before* coercing arguments, then coerces exactly
 /// `min(argc, end_field - first_field)` arguments; `get_date_field` /
 /// `get_date_string` bodies take no arguments.
-fn dateExtendedPrototypeCall(
+pub fn dateExtendedPrototypeCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -552,54 +438,37 @@ fn dateExtendedPrototypeCall(
 // dispatch/install side keeps the original name.
 pub const staticMethod = core.host_function.builtin_method_id_lookup.date.staticMethod;
 
-const prototype_method_names = std.StaticStringMap(PrototypeMethod).initComptime(.{
-    .{ "getTime", .get_time },
-    .{ "valueOf", .value_of },
-    .{ "getFullYear", .get_full_year },
-    .{ "getTimezoneOffset", .get_timezone_offset },
-    .{ "getMonth", .get_month },
-    .{ "getDate", .get_date },
-    .{ "getHours", .get_hours },
-    .{ "getMinutes", .get_minutes },
-    .{ "getSeconds", .get_seconds },
-    .{ "getMilliseconds", .get_milliseconds },
-    .{ "toISOString", .to_iso_string },
-    .{ "toJSON", .to_json },
-    .{ "getUTCFullYear", .get_utc_full_year },
-    .{ "getUTCMonth", .get_utc_month },
-    .{ "getUTCDate", .get_utc_date },
-    .{ "getUTCHours", .get_utc_hours },
-    .{ "getUTCMinutes", .get_utc_minutes },
-    .{ "getUTCSeconds", .get_utc_seconds },
-    .{ "getUTCMilliseconds", .get_utc_milliseconds },
-    .{ "getUTCDay", .get_utc_day },
-    .{ "getDay", .get_day },
-    .{ "toString", .to_string },
-    .{ "toLocaleString", .to_locale_string },
-    .{ "toUTCString", .to_utc_string },
-    .{ "toGMTString", .to_utc_string },
-    .{ "toDateString", .to_date_string },
-    .{ "toLocaleDateString", .to_locale_date_string },
-    .{ "toTimeString", .to_time_string },
-    .{ "toLocaleTimeString", .to_locale_time_string },
-    .{ "getYear", .get_year },
-    .{ "setYear", .set_year },
-    .{ "setTime", .set_time },
-    .{ "setMilliseconds", .set_milliseconds },
-    .{ "setUTCMilliseconds", .set_utc_milliseconds },
-    .{ "setSeconds", .set_seconds },
-    .{ "setUTCSeconds", .set_utc_seconds },
-    .{ "setMinutes", .set_minutes },
-    .{ "setUTCMinutes", .set_utc_minutes },
-    .{ "setHours", .set_hours },
-    .{ "setUTCHours", .set_utc_hours },
-    .{ "setDate", .set_date },
-    .{ "setUTCDate", .set_utc_date },
-    .{ "setMonth", .set_month },
-    .{ "setUTCMonth", .set_utc_month },
-    .{ "setFullYear", .set_full_year },
-    .{ "setUTCFullYear", .set_utc_full_year },
-});
+const DatePrototypeName = struct { []const u8, PrototypeMethod };
+
+const date_prototype_name_count = blk: {
+    @setEvalBranchQuota(8000);
+    var count: usize = 1; // `toGMTString` aliases `toUTCString`.
+    for (internal_entries) |entry| {
+        if (entry.name.len == 0) continue;
+        // Installed from the symbol atom, not through this string map.
+        if (std.mem.eql(u8, entry.name, "[Symbol.toPrimitive]")) continue;
+        if (std.enums.fromInt(PrototypeMethod, entry.id) == null) continue;
+        count += 1;
+    }
+    break :blk count;
+};
+
+fn datePrototypeNamePairs() [date_prototype_name_count]DatePrototypeName {
+    @setEvalBranchQuota(8000);
+    var pairs: [date_prototype_name_count]DatePrototypeName = undefined;
+    var count: usize = 0;
+    for (internal_entries) |entry| {
+        if (entry.name.len == 0) continue;
+        if (std.mem.eql(u8, entry.name, "[Symbol.toPrimitive]")) continue;
+        const method = std.enums.fromInt(PrototypeMethod, entry.id) orelse continue;
+        pairs[count] = .{ entry.name, method };
+        count += 1;
+    }
+    pairs[count] = .{ "toGMTString", .to_utc_string };
+    return pairs;
+}
+
+const prototype_method_names = std.StaticStringMap(PrototypeMethod).initComptime(datePrototypeNamePairs());
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
     return @intFromEnum(prototype_method_names.get(name) orelse return null);
@@ -692,16 +561,10 @@ pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: P
             // (t - LocalTime(t)) / msPerMinute: fractional for historical
             // second-precision offsets (V8 and QuickJS truncate).
             core.JSValue.number(@as(f64, @floatFromInt(-localOffsetMs(@intFromFloat(@trunc(ms))))) / 60000.0),
-        .to_primitive, .set_year_with_captured_ms, .set_parts_with_captured_ms => error.TypeError,
+        .to_primitive => error.TypeError,
         // Setters were handled by `setterSpan` above.
         .set_milliseconds, .set_seconds, .set_minutes, .set_hours, .set_date, .set_month, .set_full_year, .set_utc_milliseconds, .set_utc_seconds, .set_utc_minutes, .set_utc_hours, .set_utc_date, .set_utc_month, .set_utc_full_year => unreachable,
     };
-}
-
-fn methodCallArgsWithCapturedMs(object_value: core.JSValue, method: PrototypeMethod, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
-    const object = try expectDateObject(object_value);
-    const span = setterSpan(method) orelse return error.TypeError;
-    return setDateFieldBody(object, captured_ms, args, args.len, span);
 }
 
 /// set_date_field field window (quickjs.c js_date_proto_funcs magic):

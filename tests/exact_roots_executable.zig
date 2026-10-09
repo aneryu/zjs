@@ -4280,7 +4280,7 @@ fn verifyDateCoercionRoots() !void {
                 const result = switch (mode) {
                     0 => zjs.exec.date_ops.dateSetTime(ctx, null, global, inputs[0], inputs[1..3]),
                     1 => zjs.exec.date_ops.dateSetYear(ctx, null, global, inputs[0], inputs[1..3]),
-                    2 => zjs.exec.date_ops.dateCapturedSetterCall(ctx, null, global, inputs[0], .set_hours, inputs[1..3]),
+                    2 => optionalValueResult(zjs.exec.date_ops.dateExtendedPrototypeCall(ctx, null, global, inputs[0], .set_hours, inputs[1..3])),
                     3 => zjs.exec.builtin_dispatch.callInternalRecord(ctx, null, global, &.{}, null, inputs[0], .{ .domain = .date, .id = @intFromEnum(zjs.exec.date_ops.PrototypeMethod.set_utc_hours) }, inputs[1..3], null, null),
                     4 => optionalValueResult(zjs.exec.date_ops.dateUtcCall(ctx, null, global, inputs[1..3])),
                     else => optionalValueResult(zjs.exec.call_runtime.constructValueOrBytecodeWithNewTarget(ctx, null, global, try global.getProperty(try rt.internAtom("Date")), inputs[1..@as(usize, if (mode == 5) 2 else 3)], null, null, inputs[3])),

@@ -42,16 +42,7 @@ const AccessorMethod = core.host_function.builtin_method_ids.regexp.AccessorMeth
 pub const LegacyAccessorMethod = core.host_function.builtin_method_ids.regexp.LegacyAccessorMethod;
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
-    if (std.mem.eql(u8, name, "test")) return @intFromEnum(PrototypeMethod.test_);
-    if (std.mem.eql(u8, name, "exec")) return @intFromEnum(PrototypeMethod.exec);
-    if (std.mem.eql(u8, name, "[Symbol.search]")) return @intFromEnum(PrototypeMethod.symbol_search);
-    if (std.mem.eql(u8, name, "[Symbol.match]")) return @intFromEnum(PrototypeMethod.symbol_match);
-    if (std.mem.eql(u8, name, "[Symbol.matchAll]")) return @intFromEnum(PrototypeMethod.symbol_match_all);
-    if (std.mem.eql(u8, name, "[Symbol.replace]")) return @intFromEnum(PrototypeMethod.symbol_replace);
-    if (std.mem.eql(u8, name, "[Symbol.split]")) return @intFromEnum(PrototypeMethod.symbol_split);
-    if (std.mem.eql(u8, name, "compile")) return @intFromEnum(PrototypeMethod.compile);
-    return null;
+    return @intFromEnum(prototype_method_names.get(name) orelse return null);
 }
 
 // Pure accessor/legacy-accessor id<->name(/kind) mappers relocated to engine
@@ -117,6 +108,34 @@ pub const internal_entries = regexpEntries: {
         regexpEntry("get $9", 0, @intFromEnum(LegacyAccessorMethod.get_capture_9)),
     };
 };
+
+const RegexpPrototypeName = struct { []const u8, PrototypeMethod };
+
+const regexp_prototype_name_count = blk: {
+    @setEvalBranchQuota(8000);
+    var count: usize = 0;
+    for (internal_entries) |entry| {
+        if (entry.name.len == 0) continue;
+        if (std.enums.fromInt(PrototypeMethod, entry.id) == null) continue;
+        count += 1;
+    }
+    break :blk count;
+};
+
+fn regexpPrototypeNamePairs() [regexp_prototype_name_count]RegexpPrototypeName {
+    @setEvalBranchQuota(8000);
+    var pairs: [regexp_prototype_name_count]RegexpPrototypeName = undefined;
+    var count: usize = 0;
+    for (internal_entries) |entry| {
+        if (entry.name.len == 0) continue;
+        const method = std.enums.fromInt(PrototypeMethod, entry.id) orelse continue;
+        pairs[count] = .{ entry.name, method };
+        count += 1;
+    }
+    return pairs;
+}
+
+const prototype_method_names = std.StaticStringMap(PrototypeMethod).initComptime(regexpPrototypeNamePairs());
 
 fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
@@ -818,6 +837,48 @@ pub const Flags = regexp_bytecode.Flags;
 pub const ExecResult = regexp_bytecode.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
 pub const Compiled = regexp_lib.Compiled;
+
+/// Inline capture storage for one regexp execution. `buffers` parallel slices
+/// share one heap allocation when `count` exceeds `small_exec_slots`.
+/// Initialize in place: `slices` point at `inline_slots`, so the value must
+/// not be returned and then used.
+pub fn ExecSlots(comptime buffers: usize) type {
+    return struct {
+        inline_slots: [buffers][small_exec_slots]usize = undefined,
+        heap: []usize = &.{},
+        slices: [buffers][]usize = undefined,
+
+        const Self = @This();
+
+        pub fn prepare(self: *Self, allocator: std.mem.Allocator, count: usize) !void {
+            if (count <= small_exec_slots) {
+                inline for (0..buffers) |index| {
+                    self.slices[index] = self.inline_slots[index][0..count];
+                }
+                return;
+            }
+            self.heap = try allocator.alloc(usize, count * buffers);
+            const heap = self.heap;
+            inline for (0..buffers) |index| {
+                self.slices[index] = heap[index * count ..][0..count];
+            }
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (self.heap.len != 0) allocator.free(self.heap);
+        }
+    };
+}
+
+/// Corrupt bytecode is a failed match (the caller returns null). A timeout is
+/// the uncatchable interrupt. Any other exec error propagates.
+pub fn recoverExecError(ctx: *core.JSContext, global: *core.Object, err: ExecError) !void {
+    switch (err) {
+        error.BytecodeCorrupt => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return exception_ops.throwInterrupted(ctx, global),
+    }
+}
 pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled {
     return regexp_lib.compilePatternAndFlagsWithOptions(rt.nativeAllocator(), pattern, flags, .{ .host = runtimeHost(rt) });
 }
@@ -1203,24 +1264,13 @@ fn testAndRecordLegacyStatics(ctx: *core.JSContext, global: *core.Object, compil
     const string_data = core.string.asFlat(values[1]).?.resolveData();
 
     const alloc_count = compiled.allocCount();
-    var inline_capture_slots: [small_exec_slots]usize = undefined;
-    var heap_capture_slots: []usize = &.{};
-    defer if (heap_capture_slots.len != 0) rt.nativeAllocator().free(heap_capture_slots);
-    const capture_slots = if (alloc_count <= inline_capture_slots.len)
-        inline_capture_slots[0..alloc_count]
-    else capture: {
-        heap_capture_slots = try rt.nativeAllocator().alloc(usize, alloc_count);
-        break :capture heap_capture_slots;
-    };
-    const result = execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_data, 0, capture_slots) catch |err| switch (err) {
-        error.BytecodeCorrupt => return null,
-        // The runtime interrupt handler fired (host interrupt or
-        // termination): uncatchable, as in the interpreter.
-        error.Timeout => {
-            try exception_ops.throwInterrupted(ctx, global);
-            unreachable;
-        },
-        else => return err,
+    var capture_storage: ExecSlots(1) = .{};
+    defer capture_storage.deinit(rt.nativeAllocator());
+    try capture_storage.prepare(rt.nativeAllocator(), alloc_count);
+    const capture_slots = capture_storage.slices[0];
+    const result = execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_data, 0, capture_slots) catch |err| {
+        try recoverExecError(ctx, global, err);
+        return null;
     };
     switch (result) {
         .match => {
@@ -1650,24 +1700,13 @@ fn regExpExecCompiledResult(
     exec_roots.activate(rt);
     defer exec_roots.deactivate(rt);
     const alloc_count = compiled.allocCount();
-    var inline_capture_slots: [small_exec_slots]usize = undefined;
-    var heap_capture_slots: []usize = &.{};
-    defer if (heap_capture_slots.len != 0) rt.nativeAllocator().free(heap_capture_slots);
-    const capture_slots = if (alloc_count <= inline_capture_slots.len)
-        inline_capture_slots[0..alloc_count]
-    else capture: {
-        heap_capture_slots = try rt.nativeAllocator().alloc(usize, alloc_count);
-        break :capture heap_capture_slots;
-    };
-    const result = execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_data, start_index, capture_slots) catch |err| switch (err) {
-        error.BytecodeCorrupt => return null,
-        // The runtime interrupt handler fired (host interrupt or
-        // termination): uncatchable, as in the interpreter.
-        error.Timeout => {
-            try exception_ops.throwInterrupted(ctx, global);
-            unreachable;
-        },
-        else => return err,
+    var capture_storage: ExecSlots(1) = .{};
+    defer capture_storage.deinit(rt.nativeAllocator());
+    try capture_storage.prepare(rt.nativeAllocator(), alloc_count);
+    const capture_slots = capture_storage.slices[0];
+    const result = execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_data, start_index, capture_slots) catch |err| {
+        try recoverExecError(ctx, global, err);
+        return null;
     };
 
     switch (result) {

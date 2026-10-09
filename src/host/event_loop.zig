@@ -216,6 +216,8 @@ pub const EventLoop = struct {
             // whenever such a node exists; the helper also shortens this wait
             // to the earliest waitAsync deadline.
             if (exec.atomics_ops.waitForAtomicsHostSignalUntil(rt, deadline, false)) return true;
+            // Fallback wait only. A sleep error ends this pause early and the
+            // caller retries, so it must not abort the host loop.
             std.Io.sleep(clock.io(), std.Io.Duration.fromMilliseconds(sleep_ms), .awake) catch {};
             return true;
         }

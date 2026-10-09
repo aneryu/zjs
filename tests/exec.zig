@@ -893,13 +893,13 @@ test "date boundary setters retain receiver across argument coercion" {
         };
         probe.receiver = input[0].cycleMarkHeader().?;
         const before = rt.active_value_roots;
-        const result = switch (mode) {
-            0 => engine.exec.date_ops.dateSetTime(js.context, null, global, input[0], input[1..]),
-            1 => engine.exec.date_ops.dateSetYear(js.context, null, global, input[0], input[1..]),
-            else => engine.exec.date_ops.dateCapturedSetterCall(js.context, null, global, input[0], .set_hours, input[1..]),
+        const result: ?core.JSValue = switch (mode) {
+            0 => try engine.exec.date_ops.dateSetTime(js.context, null, global, input[0], input[1..]),
+            1 => try engine.exec.date_ops.dateSetYear(js.context, null, global, input[0], input[1..]),
+            else => try engine.exec.date_ops.dateExtendedPrototypeCall(js.context, null, global, input[0], .set_hours, input[1..]),
         };
         try std.testing.expect(!probe.lost);
-        try std.testing.expect((try result).?.isNumber());
+        try std.testing.expect(result.?.isNumber());
         try std.testing.expectEqual(@as(usize, 1), probe.calls);
         try std.testing.expect(rt.active_value_roots == before);
     }
@@ -6801,10 +6801,10 @@ test "runtime-strict script still constructs its global function declaration" {
 
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalFileWithOutputModeStrict(
+    const result = try js.evalWithOptions(
         \\function __qjsRuntimeStrictGlobalFunction() {}
         \\print(Object.prototype.hasOwnProperty.call(globalThis, "__qjsRuntimeStrictGlobalFunction"));
-    , &output, .script, "runtime-strict-global-function.js", true);
+    , .{ .output = &output, .mode = .script, .filename = "runtime-strict-global-function.js", .parse_strict = true, .runtime_strict = true });
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n", output.buffered());
@@ -12667,7 +12667,7 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalFileWithOutputModeRuntimeStrict(
+    const result = try js.evalWithOptions(
         \\function strictThis() { return this === undefined; }
         \\function cliLocalFunction() {}
         \\print(this === undefined);
@@ -12685,7 +12685,7 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
         \\print(evalCreated);
         \\print(delete evalCreated);
         \\try { print(capture()); } catch (e) { print(e instanceof ReferenceError); }
-    , &stream, .script, "runtime-strict-file.js", true);
+    , .{ .output = &stream, .mode = .script, .filename = "runtime-strict-file.js", .runtime_strict = true });
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\ntrue\ntrue\ncliLocalFunction\ntrue\ntrue\n5\ntrue\ntrue\n", stream.buffered());
@@ -12697,7 +12697,7 @@ test "runtime-strict eval overrides parse-time mapped arguments subtype" {
 
     var output_buffer: [96]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalFileWithOutputModeRuntimeStrict(
+    const result = try js.evalWithOptions(
         \\function forcedArguments(value) {
         \\  const before = arguments[0];
         \\  value = 7;
@@ -12707,7 +12707,7 @@ test "runtime-strict eval overrides parse-time mapped arguments subtype" {
         \\  print(before, value, arguments[0], callee);
         \\}
         \\forcedArguments(5);
-    , &output, .script, "runtime-strict-arguments.js", true);
+    , .{ .output = &output, .mode = .script, .filename = "runtime-strict-arguments.js", .runtime_strict = true });
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("5 7 9 TypeError\n", output.buffered());
@@ -20526,7 +20526,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.hits += 1;
             self.saw_empty_queue = rt.job_queue.jobs.len == 0;
-            _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
+            helpers.gc.reclaimNow(rt);
             self.reclaimed = !rt.ownsObject(self.canary);
             return false;
         }
@@ -20625,7 +20625,7 @@ test "fulfilled await roots its continuation through constructor getter GC" {
         fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.calls += 1;
-            _ = rt.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
+            helpers.gc.reclaimNow(rt);
             // Snapshot before await's subsequent allocations can reuse the
             // freed address; a later ownsObject(pointer) cannot prove identity.
             self.reclaimed_canary = !rt.ownsObject(self.canary);
@@ -27131,7 +27131,7 @@ test "escaped direct eval function keeps eval stack filename" {
 
     var output_buffer: [1]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalFileWithOutputMode(
+    const result = try js.evalWithOptions(
         \\function createThrower() {
         \\  return eval("(function evalThrower(){ throw new Error('boom'); })");
         \\}
@@ -27140,11 +27140,11 @@ test "escaped direct eval function keeps eval stack filename" {
         \\try { escaped(); } catch (error) { stack = error.stack; }
         \\assert.sameValue(typeof stack, "string");
         \\assert.sameValue(stack.indexOf("<eval>") >= 0, true);
-    ,
-        &stream,
-        .script,
-        "/fixture/scripts/original.js",
-    );
+    , .{
+        .output = &stream,
+        .mode = .script,
+        .filename = "/fixture/scripts/original.js",
+    });
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", stream.buffered());

@@ -27,6 +27,7 @@ const gc_alloc = @import("zjs").core.gc.allocation;
 const std = @import("std");
 const zjs = @import("zjs");
 const memory_modules = @import("harness/memory_modules.zig");
+const expect_values = @import("harness/expect.zig");
 
 const core = zjs.core;
 const BindingContext = zjs.JSContext;
@@ -528,14 +529,8 @@ const corpus = [_]Snippet{
 fn expectValue(value: core.JSValue, expect: Expect) !void {
     switch (expect) {
         .any => {},
-        .string => |expected| try expectStringValue(value, expected),
+        .string => |expected| try expect_values.expectStringValueBytes(value, expected),
     }
-}
-
-fn expectStringValue(value: core.JSValue, expected: []const u8) !void {
-    if (!value.isString()) return error.TestUnexpectedResult;
-    const string_value = value.asStringBody() orelse return error.TestUnexpectedResult;
-    if (!string_value.eqlBytes(expected)) return error.TestUnexpectedResult;
 }
 
 /// One full engine lifecycle around a corpus snippet. Shaped for
@@ -585,7 +580,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
 
     if (snippet.post_source) |post_source| {
         const post_value = try wrapper.eval(post_source, .{ .filename = corpus_filename });
-        try expectStringValue(post_value, snippet.post_expect);
+        try expect_values.expectStringValueBytes(post_value, snippet.post_expect);
     }
 
     zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
@@ -707,7 +702,7 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
 
     {
         const post_value = try wrapper.eval("__graph === 42 ? \"graph-ok\" : \"graph-bad\"", .{ .filename = corpus_filename });
-        try expectStringValue(post_value, "graph-ok");
+        try expect_values.expectStringValueBytes(post_value, "graph-ok");
     }
 
     ctx_owned = false;
@@ -933,7 +928,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         // the injected failure, it is not itself an injection target.
         injector.disarmed = true;
         const canary = try wrapper.eval(canary_source, .{ .filename = "<oom-canary>" });
-        try expectStringValue(canary, "canary-ok");
+        try expect_values.expectStringValueBytes(canary, "canary-ok");
     }
 }
 
@@ -1067,7 +1062,7 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
             \\      ? "realm-retry-ok" : "realm-retry-bad";
             \\})(1)
         , .{ .filename = "<realm-bootstrap-retry>" });
-        try expectStringValue(canary, "realm-retry-ok");
+        try expect_values.expectStringValueBytes(canary, "realm-retry-ok");
     }
     try injector.expectBalanced();
     return induced;
@@ -1142,7 +1137,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expectEqual(native_count_before, rt.native_bindings.entries.items.len);
 
         const canary = try created.eval(canary_source, .{ .filename = "<binding-construction-retry>" });
-        try expectStringValue(canary, "canary-ok");
+        try expect_values.expectStringValueBytes(canary, "canary-ok");
     }
     try injector.expectBalanced();
     return induced;
@@ -1412,7 +1407,7 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
     try std.testing.expect(refuse_first.fired);
     // Non-sticky: the same runtime still evaluates the canary correctly.
     const canary = try wrapper.eval(canary_source, .{ .filename = "<oom-canary>" });
-    try expectStringValue(canary, "canary-ok");
+    try expect_values.expectStringValueBytes(canary, "canary-ok");
 }
 
 // ---------------------------------------------------------------------------

@@ -86,6 +86,8 @@ GC safety net。每合并批仍只跑一轮批门禁。
 - 环境陷阱清单:linked worktree 的 test262 空 submodule 时先跑
   `mise run worktree-init`;该任务复用主 worktree 的 corpus,且 symlink 不进提交。
   scratch 一律 worktree 内 `.scratch/`,严禁 /tmp 裸文件名(agent 间撞车实录)。
+- 字节码 identity gate `tools/gates/bytecode_fingerprint.sh <baseline-zjs> <candidate-zjs> [corpus-list]`
+  只手动跑,不进 `zig build` 或 CI:两边对同一语料的 `--bytecode-fingerprint` 逐行比较,有差异即失败。
 
 ## 风险自认(owner 已知情)
 

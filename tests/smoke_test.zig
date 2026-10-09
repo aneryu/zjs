@@ -14,23 +14,12 @@ const ProfileCase = struct {
     min_opcodes: u64,
 };
 
-fn resolvedZjsProfilePath(buf: *[1024]u8) []const u8 {
-    const configured_path = build_options.zjs_profile_executable_path;
-    if (std.Io.Dir.cwd().openFile(std.testing.io, configured_path, .{})) |file| {
+fn resolvedPath(buf: *[1024]u8, configured: []const u8) []const u8 {
+    if (std.Io.Dir.cwd().openFile(std.testing.io, configured, .{})) |file| {
         file.close(std.testing.io);
-        return configured_path;
+        return configured;
     } else |_| {
-        return std.fmt.bufPrint(buf, "../../{s}", .{configured_path}) catch configured_path;
-    }
-}
-
-fn resolvedZjsPath(buf: *[1024]u8) []const u8 {
-    const configured_path = build_options.zjs_executable_path;
-    if (std.Io.Dir.cwd().openFile(std.testing.io, configured_path, .{})) |file| {
-        file.close(std.testing.io);
-        return configured_path;
-    } else |_| {
-        return std.fmt.bufPrint(buf, "../../{s}", .{configured_path}) catch configured_path;
+        return std.fmt.bufPrint(buf, "../../{s}", .{configured}) catch configured;
     }
 }
 
@@ -49,7 +38,7 @@ test "bundled host globals and bitmap GC tear down in an executable" {
     // A Zig test enables carrier auditing and cannot exercise the executable's
     // bitmap-only reclamation path. Keep --leak-check's Runtime assertion on.
     const result = try std.process.run(allocator, std.testing.io, .{
-        .argv = &.{ resolvedZjsPath(&path), "--leak-check", "-e", "print(atob(btoa('host'))); queueMicrotask(() => console.log('job')); gc();" },
+        .argv = &.{ resolvedPath(&path, build_options.zjs_executable_path), "--leak-check", "-e", "print(atob(btoa('host'))); queueMicrotask(() => console.log('job')); gc();" },
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -61,7 +50,7 @@ test "bundled host globals and bitmap GC tear down in an executable" {
 test "zjs CLI behavior" {
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&zjs_path_buf);
+    const zjs_path = resolvedPath(&zjs_path_buf, build_options.zjs_executable_path);
 
     // 1. Basic Eval
     {
@@ -178,7 +167,7 @@ test "zjs CLI behavior" {
     // binary fails --profile-opcodes closed by contract (checked in 5b).
     if (build_options.smoke_profile_checks) {
         var profile_path_buf: [1024]u8 = undefined;
-        const zjs_profile_path = resolvedZjsProfilePath(&profile_path_buf);
+        const zjs_profile_path = resolvedPath(&profile_path_buf, build_options.zjs_profile_executable_path);
         const result = try std.process.run(allocator, std.testing.io, .{
             .argv = &[_][]const u8{
                 zjs_profile_path,
@@ -517,7 +506,7 @@ test "zjs CLI behavior" {
 test "prepared method calls capture callee before argument side effects" {
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&zjs_path_buf);
+    const zjs_path = resolvedPath(&zjs_path_buf, build_options.zjs_executable_path);
     const source =
         \\let log = "";
         \\let old = function(x) { log += "old" + x; };
@@ -550,7 +539,7 @@ test "CLI top-level range fast paths collapse completion-store loops" {
     if (!build_options.smoke_profile_checks) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsProfilePath(&zjs_path_buf);
+    const zjs_path = resolvedPath(&zjs_path_buf, build_options.zjs_profile_executable_path);
 
     const cases = [_]ProfileCase{
         .{
@@ -680,7 +669,7 @@ test "CLI nonempty block census rows reconcile with totals" {
     var path_buffer: [1024]u8 = undefined;
     const result = try std.process.run(std.testing.allocator, std.testing.io, .{
         .argv = &.{
-            resolvedZjsPath(&path_buffer),                                       "--gc-stats", "--gc-block-census", "-e",
+            resolvedPath(&path_buffer, build_options.zjs_executable_path),       "--gc-stats", "--gc-block-census", "-e",
             "const a=[]; for(let i=0;i<5000;i++) a.push({i}); print(a.length);",
         },
     });
@@ -726,7 +715,7 @@ test "zjs writes stdout at the shared file offset instead of overwriting it" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -752,7 +741,7 @@ test "zjs lets an importer handle a rejection its dependency left unhandled" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -772,7 +761,7 @@ test "zjs keeps a failed JSON module import from breaking later imports" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -798,7 +787,7 @@ test "zjs re-imports a module whose JSON dependency failed with the same error" 
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -828,7 +817,7 @@ test "zjs loads a file whose name looks like a synthetic module tag as JavaScrip
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -854,7 +843,7 @@ test "zjs runs a script whose file name is not UTF-8" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -879,7 +868,7 @@ test "zjs keeps its exit status when stderr cannot be written" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     // Only an unwritable stdout exits like SIGPIPE (141).
     const cases = [_]struct { script: []const u8, status: u8 }{
         .{ .script = "exec \"$0\" missing-file.js 2>/dev/full", .status = 1 },
@@ -898,7 +887,7 @@ test "zjs --native-stack-size 0 still bounds native recursion by the thread stac
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const result = try std.process.run(allocator, io, .{ .argv = &.{ zjs_path, "--native-stack-size", "0", "-e", "try { JSON.parse('['.repeat(1e7)); } catch (e) { print(e.constructor.name); }" } });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -910,7 +899,7 @@ test "zjs accepts TypeScript export merging, typed using, default overloads and 
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -952,7 +941,7 @@ test "zjs rejects unsupported import attribute keys with SyntaxError" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -979,7 +968,7 @@ test "zjs rejects unsupported import attribute keys with SyntaxError" {
 test "zjs host globals convert arguments and print lone surrogates" {
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const source =
         \\const name = (f) => { try { return f(); } catch (e) { return e.name; } };
         \\print("a\ud800b", /😀a/u);
@@ -996,7 +985,7 @@ test "zjs host globals convert arguments and print lone surrogates" {
 test "zjs reports thrown primitives and rejected primitives by value" {
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const Case = struct { source: []const u8, stderr: []const u8 };
     for ([_]Case{
         .{ .source = "throw 42", .stderr = "42\n" },
@@ -1015,7 +1004,7 @@ test "zjs reports thrown primitives and rejected primitives by value" {
 test "zjs reports top-level engine errors as JS errors" {
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const Case = struct { argv: []const []const u8, stderr: []const u8 };
     for ([_]Case{
         .{ .argv = &.{ "-e", "10n / 0n" }, .stderr = "RangeError: BigInt division by zero\n    at <eval> (<eval>:1:5)\n" },
@@ -1035,7 +1024,7 @@ test "zjs reports top-level engine errors as JS errors" {
 test "zjs catches out-of-memory from literal creation" {
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     for ([_][]const u8{ "a.push({ x: 1 })", "a.push([])" }) |step| {
         var source_buf: [128]u8 = undefined;
         const source = try std.fmt.bufPrint(&source_buf, "var a = []; try {{ for (;;) {s}; }} catch (e) {{ a = null; print(e.name); }}", .{step});
@@ -1053,7 +1042,7 @@ test "zjs host output keeps prints from user code run while printing or converti
     // conversions print through the invocation's writer too.
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const source =
         \\Error.prepareStackTrace = () => { print("P"); return "S"; };
         \\console.error(new Error("x"));
@@ -1072,7 +1061,7 @@ test "zjs host output keeps prints from user code run while printing or converti
 test "zjs accepts --can-block with -e as its usage line advertises" {
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const result = try std.process.run(allocator, std.testing.io, .{ .argv = &.{ zjs_path, "--can-block", "-e", "print(1)" } });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -1087,7 +1076,7 @@ test "zjs -s reports an implementation-limit compile error with its filename" {
     // "URIError: expecting hex digit" instead.
     const allocator = std.testing.allocator;
     var path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&path_buf);
+    const zjs_path = resolvedPath(&path_buf, build_options.zjs_executable_path);
     const root_dir = ".zig-cache/smoke-compile-limit";
     const script_path = root_dir ++ "/too_many_locals.js";
     std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};

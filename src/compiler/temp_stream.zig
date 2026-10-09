@@ -2,8 +2,11 @@
 //! stream: the bind index rows, the phase-1 instruction view, and the source
 //! point used to dedupe markers.
 
+const std = @import("std");
 const core = @import("../core/root.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
+const labels = @import("labels.zig");
 
 const opcode = bytecode.opcode;
 
@@ -12,18 +15,81 @@ pub const Error = error{
     InvalidBytecode,
 };
 
-/// Sorted bind-index row of `resolve_variables`: one per bound label, keyed
-/// by the temporary-stream offset the label is bound at. `dead_skipped` is
-/// resolver bookkeeping.
+/// Sorted bind-index row shared by both resolve passes: one per bound
+/// label, keyed by the temporary-stream offset it is bound at.
+/// `dead_skipped` is walk bookkeeping. The two snapshots are read by
+/// `resolve_labels` and stay false for variable resolution.
 pub const BindEntry = struct {
     input_offset: u32,
     label_index: u32,
     dead_skipped: bool = false,
+    initially_referenced: bool = false,
+    match_barrier: bool = false,
 };
 
 pub fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
     if (lhs.input_offset != rhs.input_offset) return lhs.input_offset < rhs.input_offset;
     return lhs.label_index < rhs.label_index;
+}
+
+/// Structural preflight shared by the two resolve passes. `extra` carries
+/// the checks only one pass needs; every failure is `InvalidBytecode`.
+pub fn validateStreams(
+    comptime S: type,
+    s: *const S,
+    comptime extra: fn (*const S) Error!void,
+) Error!void {
+    if (s.code_len > s.code.len or
+        s.atom_len > s.atom_operands.len or
+        s.label_len > s.label_slots.len or
+        s.source_len > s.source_slots.len)
+    {
+        return error.InvalidBytecode;
+    }
+
+    var previous_source_offset: u32 = 0;
+    for (s.source_slots[0..s.source_len], 0..) |source, index| {
+        if (source.temp_offset > s.code_len or
+            (index != 0 and source.temp_offset < previous_source_offset))
+        {
+            return error.InvalidBytecode;
+        }
+        previous_source_offset = source.temp_offset;
+    }
+
+    for (s.label_slots[0..s.label_len]) |slot| {
+        if (slot.flags.bound) {
+            if (slot.bound_offset == labels.unbound or slot.bound_offset > s.code_len)
+                return error.InvalidBytecode;
+        } else if (slot.bound_offset != labels.unbound) {
+            return error.InvalidBytecode;
+        }
+    }
+    try extra(s);
+}
+
+/// Count, allocate, fill, and sort the bound-label index. `fill` supplies
+/// the pass-specific snapshots; the sort key is the shared one.
+pub fn buildBindIndex(
+    memory: std.mem.Allocator,
+    slots: []const labels.LabelSlot,
+    comptime fill: fn (labels.LabelSlot, usize) BindEntry,
+) Error![]BindEntry {
+    var bind_count: usize = 0;
+    for (slots) |slot| {
+        if (slot.flags.bound) bind_count += 1;
+    }
+    if (bind_count == 0) return &.{};
+
+    const binds = memory.alloc(BindEntry, bind_count) catch return error.OutOfMemory;
+    var index: usize = 0;
+    for (slots, 0..) |slot, label_index| {
+        if (!slot.flags.bound) continue;
+        binds[index] = fill(slot, label_index);
+        index += 1;
+    }
+    sort_erased.heap(BindEntry, binds, {}, bindLessThan);
+    return binds;
 }
 
 pub const TempInstruction = packed struct(u16) {

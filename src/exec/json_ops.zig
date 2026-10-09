@@ -668,7 +668,7 @@ const JsonUnitParser = struct {
     fn recordSourceSpan(self: *Self, start: usize, end: usize) ![]u8 {
         var bytes = std.ArrayList(u8).empty;
         errdefer bytes.deinit(self.rt.nativeAllocator());
-        try appendWtf8FromUnits(self.rt, &bytes, self.units[start..end]);
+        try unicode.appendUtf16UnitsAsUtf8(self.rt.nativeAllocator(), &bytes, self.units[start..end]);
         return bytes.toOwnedSlice(self.rt.nativeAllocator());
     }
 
@@ -835,7 +835,7 @@ const JsonUnitParser = struct {
         try self.parseStringUnits(&key_units);
         var key_bytes = std.ArrayList(u8).empty;
         defer key_bytes.deinit(self.rt.nativeAllocator());
-        try appendWtf8FromUnits(self.rt, &key_bytes, key_units.items);
+        try unicode.appendUtf16UnitsAsUtf8(self.rt.nativeAllocator(), &key_bytes, key_units.items);
         return self.rt.internAtom(key_bytes.items);
     }
 
@@ -944,38 +944,6 @@ const JsonUnitParser = struct {
         return core.JSValue.float64(float_value);
     }
 };
-
-/// Encode UTF-16 code units as WTF-8 bytes (surrogate pairs join; lone
-/// surrogates encode as their 3-byte form): the atom-name byte encoding.
-fn appendWtf8FromUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), units: []const u16) !void {
-    var index: usize = 0;
-    while (index < units.len) : (index += 1) {
-        const unit = units[index];
-        var cp: u32 = unit;
-        if (unit >= 0xD800 and unit <= 0xDBFF and index + 1 < units.len) {
-            const next = units[index + 1];
-            if (next >= 0xDC00 and next <= 0xDFFF) {
-                cp = 0x10000 + ((@as(u32, unit) - 0xD800) << 10) + (next - 0xDC00);
-                index += 1;
-            }
-        }
-        if (cp < 0x80) {
-            try out.append(rt.nativeAllocator(), @intCast(cp));
-        } else if (cp < 0x800) {
-            try out.append(rt.nativeAllocator(), @intCast(0xc0 | (cp >> 6)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
-        } else if (cp < 0x10000) {
-            try out.append(rt.nativeAllocator(), @intCast(0xe0 | (cp >> 12)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 6) & 0x3f)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
-        } else {
-            try out.append(rt.nativeAllocator(), @intCast(0xf0 | (cp >> 18)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 12) & 0x3f)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 6) & 0x3f)));
-            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
-        }
-    }
-}
 
 pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
@@ -1721,6 +1689,52 @@ fn jsonStringifySimpleNoOptions(rt: *core.JSRuntime, global: *core.Object, value
     };
 }
 
+/// Encode one JSON primitive. `null` means `value` is not a primitive.
+/// `false` means it is omitted: undefined or a symbol outside an array slot.
+fn appendJsonPrimitive(
+    rt: *core.JSRuntime,
+    buffer: *std.ArrayList(u8),
+    value: core.JSValue,
+    array_slot: bool,
+) !?bool {
+    if (value.is(.undefined_value) or value.is(.symbol)) {
+        if (!array_slot) return false;
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
+        return true;
+    }
+    if (value.is(.null_value)) {
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
+        return true;
+    }
+    if (value.isString()) {
+        try appendJsonStringValue(rt, buffer, value);
+        return true;
+    }
+    if (value.as(.boolean)) |bool_value| {
+        try buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
+        return true;
+    }
+    if (value.as(.int)) |int_value| {
+        var int_buf: [20]u8 = undefined;
+        const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
+        try buffer.appendSlice(rt.nativeAllocator(), printed);
+        return true;
+    }
+    if (value_ops.numberValue(value)) |number| {
+        if (!std.math.isFinite(number)) {
+            try buffer.appendSlice(rt.nativeAllocator(), "null");
+        } else if (number == 0) {
+            try buffer.append(rt.nativeAllocator(), '0');
+        } else {
+            var number_buf: [128]u8 = undefined;
+            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
+            try buffer.appendSlice(rt.nativeAllocator(), printed);
+        }
+        return true;
+    }
+    return null;
+}
+
 fn jsonAppendSimpleValue(
     rt: *core.JSRuntime,
     global: *core.Object,
@@ -1734,42 +1748,8 @@ fn jsonAppendSimpleValue(
     // must turn into a catchable InternalError "stack overflow" (QuickJS
     // js_json_to_str, quickjs.c) instead of a native crash.
     if (rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
-    if (value.is(.undefined_value) or value.is(.symbol)) {
-        if (array_slot) {
-            try buffer.appendSlice(rt.nativeAllocator(), "null");
-            return .appended;
-        }
-        return .omitted;
-    }
-    if (value.is(.null_value)) {
-        try buffer.appendSlice(rt.nativeAllocator(), "null");
-        return .appended;
-    }
-    if (value.isString()) {
-        try appendJsonStringValue(rt, buffer, value);
-        return .appended;
-    }
-    if (value.as(.boolean)) |bool_value| {
-        try buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
-        return .appended;
-    }
-    if (value.as(.int)) |int_value| {
-        var int_buf: [20]u8 = undefined;
-        const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
-        try buffer.appendSlice(rt.nativeAllocator(), printed);
-        return .appended;
-    }
-    if (value_ops.numberValue(value)) |number| {
-        if (!std.math.isFinite(number)) {
-            try buffer.appendSlice(rt.nativeAllocator(), "null");
-        } else if (number == 0) {
-            try buffer.append(rt.nativeAllocator(), '0');
-        } else {
-            var number_buf: [128]u8 = undefined;
-            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
-            try buffer.appendSlice(rt.nativeAllocator(), printed);
-        }
-        return .appended;
+    if (try appendJsonPrimitive(rt, buffer, value, array_slot)) |appended| {
+        return if (appended) .appended else .omitted;
     }
     if (value.isBigInt()) return .fallback;
 
@@ -2101,24 +2081,8 @@ fn jsonAppendValue(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    if (values[1].is(.undefined_value) or values[1].is(.symbol)) {
-        try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (array_slot) "null" else "");
-    } else if (values[1].is(.null_value)) {
-        try buffer.appendSlice(ctx.runtime.nativeAllocator(), "null");
-    } else if (values[1].isString()) {
-        try appendJsonStringValue(ctx.runtime, buffer, values[1]);
-    } else if (values[1].as(.boolean)) |bool_value| {
-        try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (bool_value) "true" else "false");
-    } else if (value_ops.numberValue(values[1])) |number| {
-        if (!std.math.isFinite(number)) {
-            try buffer.appendSlice(ctx.runtime.nativeAllocator(), "null");
-        } else if (number == 0) {
-            try buffer.append(ctx.runtime.nativeAllocator(), '0');
-        } else {
-            var number_buf: [128]u8 = undefined;
-            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
-            try buffer.appendSlice(ctx.runtime.nativeAllocator(), printed);
-        }
+    if (try appendJsonPrimitive(ctx.runtime, buffer, values[1], array_slot) != null) {
+        // Written, or omitted (undefined / symbol outside an array slot).
     } else if (values[1].isBigInt()) {
         return error.BigIntNotSerializable;
     } else if (object_ops.objectFromValue(values[1])) |object| {

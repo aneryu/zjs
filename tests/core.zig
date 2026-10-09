@@ -1041,7 +1041,7 @@ test "weak handle callbacks run after the collection and may release handles" {
             if (core.Object.createPlainObject(runtime, null)) |_| {
                 probe.allocated = true;
             } else |_| {}
-            _ = runtime.collectForTest() catch {};
+            helpers.gc.reclaimNow(runtime);
         }
     };
     Callback.probe = .{};
@@ -2781,12 +2781,6 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
 
 const cap_bytes: usize = 8 * 1024 * 1024;
 
-fn expectStringValue(value: core.JSValue, expected: []const u8) !void {
-    if (!value.isString()) return error.TestUnexpectedResult;
-    const string_value = value.asStringBody() orelse return error.TestUnexpectedResult;
-    if (!string_value.eqlBytes(expected)) return error.TestUnexpectedResult;
-}
-
 test "engine production: 8MB cap OOM reaches JS catch as InternalError and the context stays usable" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .memory_limit = cap_bytes,
@@ -2819,7 +2813,7 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
         \\}
         \\oomCaught ? "caught:" + oomName : "uncaught"
     , .{ .filename = "<oom-cap>" });
-    try expectStringValue(caught, "caught:InternalError");
+    try helpers.expectStringValueBytes(caught, "caught:InternalError");
 
     // Same context must keep working after the OOM was caught and the
     // oversized value released.
@@ -2839,10 +2833,10 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
         \\}
         \\arrName
     , .{ .filename = "<oom-cap>" });
-    try expectStringValue(array_caught, "InternalError");
+    try helpers.expectStringValueBytes(array_caught, "InternalError");
 
     const final = try wrapper.eval("\"alive\"", .{ .filename = "<oom-cap>" });
-    try expectStringValue(final, "alive");
+    try helpers.expectStringValueBytes(final, "alive");
 }
 
 /// Counts allocations that actually reach the backing allocator. Used to
@@ -2933,14 +2927,14 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
         \\}
         \\"ready"
     , .{ .filename = "<oom-pin>" });
-    try expectStringValue(setup, "ready");
+    try helpers.expectStringValueBytes(setup, "ready");
 
     // Phase 2: inside one already-compiled call, exhaust the heap, force an
     // allocating operation to fail, and require (a) the catch handler sees
     // the preallocated InternalError and (b) zero allocations reached the
     // backing allocator inside the __exhaust..__report window.
     const result = try wrapper.eval("probe()", .{ .filename = "<oom-pin>" });
-    try expectStringValue(result, "InternalError");
+    try helpers.expectStringValueBytes(result, "InternalError");
 
     try std.testing.expect(state.window_allocations != null);
     try std.testing.expectEqual(@as(usize, 0), state.window_allocations.?);

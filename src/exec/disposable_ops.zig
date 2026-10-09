@@ -458,18 +458,16 @@ fn asyncDisposableStackDisposeAsync(
     return capability.promise;
 }
 
-fn asyncDisposableStackContinuation(
+pub fn asyncDisposableStackContinuation(
     rt: *core.JSRuntime,
     global: *core.Object,
     stack: *core.Object,
     rejected: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_disposable_stack_continuation);
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .async_disposable_stack_continuation);
     try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value());
     (try callback_object.functionAsyncDisposeRejectedSlot(rt)).* = rejected;
-    return callback;
+    return callback_object.value();
 }
 
 pub fn asyncDisposableStackContinuationCall(
@@ -626,15 +624,7 @@ fn asyncDisposableStackAwaitValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    const awaited = try promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{value}, caller_function, caller_frame);
-
-    const on_fulfilled = try asyncDisposableStackContinuation(ctx.runtime, global, stack, false);
-    const on_rejected = try asyncDisposableStackContinuation(ctx.runtime, global, stack, true);
-
-    // Same await-shaped internal attach as qjs js_async_function_resume:
-    // perform_promise_then, never a.then read.
-    try performPromiseThen(ctx, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try promise_ops.awaitInternal(ctx, output, global, value, .{ .disposable_stack = stack }, caller_function, caller_frame);
 }
 
 fn asyncDisposableStackRecordError(

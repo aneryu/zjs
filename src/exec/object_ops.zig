@@ -1083,12 +1083,10 @@ pub fn datePrototypeMethod(
         .set_time => if (try date_ops.dateSetTime(ctx, output, global, this_value, args)) |value| return value,
         else => {},
     }
-    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method, args)) |value| return value;
-    // Remaining (non-special-cased) prototype methods run the plain
-    // `methodCallArgs` body, which lives in `exec/date_ops.zig`. Route it
-    // through the record table's func-object-free arm so exec carries no
-    // compile-time Date body knowledge. The arm dispatches the body directly,
-    // so this does not re-enter the dispatcher.
+    // `toJSON`, `setYear`, and `setTime` are the only methods handled above.
+    // Local and UTC field setters never reach here: `dateCall` sends every
+    // `setterSpan` method through `dateExtendedPrototypeCall`. What remains
+    // runs `methodCallArgs` on the record table's func-object-free arm.
     const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(method) };
     const result = builtin_dispatch.callInternalRecord(ctx, output, null, &.{}, null, this_value, native_ref, args, caller_function, caller_frame) catch |err| switch (err) {
         error.TypeError => return throwTypeErrorMessage(ctx, global, "not a Date object"),
@@ -2656,6 +2654,13 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     return values[2];
 }
 
+/// ToObject. Null and undefined throw `error.NullishToObject`.
+pub fn toObjectReceiver(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !core.JSValue {
+    if (value.is(.null_value) or value.is(.undefined_value)) return error.NullishToObject;
+    if (objectFromValue(value) != null) return value;
+    return primitiveObjectForAccess(ctx.runtime, global, value);
+}
+
 test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -2958,9 +2963,8 @@ pub fn objectEnumerableOwnPropertiesCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (args.len < 1 or args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
-
-    var object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    if (args.len < 1) return error.NullishToObject;
+    var object_value = try toObjectReceiver(ctx, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
@@ -4852,43 +4856,24 @@ pub const PrototypeMethod = enum(u32) {
     proto_setter = 112,
 };
 pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "assign")) return @intFromEnum(StaticMethod.assign);
-    if (std.mem.eql(u8, name, "create")) return @intFromEnum(StaticMethod.create);
-    if (std.mem.eql(u8, name, "defineProperty")) return @intFromEnum(StaticMethod.define_property);
-    if (std.mem.eql(u8, name, "defineProperties")) return @intFromEnum(StaticMethod.define_properties);
-    if (std.mem.eql(u8, name, "getOwnPropertyDescriptor")) return @intFromEnum(StaticMethod.get_own_property_descriptor);
-    if (std.mem.eql(u8, name, "getOwnPropertyDescriptors")) return @intFromEnum(StaticMethod.get_own_property_descriptors);
-    if (std.mem.eql(u8, name, "getOwnPropertyNames")) return @intFromEnum(StaticMethod.get_own_property_names);
-    if (std.mem.eql(u8, name, "getOwnPropertySymbols")) return @intFromEnum(StaticMethod.get_own_property_symbols);
-    if (std.mem.eql(u8, name, "getPrototypeOf")) return @intFromEnum(StaticMethod.get_prototype_of);
-    if (std.mem.eql(u8, name, "hasOwn")) return @intFromEnum(StaticMethod.has_own);
-    if (std.mem.eql(u8, name, "isExtensible")) return @intFromEnum(StaticMethod.is_extensible);
-    if (std.mem.eql(u8, name, "keys")) return @intFromEnum(StaticMethod.keys);
-    if (std.mem.eql(u8, name, "preventExtensions")) return @intFromEnum(StaticMethod.prevent_extensions);
-    if (std.mem.eql(u8, name, "seal")) return @intFromEnum(StaticMethod.seal);
-    if (std.mem.eql(u8, name, "isSealed")) return @intFromEnum(StaticMethod.is_sealed);
-    if (std.mem.eql(u8, name, "isFrozen")) return @intFromEnum(StaticMethod.is_frozen);
-    if (std.mem.eql(u8, name, "setPrototypeOf")) return @intFromEnum(StaticMethod.set_prototype_of);
-    if (std.mem.eql(u8, name, "values")) return @intFromEnum(StaticMethod.values);
-    if (std.mem.eql(u8, name, "entries")) return @intFromEnum(StaticMethod.entries);
-    if (std.mem.eql(u8, name, "is")) return @intFromEnum(StaticMethod.is);
-    if (std.mem.eql(u8, name, "freeze")) return @intFromEnum(StaticMethod.freeze);
-    if (std.mem.eql(u8, name, "fromEntries")) return @intFromEnum(StaticMethod.from_entries);
-    if (std.mem.eql(u8, name, "groupBy")) return @intFromEnum(StaticMethod.group_by);
+    // Install-time only. fromInt walks every enum field once per entry.
+    @setEvalBranchQuota(20000);
+    for (internal_entries) |entry| {
+        if (std.enums.fromInt(StaticMethod, entry.id) == null) continue;
+        if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    }
     return null;
 }
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
-    if (std.mem.eql(u8, name, "toLocaleString")) return @intFromEnum(PrototypeMethod.to_locale_string);
-    if (std.mem.eql(u8, name, "valueOf")) return @intFromEnum(PrototypeMethod.value_of);
-    if (std.mem.eql(u8, name, "hasOwnProperty")) return @intFromEnum(PrototypeMethod.has_own_property);
-    if (std.mem.eql(u8, name, "isPrototypeOf")) return @intFromEnum(PrototypeMethod.is_prototype_of);
-    if (std.mem.eql(u8, name, "propertyIsEnumerable")) return @intFromEnum(PrototypeMethod.property_is_enumerable);
-    if (std.mem.eql(u8, name, "__defineGetter__")) return @intFromEnum(PrototypeMethod.define_getter);
-    if (std.mem.eql(u8, name, "__defineSetter__")) return @intFromEnum(PrototypeMethod.define_setter);
-    if (std.mem.eql(u8, name, "__lookupGetter__")) return @intFromEnum(PrototypeMethod.lookup_getter);
-    if (std.mem.eql(u8, name, "__lookupSetter__")) return @intFromEnum(PrototypeMethod.lookup_setter);
+    // Install-time only. fromInt walks every enum field once per entry.
+    @setEvalBranchQuota(20000);
+    for (internal_entries) |entry| {
+        const method = std.enums.fromInt(PrototypeMethod, entry.id) orelse continue;
+        // The __proto__ accessor is installed separately; this lookup must not return it.
+        if (method == .proto_getter or method == .proto_setter) continue;
+        if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    }
     return null;
 }
 
@@ -5056,8 +5041,8 @@ fn objectCallForNativeRecord(
         @intFromEnum(StaticMethod.define_properties) => (try call_runtime.definePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.get_own_property_descriptor) => (try getOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.get_own_property_descriptors) => (try getOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
-        @intFromEnum(StaticMethod.get_own_property_names) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.NotAnObject,
-        @intFromEnum(StaticMethod.get_own_property_symbols) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_names) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .own_names, caller_function, caller_frame)) orelse error.NotAnObject,
+        @intFromEnum(StaticMethod.get_own_property_symbols) => (try objectEnumerableOwnPropertiesCall(ctx, output, global, args, .own_symbols, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.get_prototype_of) => (try objectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.has_own) => (try objectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
         @intFromEnum(StaticMethod.is_extensible) => (try objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.NotAnObject,
@@ -5299,8 +5284,7 @@ pub fn objectHasOwnCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
-    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    values[0] = try toObjectReceiver(ctx, global, args[0]);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
@@ -5801,8 +5785,7 @@ pub fn getOwnPropertyDescriptorCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.NullishToObject;
-    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    values[0] = try toObjectReceiver(ctx, global, args[0]);
     _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
@@ -5850,7 +5833,7 @@ pub fn getOwnPropertyDescriptorsCall(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    values[0] = try toObjectReceiver(ctx, global, args[0]);
     _ = objectFromValue(values[0]) orelse return error.NotAnObject;
     const own_keys = try objectRestOwnKeys(ctx, output, global, objectFromValue(values[0]).?);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
@@ -5868,31 +5851,4 @@ pub fn getOwnPropertyDescriptorsCall(
         values[2] = core.JSValue.undefinedValue();
     }
     return values[1];
-}
-
-pub const OwnPropertyKeyFilter = enum {
-    string,
-    symbol,
-};
-pub inline fn objectOwnPropertyKeysCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    filter: OwnPropertyKeyFilter,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) !?core.JSValue {
-    return objectEnumerableOwnPropertiesCall(
-        ctx,
-        output,
-        global,
-        args,
-        switch (filter) {
-            .string => .own_names,
-            .symbol => .own_symbols,
-        },
-        caller_function,
-        caller_frame,
-    );
 }

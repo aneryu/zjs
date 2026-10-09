@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
 const temp_stream = @import("temp_stream.zig");
@@ -306,16 +305,9 @@ const Resolver = struct {
         if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
     }
 
-    const Write = struct {
-        code: []u8,
-        atoms: []core.atom.Atom,
-        idx: usize = 0,
-        atom_idx: usize = 0,
-    };
-
     /// Reserve `code_need` bytes and `atom_need` atom operands at the end of
     /// the product; pair with `defer self.finishLegacyWrite(w.idx, w.atom_idx)`.
-    fn beginWrite(self: *Resolver, code_need: usize, atom_need: usize) Error!Write {
+    fn beginWrite(self: *Resolver, code_need: usize, atom_need: usize) Error!rules.AtomWriter {
         try self.prepareLegacyWrite(code_need, atom_need);
         const code_start: usize = @intCast(self.product.code_len);
         const atom_start: usize = @intCast(self.product.atom_len);
@@ -323,6 +315,20 @@ const Resolver = struct {
             .code = self.product.code[code_start..][0..code_need],
             .atoms = self.product.atom_operands[atom_start..][0..atom_need],
         };
+    }
+
+    /// `code_need == 0` writes nothing. Enter/leave scope use that when the
+    /// scope has no refresh or close bytes; a zero-length span must not carry
+    /// atom operands.
+    fn emitExact(self: *Resolver, code_need: usize, atom_need: usize, payload: anytype) Error!void {
+        if (code_need == 0) {
+            if (atom_need != 0) return error.InvalidBytecode;
+            return;
+        }
+        var w = try self.beginWrite(code_need, atom_need);
+        defer self.finishLegacyWrite(w.idx, w.atom_idx);
+        try payload.write(&w);
+        if (w.idx != code_need or w.atom_idx != atom_need) return error.InvalidBytecode;
     }
 
     fn finishLegacyWrite(
@@ -372,15 +378,7 @@ const Resolver = struct {
         const atom_need = rules.scopeVarActionAtomCount(action);
         var w = try self.beginWrite(code_need, atom_need);
         defer self.finishLegacyWrite(w.idx, w.atom_idx);
-        try rules.writeScopeVarAction(
-            self.ctx.function,
-            w.code,
-            &w.idx,
-            w.atoms,
-            &w.atom_idx,
-            atom_id,
-            action,
-        );
+        try rules.writeScopeVarAction(&w, atom_id, action);
         if (w.idx != code_need or w.atom_idx != atom_need)
             return error.InvalidBytecode;
     }
@@ -557,19 +555,13 @@ const Resolver = struct {
         self: *Resolver,
         atom_id: core.atom.Atom,
     ) Error!void {
-        const code_need = rules.throw_error_instr_size;
-        var w = try self.beginWrite(code_need, 1);
-        defer self.finishLegacyWrite(w.idx, w.atom_idx);
-        rules.writeThrowVarRedeclaration(
-            self.ctx.function,
-            w.code,
-            &w.idx,
-            w.atoms,
-            &w.atom_idx,
-            atom_id,
-        );
-        if (w.idx != code_need or w.atom_idx != 1)
-            return error.InvalidBytecode;
+        const Emit = struct {
+            atom_id: core.atom.Atom,
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                w.throwVar(p.atom_id, rules.JS_THROW_VAR_REDECL);
+            }
+        };
+        try self.emitExact(rules.throw_error_instr_size, 1, Emit{ .atom_id = atom_id });
     }
 
     fn writeLoweredScopeDeleteVar(
@@ -578,20 +570,17 @@ const Resolver = struct {
         scope_level: i32,
     ) Error!void {
         const is_dynamic = rules.loweredScopeDeleteVarIsDynamic(self.ctx, atom_id, scope_level);
-        const code_need: usize = if (is_dynamic) 5 else 1;
-        const atom_need: usize = @intFromBool(is_dynamic);
-        var w = try self.beginWrite(code_need, atom_need);
-        defer self.finishLegacyWrite(w.idx, w.atom_idx);
-        rules.writeLoweredScopeDeleteVar(
-            w.code,
-            &w.idx,
-            w.atoms,
-            &w.atom_idx,
-            atom_id,
-            is_dynamic,
-        );
-        if (w.idx != code_need or w.atom_idx != atom_need)
-            return error.InvalidBytecode;
+        const Emit = struct {
+            atom_id: core.atom.Atom,
+            is_dynamic: bool,
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                rules.writeLoweredScopeDeleteVar(w, p.atom_id, p.is_dynamic);
+            }
+        };
+        try self.emitExact(if (is_dynamic) 5 else 1, @intFromBool(is_dynamic), Emit{
+            .atom_id = atom_id,
+            .is_dynamic = is_dynamic,
+        });
     }
 
     fn writeLoweredScopeGetRef(
@@ -600,19 +589,19 @@ const Resolver = struct {
         scope_level: i32,
     ) Error!void {
         const plan = rules.loweredScopeGetRefPlan(self.ctx, atom_id, scope_level);
-        const code_need = plan.size();
-        try self.prepareLegacyWrite(code_need, 0);
-        const code_start: usize = @intCast(self.product.code_len);
-        var out_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, 0);
-        try rules.writeLoweredScopeGetRef(
-            self.ctx,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            atom_id,
-            plan,
-        );
-        if (out_idx != code_need) return error.InvalidBytecode;
+        const Emit = struct {
+            ctx: *binding_rules.JSContext,
+            atom_id: core.atom.Atom,
+            plan: @TypeOf(plan),
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                try rules.writeLoweredScopeGetRef(p.ctx, w.code, &w.idx, p.atom_id, p.plan);
+            }
+        };
+        try self.emitExact(plan.size(), 0, Emit{
+            .ctx = self.ctx,
+            .atom_id = atom_id,
+            .plan = plan,
+        });
     }
 
     fn writeLoweredScopeMakeRef(
@@ -621,21 +610,17 @@ const Resolver = struct {
         scope_level: i32,
     ) Error!void {
         const plan = rules.loweredScopeMakeRefPlan(self.ctx, atom_id, scope_level);
-        const code_need = plan.size();
-        const atom_need = plan.atomCount();
-        var w = try self.beginWrite(code_need, atom_need);
-        defer self.finishLegacyWrite(w.idx, w.atom_idx);
-        rules.writeLoweredScopeMakeRef(
-            self.ctx.function,
-            w.code,
-            &w.idx,
-            w.atoms,
-            &w.atom_idx,
-            atom_id,
-            plan,
-        );
-        if (w.idx != code_need or w.atom_idx != atom_need)
-            return error.InvalidBytecode;
+        const Emit = struct {
+            atom_id: core.atom.Atom,
+            plan: @TypeOf(plan),
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                rules.writeLoweredScopeMakeRef(w, p.atom_id, p.plan);
+            }
+        };
+        try self.emitExact(plan.size(), plan.atomCount(), Emit{
+            .atom_id = atom_id,
+            .plan = plan,
+        });
     }
 
     fn writeLoweredPrivateField(
@@ -645,61 +630,65 @@ const Resolver = struct {
         scope_level: i32,
         resolution: rules.PrivateFieldResolutionAlias,
     ) Error!void {
-        const code_need = try rules.loweredPrivateFieldSize(
-            self.ctx,
-            op_id,
-            atom_id,
-            scope_level,
-            resolution,
-        );
-        const atom_need = rules.loweredPrivateFieldAtomCount(op_id, resolution);
-        var w = try self.beginWrite(code_need, atom_need);
-        defer self.finishLegacyWrite(w.idx, w.atom_idx);
+        var measured: rules.AtomWriter = .{ .counting = true };
         try rules.writeLoweredPrivateField(
             self.ctx,
-            w.code,
-            &w.idx,
-            w.atoms,
-            &w.atom_idx,
+            &measured,
             op_id,
             atom_id,
             scope_level,
             resolution,
         );
-        if (w.idx != code_need or w.atom_idx != atom_need)
-            return error.InvalidBytecode;
+        const Emit = struct {
+            ctx: *binding_rules.JSContext,
+            op_id: u8,
+            atom_id: core.atom.Atom,
+            scope_level: i32,
+            resolution: rules.PrivateFieldResolutionAlias,
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                try rules.writeLoweredPrivateField(
+                    p.ctx,
+                    w,
+                    p.op_id,
+                    p.atom_id,
+                    p.scope_level,
+                    p.resolution,
+                );
+            }
+        };
+        try self.emitExact(measured.idx, measured.atom_idx, Emit{
+            .ctx = self.ctx,
+            .op_id = op_id,
+            .atom_id = atom_id,
+            .scope_level = scope_level,
+            .resolution = resolution,
+        });
     }
 
     fn writeEnterScopeRefresh(self: *Resolver, scope: i32) Error!void {
-        const code_need = try rules.enterScopeRefreshSize(self.ctx, scope);
-        if (code_need == 0) return;
-        try self.prepareLegacyWrite(code_need, 0);
-        const code_start: usize = @intCast(self.product.code_len);
-        var out_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, 0);
-        try rules.writeEnterScopeRefresh(
-            self.ctx,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            scope,
-        );
-        if (out_idx != code_need) return error.InvalidBytecode;
+        var code_need: usize = 0;
+        try rules.lowerEnterScope(self.ctx, null, &code_need, scope);
+        const Emit = struct {
+            ctx: *binding_rules.JSContext,
+            scope: i32,
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                try rules.lowerEnterScope(p.ctx, w.code, &w.idx, p.scope);
+            }
+        };
+        try self.emitExact(code_need, 0, Emit{ .ctx = self.ctx, .scope = scope });
     }
 
     fn writeLeaveScopeClose(self: *Resolver, scope: i32) Error!void {
-        const code_need = rules.leaveScopeCloseSize(self.ctx, scope);
-        if (code_need == 0) return;
-        try self.prepareLegacyWrite(code_need, 0);
-        const code_start: usize = @intCast(self.product.code_len);
-        var out_idx: usize = 0;
-        defer self.finishLegacyWrite(out_idx, 0);
-        rules.writeLeaveScopeClose(
-            self.ctx,
-            self.product.code[code_start..][0..code_need],
-            &out_idx,
-            scope,
-        );
-        if (out_idx != code_need) return error.InvalidBytecode;
+        var code_need: usize = 0;
+        rules.lowerLeaveScope(self.ctx, null, &code_need, scope);
+        const Emit = struct {
+            ctx: *binding_rules.JSContext,
+            scope: i32,
+            fn write(p: @This(), w: *rules.AtomWriter) Error!void {
+                rules.lowerLeaveScope(p.ctx, w.code, &w.idx, p.scope);
+            }
+        };
+        try self.emitExact(code_need, 0, Emit{ .ctx = self.ctx, .scope = scope });
     }
 
     fn emitWideU16(self: *Resolver, op_id: u8, value: u16) Error!void {
@@ -1907,32 +1896,9 @@ const Resolver = struct {
 };
 
 fn validateInput(input: *const builder.Builder) Error!void {
-    if (input.code_len > input.code.len or
-        input.atom_len > input.atom_operands.len or
-        input.label_len > input.label_slots.len or
-        input.source_len > input.source_slots.len)
-    {
-        return error.InvalidBytecode;
-    }
-
-    var previous_source_offset: u32 = 0;
-    for (input.source_slots[0..input.source_len], 0..) |source, index| {
-        if (source.temp_offset > input.code_len or
-            (index != 0 and source.temp_offset < previous_source_offset))
-        {
-            return error.InvalidBytecode;
-        }
-        previous_source_offset = source.temp_offset;
-    }
-
-    for (input.label_slots[0..input.label_len]) |slot| {
-        if (slot.flags.bound) {
-            if (slot.bound_offset == labels.unbound or slot.bound_offset > input.code_len)
-                return error.InvalidBytecode;
-        } else if (slot.bound_offset != labels.unbound) {
-            return error.InvalidBytecode;
-        }
-    }
+    try temp_stream.validateStreams(builder.Builder, input, struct {
+        fn extra(_: *const builder.Builder) temp_stream.Error!void {}
+    }.extra);
 }
 
 fn initializeLabels(product: *ResolvedProduct, input: *const builder.Builder) Error!void {
@@ -2003,28 +1969,22 @@ fn preallocateProductStreams(
     }
 }
 
+fn fillVariableBind(slot: labels.LabelSlot, label_index: usize) BindEntry {
+    return .{
+        .input_offset = slot.bound_offset,
+        .label_index = @intCast(label_index),
+    };
+}
+
 fn buildBindIndex(
     memory: std.mem.Allocator,
     input: *const builder.Builder,
 ) Error![]BindEntry {
-    var bind_count: usize = 0;
-    for (input.label_slots[0..input.label_len]) |slot| {
-        if (slot.flags.bound) bind_count += 1;
-    }
-    if (bind_count == 0) return &.{};
-
-    const binds = memory.alloc(BindEntry, bind_count) catch return error.OutOfMemory;
-    var bind_index: usize = 0;
-    for (input.label_slots[0..input.label_len], 0..) |slot, label_index| {
-        if (!slot.flags.bound) continue;
-        binds[bind_index] = .{
-            .input_offset = slot.bound_offset,
-            .label_index = @intCast(label_index),
-        };
-        bind_index += 1;
-    }
-    sort_erased.heap(BindEntry, binds, {}, temp_stream.bindLessThan);
-    return binds;
+    return temp_stream.buildBindIndex(
+        memory,
+        input.label_slots[0..input.label_len],
+        fillVariableBind,
+    );
 }
 
 /// The resolve pass over fd.builder. The input Builder is strictly read-only:

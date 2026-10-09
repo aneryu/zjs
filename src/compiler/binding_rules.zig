@@ -52,7 +52,6 @@ pub const Error = error{
     InvalidBytecode,
     BytecodeOverflow,
     NoFunctionDef,
-    NoParentScope,
     ClosureVarNotFound,
     /// The interrupt handler asked to stop (`resolve_variables` polls).
     Interrupted,
@@ -344,7 +343,7 @@ pub fn threadClosureSource(
     source: function_def_mod.ClosureVar,
     source_type: function_def_mod.ClosureType,
 ) Error!u16 {
-    const parent = target.parent orelse return error.NoParentScope;
+    const parent = target.parent orelse return error.InvalidBytecode;
     const direct_source = parent == source_owner;
     const parent_idx = if (direct_source)
         source_idx
@@ -511,44 +510,60 @@ fn closureVarConstWriteBase(start_fd: *const function_def_mod.FunctionDef, start
 const throw_error_instr_size: usize = 6;
 const JS_THROW_VAR_RO: u8 = 0;
 const JS_THROW_VAR_REDECL: u8 = 1;
-fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
-    writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
-}
 
-fn writeReadOnlyWrite(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom, write: ReadOnlyWrite) void {
-    if (write.tdz_op) |op_id| {
-        output[out_idx.*] = op_id;
-        std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], write.tdz_idx, .little);
-        output[out_idx.* + 3] = opcode.op.drop;
-        out_idx.* += 4;
+/// Cursor over one reserved code span and its atom operands.
+const AtomWriter = struct {
+    code: []u8 = &.{},
+    atoms: []atom.Atom = &.{},
+    idx: usize = 0,
+    atom_idx: usize = 0,
+    /// Null-output sizing: advance the cursors and skip the stores. The
+    /// write path leaves this false and fills the reserved slices.
+    counting: bool = false,
+
+    pub fn op(self: *AtomWriter, op_id: u8) void {
+        if (!self.counting) self.code[self.idx] = op_id;
+        self.idx += 1;
     }
-    writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+
+    pub fn @"u16"(self: *AtomWriter, value: u16) void {
+        if (!self.counting) std.mem.writeInt(u16, self.code[self.idx..][0..2], value, .little);
+        self.idx += 2;
+    }
+
+    pub fn atomOp(self: *AtomWriter, op_id: u8, atom_id: atom.Atom) void {
+        if (!self.counting) {
+            self.code[self.idx] = op_id;
+            std.mem.writeInt(u32, self.code[self.idx + 1 ..][0..4], atom_id.raw(), .little);
+            self.atoms[self.atom_idx] = atom_id;
+        }
+        self.idx += 5;
+        self.atom_idx += 1;
+    }
+
+    pub fn throwVar(self: *AtomWriter, atom_id: atom.Atom, error_type: u8) void {
+        if (!self.counting) {
+            self.code[self.idx] = opcode.op.throw_error;
+            std.mem.writeInt(u32, self.code[self.idx + 1 ..][0..4], atom_id.raw(), .little);
+            self.code[self.idx + 5] = error_type;
+            self.atoms[self.atom_idx] = atom_id;
+        }
+        self.idx += throw_error_instr_size;
+        self.atom_idx += 1;
+    }
+};
+
+fn writeThrowVarReadOnly(w: *AtomWriter, atom_id: atom.Atom) void {
+    w.throwVar(atom_id, JS_THROW_VAR_RO);
 }
 
-fn writeThrowVarError(
-    _: *bytecode_function.Bytecode,
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
-    atom_id: atom.Atom,
-    error_type: u8,
-) void {
-    output[out_idx.*] = opcode.op.throw_error;
-    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-    output[out_idx.* + 5] = error_type;
-    output_atoms[out_atom_idx.*] = atom_id;
-    out_idx.* += throw_error_instr_size;
-    out_atom_idx.* += 1;
-}
-
-fn writeThrowVarRedeclaration(_: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
-    output[out_idx.*] = opcode.op.throw_error;
-    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-    output[out_idx.* + 5] = JS_THROW_VAR_REDECL;
-    output_atoms[out_atom_idx.*] = atom_id;
-    out_idx.* += throw_error_instr_size;
-    out_atom_idx.* += 1;
+fn writeReadOnlyWrite(w: *AtomWriter, atom_id: atom.Atom, write: ReadOnlyWrite) void {
+    if (write.tdz_op) |op_id| {
+        w.op(op_id);
+        w.u16(write.tdz_idx);
+        w.op(opcode.op.drop);
+    }
+    writeThrowVarReadOnly(w, atom_id);
 }
 
 fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: atom.Atom, ref_idx: u16, op_id: u8) u8 {
@@ -695,83 +710,36 @@ fn isPrivateSetterCompanionName(ctx: *const JSContext, private_atom: atom.Atom, 
         std.mem.eql(u8, candidate_name[private_name.len..], suffix);
 }
 
-fn privateAccessorSize(ctx: *const JSContext, res: PrivateFieldResolution) usize {
-    return if (res.is_ref) selectVarRefForm(ctx, opcode.op.get_var_ref, res.idx).size else selectLocForm(ctx, opcode.op.get_loc, res.idx).size;
-}
-
-fn writePrivateAccessor(ctx: *const JSContext, output: []u8, out_idx: *usize, res: PrivateFieldResolution) void {
+fn writePrivateAccessor(ctx: *const JSContext, w: *AtomWriter, res: PrivateFieldResolution) void {
     if (res.is_ref) {
         const form = selectVarRefForm(ctx, opcode.op.get_var_ref, res.idx);
-        output[out_idx.*] = form.op_id;
+        w.op(form.op_id);
         switch (form.operand_size) {
             0 => {},
-            2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], res.idx, .little),
+            2 => w.u16(res.idx),
             else => unreachable,
         }
-        out_idx.* += form.size;
         return;
     }
 
     const form = selectLocForm(ctx, opcode.op.get_loc, res.idx);
-    output[out_idx.*] = form.op_id;
+    w.op(form.op_id);
     switch (form.operand_size) {
         0 => {},
-        1 => output[out_idx.* + 1] = @intCast(res.idx),
-        2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], res.idx, .little),
+        1 => w.op(@intCast(res.idx)),
+        2 => w.u16(res.idx),
         else => unreachable,
     }
-    out_idx.* += form.size;
 }
 
-fn loweredPrivateFieldSize(ctx: *const JSContext, op_id: u8, atom_id: atom.Atom, scope_level: i32, res: PrivateFieldResolution) !usize {
-    const accessor_size = privateAccessorSize(ctx, res);
-    return switch (op_id) {
-        opcode.op.scope_get_private_field, opcode.op.scope_get_private_field2 => switch (res.var_kind) {
-            .private_field => accessor_size + 1 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field2)),
-            .private_method => accessor_size + 1 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field)),
-            .private_getter, .private_getter_setter => accessor_size + 4 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field2)),
-            .private_setter => throw_error_instr_size,
-            else => return error.ClosureVarNotFound,
-        },
-        opcode.op.scope_put_private_field => switch (res.var_kind) {
-            .private_field => accessor_size + 1,
-            .private_method, .private_getter => throw_error_instr_size,
-            .private_setter, .private_getter_setter => blk: {
-                const setter = resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound;
-                break :blk privateAccessorSize(ctx, setter) + 9;
-            },
-            else => return error.ClosureVarNotFound,
-        },
-        opcode.op.scope_in_private_field => accessor_size + 1,
-        else => unreachable,
-    };
-}
-
-fn loweredPrivateFieldAtomCount(op_id: u8, res: PrivateFieldResolution) usize {
-    return switch (op_id) {
-        opcode.op.scope_get_private_field, opcode.op.scope_get_private_field2 => @intFromBool(res.var_kind == .private_setter),
-        opcode.op.scope_put_private_field => @intFromBool(res.var_kind == .private_method or res.var_kind == .private_getter),
-        opcode.op.scope_in_private_field => 0,
-        else => unreachable,
-    };
-}
-
-fn writePrivateCallMethodZero(output: []u8, out_idx: *usize) void {
-    writePrivateCallMethod(output, out_idx, 0);
-}
-
-fn writePrivateCallMethod(output: []u8, out_idx: *usize, argc: u16) void {
-    output[out_idx.*] = opcode.op.call_method;
-    std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], argc, .little);
-    out_idx.* += 3;
+fn writePrivateCallMethod(w: *AtomWriter, argc: u16) void {
+    w.op(opcode.op.call_method);
+    w.u16(argc);
 }
 
 fn writeLoweredPrivateField(
     ctx: *const JSContext,
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
+    w: *AtomWriter,
     op_id: u8,
     atom_id: atom.Atom,
     scope_level: i32,
@@ -780,58 +748,40 @@ fn writeLoweredPrivateField(
     switch (op_id) {
         opcode.op.scope_get_private_field, opcode.op.scope_get_private_field2 => switch (res.var_kind) {
             .private_field => {
-                if (op_id == opcode.op.scope_get_private_field2) {
-                    output[out_idx.*] = opcode.op.dup;
-                    out_idx.* += 1;
-                }
-                writePrivateAccessor(ctx, output, out_idx, res);
-                output[out_idx.*] = opcode.op.get_private_field;
-                out_idx.* += 1;
+                if (op_id == opcode.op.scope_get_private_field2) w.op(opcode.op.dup);
+                writePrivateAccessor(ctx, w, res);
+                w.op(opcode.op.get_private_field);
             },
             .private_method => {
-                writePrivateAccessor(ctx, output, out_idx, res);
-                output[out_idx.*] = opcode.op.check_brand;
-                out_idx.* += 1;
-                if (op_id == opcode.op.scope_get_private_field) {
-                    output[out_idx.*] = opcode.op.nip;
-                    out_idx.* += 1;
-                }
+                writePrivateAccessor(ctx, w, res);
+                w.op(opcode.op.check_brand);
+                if (op_id == opcode.op.scope_get_private_field) w.op(opcode.op.nip);
             },
             .private_getter, .private_getter_setter => {
-                if (op_id == opcode.op.scope_get_private_field2) {
-                    output[out_idx.*] = opcode.op.dup;
-                    out_idx.* += 1;
-                }
-                writePrivateAccessor(ctx, output, out_idx, res);
-                output[out_idx.*] = opcode.op.check_brand;
-                out_idx.* += 1;
-                writePrivateCallMethodZero(output, out_idx);
+                if (op_id == opcode.op.scope_get_private_field2) w.op(opcode.op.dup);
+                writePrivateAccessor(ctx, w, res);
+                w.op(opcode.op.check_brand);
+                writePrivateCallMethod(w, 0);
             },
-            .private_setter => writeThrowVarError(ctx.function, output, out_idx, output_atoms, out_atom_idx, atom_id, opcode.throw_error_private_without_getter),
+            .private_setter => w.throwVar(atom_id, opcode.throw_error_private_without_getter),
             else => return error.ClosureVarNotFound,
         },
         opcode.op.scope_put_private_field => switch (res.var_kind) {
             .private_field => {
-                writePrivateAccessor(ctx, output, out_idx, res);
-                output[out_idx.*] = opcode.op.put_private_field;
-                out_idx.* += 1;
+                writePrivateAccessor(ctx, w, res);
+                w.op(opcode.op.put_private_field);
             },
-            .private_method, .private_getter => writeThrowVarReadOnly(ctx.function, output, out_idx, output_atoms, out_atom_idx, atom_id),
+            .private_method, .private_getter => writeThrowVarReadOnly(w, atom_id),
             .private_setter, .private_getter_setter => {
                 const setter = resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound;
-                writePrivateAccessor(ctx, output, out_idx, setter);
-                output[out_idx.*] = opcode.op.swap;
-                out_idx.* += 1;
-                output[out_idx.*] = opcode.op.ext0;
-                output[out_idx.* + 1] = opcode.ext0_sub.rot3r;
-                out_idx.* += 2;
-                output[out_idx.*] = opcode.op.check_brand;
-                out_idx.* += 1;
-                output[out_idx.*] = opcode.op.rot3l;
-                out_idx.* += 1;
-                writePrivateCallMethod(output, out_idx, 1);
-                output[out_idx.*] = opcode.op.drop;
-                out_idx.* += 1;
+                writePrivateAccessor(ctx, w, setter);
+                w.op(opcode.op.swap);
+                w.op(opcode.op.ext0);
+                w.op(opcode.ext0_sub.rot3r);
+                w.op(opcode.op.check_brand);
+                w.op(opcode.op.rot3l);
+                writePrivateCallMethod(w, 1);
+                w.op(opcode.op.drop);
             },
             else => return error.ClosureVarNotFound,
         },
@@ -842,9 +792,8 @@ fn writeLoweredPrivateField(
                 resolvePrivate(ctx, atom_id, scope_level, .setter) orelse return error.ClosureVarNotFound
             else
                 res;
-            writePrivateAccessor(ctx, output, out_idx, element);
-            output[out_idx.*] = opcode.op.private_in;
-            out_idx.* += 1;
+            writePrivateAccessor(ctx, w, element);
+            w.op(opcode.op.private_in);
         },
         else => unreachable,
     }
@@ -911,16 +860,6 @@ fn enterScopeRefreshesVar(fd: *const function_def_mod.FunctionDef, idx: i32) boo
     return varNeedsScopeFunctionInit(vd) or varNeedsTdzRearm(vd);
 }
 
-fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) Error!usize {
-    var size: usize = 0;
-    try lowerEnterScope(ctx, null, &size, scope);
-    return size;
-}
-
-fn writeEnterScopeRefresh(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) Error!void {
-    try lowerEnterScope(ctx, output, out_idx, scope);
-}
-
 /// Lower QuickJS `OP_leave_scope`: detach each captured local declared by
 /// exactly this scope. The inherited tail belongs to enclosing scopes and
 /// must not be closed here. A null `output` only advances `out_idx`.
@@ -934,16 +873,6 @@ fn lowerLeaveScope(ctx: *const JSContext, output: ?[]u8, out_idx: *usize, scope:
         if (vd.is_captured) writeLocOp3(output, out_idx, opcode.op.close_loc, @intCast(idx));
         idx = vd.scope_next;
     }
-}
-
-fn leaveScopeCloseSize(ctx: *const JSContext, scope: i32) usize {
-    var size: usize = 0;
-    lowerLeaveScope(ctx, null, &size, scope);
-    return size;
-}
-
-fn writeLeaveScopeClose(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) void {
-    lowerLeaveScope(ctx, output, out_idx, scope);
 }
 
 /// A 3-byte `op u16` local-slot instruction; a null `output` only sizes it.
@@ -1751,23 +1680,18 @@ fn planResolvedScopeVarAction(
 }
 
 fn writeScopeVarAction(
-    func: *bytecode_function.Bytecode,
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
+    w: *AtomWriter,
     atom_id: atom.Atom,
     action: ScopeVarAction,
 ) Error!void {
-    if (out_idx.* + action.size() > output.len) return error.InvalidBytecode;
+    if (w.idx + action.size() > w.code.len) return error.InvalidBytecode;
     if (action.selected.op_id == opcode.op.throw_error) {
-        if (out_atom_idx.* >= output_atoms.len) return error.InvalidBytecode;
-        writeReadOnlyWrite(func, output, out_idx, output_atoms, out_atom_idx, atom_id, action.read_only);
+        if (w.atom_idx >= w.atoms.len) return error.InvalidBytecode;
+        writeReadOnlyWrite(w, atom_id, action.read_only);
     } else if (action.selected.op_id == opcode.op.drop) {
-        output[out_idx.*] = opcode.op.drop;
-        out_idx.* += 1;
+        w.op(opcode.op.drop);
     } else {
-        writeSelectedLocForm(output, out_idx, action.selected, action.index);
+        writeSelectedLocForm(w.code, &w.idx, action.selected, action.index);
     }
 }
 
@@ -1915,27 +1839,15 @@ fn writeEvalVarObjectProbeAccessor(ctx: *const JSContext, output: []u8, out_idx:
     }
 }
 
-fn writeAtomOp(output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, op_id: u8, atom_id: atom.Atom) void {
-    output[out_idx.*] = op_id;
-    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-    output_atoms[out_atom_idx.*] = atom_id;
-    out_idx.* += 5;
-    out_atom_idx.* += 1;
-}
-
 fn writeLoweredScopeDeleteVar(
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
+    w: *AtomWriter,
     atom_id: atom.Atom,
     is_dynamic: bool,
 ) void {
     if (is_dynamic) {
-        writeAtomOp(output, out_idx, output_atoms, out_atom_idx, opcode.op.delete_var, atom_id);
+        w.atomOp(opcode.op.delete_var, atom_id);
     } else {
-        output[out_idx.*] = opcode.op.push_false;
-        out_idx.* += 1;
+        w.op(opcode.op.push_false);
     }
 }
 
@@ -1964,50 +1876,30 @@ fn writeLoweredScopeGetRef(
 /// assignments then update that object property, leaving the immutable
 /// self-binding untouched.
 fn writeFunctionNameDummyRef(
-    _: *bytecode_function.Bytecode,
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
+    w: *AtomWriter,
     atom_id: atom.Atom,
     get_form: ShortLocForm,
     binding_idx: u16,
 ) void {
-    output[out_idx.*] = opcode.op.object;
-    out_idx.* += 1;
-    writeSelectedLocForm(output, out_idx, get_form, binding_idx);
-
-    output[out_idx.*] = opcode.op.define_field;
-    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-    output_atoms[out_atom_idx.*] = atom_id;
-    out_idx.* += 5;
-    out_atom_idx.* += 1;
-
-    output[out_idx.*] = opcode.op.push_atom_value;
-    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
-    output_atoms[out_atom_idx.*] = atom_id;
-    out_idx.* += 5;
-    out_atom_idx.* += 1;
+    w.op(opcode.op.object);
+    writeSelectedLocForm(w.code, &w.idx, get_form, binding_idx);
+    w.atomOp(opcode.op.define_field, atom_id);
+    w.atomOp(opcode.op.push_atom_value, atom_id);
 }
 
 fn writeLoweredScopeMakeRef(
-    func: *bytecode_function.Bytecode,
-    output: []u8,
-    out_idx: *usize,
-    output_atoms: []atom.Atom,
-    out_atom_idx: *usize,
+    w: *AtomWriter,
     atom_id: atom.Atom,
     plan: MakeRefPlan,
 ) void {
     switch (plan) {
         .slot_ref => |slot| {
-            writeAtomOp(output, out_idx, output_atoms, out_atom_idx, slot.op_id, atom_id);
-            std.mem.writeInt(u16, output[out_idx.*..][0..2], slot.idx, .little);
-            out_idx.* += 2;
+            w.atomOp(slot.op_id, atom_id);
+            w.u16(slot.idx);
         },
-        .dynamic => writeAtomOp(output, out_idx, output_atoms, out_atom_idx, opcode.op.make_var_ref, atom_id),
-        .throw_read_only => |write| writeReadOnlyWrite(func, output, out_idx, output_atoms, out_atom_idx, atom_id, write),
-        .function_name => |name| writeFunctionNameDummyRef(func, output, out_idx, output_atoms, out_atom_idx, atom_id, name.form, name.idx),
+        .dynamic => w.atomOp(opcode.op.make_var_ref, atom_id),
+        .throw_read_only => |write| writeReadOnlyWrite(w, atom_id, write),
+        .function_name => |name| writeFunctionNameDummyRef(w, atom_id, name.form, name.idx),
     }
 }
 
@@ -2614,14 +2506,6 @@ const ScopeVarBindingKind = enum(u8) {
     global,
 };
 
-/// QuickJS `resolve_scope_var` discovers the binding and selects the final
-/// opcode in one routine. Keep the production V2 scope-op path equally
-/// fused: its surface inlines this semantic walk into `lowerScopeVar`, so
-/// discovery, action selection, and writing share one outlined compiler
-/// entry. The exact-index compatibility wrapper below remains outlined,
-/// while reference/private consumers retain the standalone topology API.
-/// This is only a call-shape change; lookup order and data structures stay
-/// identical to the linked-scope QuickJS path above.
 /// Register-sized result of the QuickJS-shaped binding walk.  The former
 /// tagged-union pair was 10 bytes, which forced the outlined resolver to
 /// return through caller-owned stack memory even though both identities
@@ -2699,6 +2583,14 @@ const ResolvedScopeVarPlan = packed struct(u64) {
     }
 };
 
+/// QuickJS `resolve_scope_var` discovers the binding and selects the final
+/// opcode in one routine. Keep the production V2 scope-op path equally
+/// fused: its surface inlines this semantic walk into `lowerScopeVar`, so
+/// discovery, action selection, and writing share one outlined compiler
+/// entry. The exact-index compatibility wrapper below remains outlined,
+/// while reference/private consumers retain the standalone topology API.
+/// This is only a call-shape change; lookup order and data structures stay
+/// identical to the linked-scope QuickJS path above.
 /// `var_env_only` (the scope operand's no-dynamic-env bit) marks a store
 /// that targets the variable environment itself rather than resolving
 /// through the scope chain -- Annex B's copy of a block function in a
@@ -2864,17 +2756,13 @@ pub const surface = struct {
 
     pub const resolvePrivateBindingTopology = binding_rules.resolvePrivateBindingTopology;
     pub const resolvePrivate = binding_rules.resolvePrivate;
-    pub const loweredPrivateFieldSize = binding_rules.loweredPrivateFieldSize;
-    pub const loweredPrivateFieldAtomCount = binding_rules.loweredPrivateFieldAtomCount;
     pub const writeLoweredPrivateField = binding_rules.writeLoweredPrivateField;
-
-    pub const enterScopeRefreshSize = binding_rules.enterScopeRefreshSize;
-    pub const writeEnterScopeRefresh = binding_rules.writeEnterScopeRefresh;
-    pub const leaveScopeCloseSize = binding_rules.leaveScopeCloseSize;
-    pub const writeLeaveScopeClose = binding_rules.writeLeaveScopeClose;
+    pub const lowerEnterScope = binding_rules.lowerEnterScope;
+    pub const lowerLeaveScope = binding_rules.lowerLeaveScope;
 
     pub const resolveEvalGlobalVarTargets = binding_rules.resolveEvalGlobalVarTargets;
     pub const hasDirectEvalLexicalRedeclaration = binding_rules.hasDirectEvalLexicalRedeclaration;
+    pub const AtomWriter = binding_rules.AtomWriter;
     pub const throw_error_instr_size = binding_rules.throw_error_instr_size;
-    pub const writeThrowVarRedeclaration = binding_rules.writeThrowVarRedeclaration;
+    pub const JS_THROW_VAR_REDECL = binding_rules.JS_THROW_VAR_REDECL;
 };

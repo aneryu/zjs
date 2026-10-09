@@ -35,7 +35,7 @@ fn materializeConsole(header: *core.gc.Header) !core.JSValue {
     const rt = ctx.runtime;
     // Exact slots: a collection inside `defineOutput` may move both objects.
     var roots: core.runtime.ExactValueRoots(1) = .{};
-    roots.activate(rt) catch return error.InvalidBuiltinRegistry;
+    roots.activate(rt) catch |err| std.debug.panic("activate console roots: {s}", .{@errorName(err)});
     defer roots.deactivate();
     const global = ctx.global orelse return error.InvalidBuiltinRegistry;
     roots.storage[0] = (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, zjs.exec.object_ops.objectPrototypeFromGlobal(rt, global), 3)).value();
@@ -743,26 +743,26 @@ fn printTypedArrayElements(s: *State, object: *const core.Object, class_id: core
 
 fn printCollectionEntries(s: *State, object: *const core.Object, class_id: core.class.ClassId, comma_state: *CommaState) Error!void {
     try printClassName(s, class_id);
-    try s.printf("({d}) {{ ", .{object.collectionPayloadBorrowed().?.active_count});
+    try s.printf("({d}) {{ ", .{object.collectionPayload().?.active_count});
     // Printing a key or value can run JS that mutates this collection,
     // reallocating (and freeing) its entry array: index it afresh after
     // every nested print, and read the value only after the key printed.
     var shown: usize = 0;
     var index: usize = 0;
     while (shown < default_max_item_count) : (index += 1) {
-        const entries = object.collectionPayloadBorrowed().?.entries.items;
+        const entries = object.collectionPayload().?.entries.items;
         if (index >= entries.len) break;
         if (!entries[index].active) continue;
         try printComma(s, comma_state);
         try printValueRec(s, entries[index].key);
         if (class_id == core.class.ids.map) {
             try s.puts(" => ");
-            const current = object.collectionPayloadBorrowed().?.entries.items;
+            const current = object.collectionPayload().?.entries.items;
             try printValueRec(s, if (index < current.len and current[index].active) current[index].value else core.JSValue.undefinedValue());
         }
         shown += 1;
     }
-    const active_count = object.collectionPayloadBorrowed().?.active_count;
+    const active_count = object.collectionPayload().?.active_count;
     if (shown < active_count) try printMoreItems(s, comma_state, active_count - shown);
 }
 
@@ -833,7 +833,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         }
         try s.putc(']');
         comma_state = .open_brace;
-    } else if ((class_id == core.class.ids.map or class_id == core.class.ids.set) and object.collectionPayloadBorrowed() != null) {
+    } else if ((class_id == core.class.ids.map or class_id == core.class.ids.set) and object.collectionPayload() != null) {
         try printCollectionEntries(s, object, class_id, &comma_state);
     } else if (class_id == core.class.ids.regexp) {
         try printRegExp(s, object);

@@ -14,6 +14,11 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
+const StringLegacyId = string_id_lookup.LegacyId;
+
+fn stringLegacyId(method_id: u32) ?StringLegacyId {
+    return std.enums.fromInt(StringLegacyId, method_id);
+}
 const regexp_ops = @import("regexp_ops.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const call_mod = @import("call.zig");
@@ -1348,20 +1353,11 @@ fn regExpSplitUnobservableLoop(
     const header: regexp_ops.Compiled = if (owned_program) |compiled| compiled else .{ .bytecode = @constCast(core.string.asFlat(try program.get(rt)).?.resolveData().latin1) };
     const alloc_count = header.allocCount();
     const capture_count = header.captureCount();
-    var inline_capture_slots: [regexp_ops.small_exec_slots]usize = undefined;
-    var inline_last_slots: [regexp_ops.small_exec_slots]usize = undefined;
-    var heap_slots: []usize = &.{};
-    defer if (heap_slots.len != 0) rt.nativeAllocator().free(heap_slots);
-    var capture: []usize = undefined;
-    var last_match: []usize = undefined;
-    if (alloc_count <= inline_capture_slots.len) {
-        capture = inline_capture_slots[0..alloc_count];
-        last_match = inline_last_slots[0..alloc_count];
-    } else {
-        heap_slots = try rt.nativeAllocator().alloc(usize, alloc_count * 2);
-        capture = heap_slots[0..alloc_count];
-        last_match = heap_slots[alloc_count..];
-    }
+    var match_storage: regexp_ops.ExecSlots(2) = .{};
+    defer match_storage.deinit(rt.nativeAllocator());
+    try match_storage.prepare(rt.nativeAllocator(), alloc_count);
+    const capture = match_storage.slices[0];
+    const last_match = match_storage.slices[1];
 
     const size = core.string.stringValueLenUnchecked(try source.get(rt));
     var matched = false;
@@ -1374,15 +1370,11 @@ fn regExpSplitUnobservableLoop(
     split: {
         while (q < size) {
             const program_bytes = if (owned_program) |compiled| compiled.bytecode else core.string.asFlat(try program.get(rt)).?.resolveData().latin1;
-            const result = regExpSplitSearch(rt, try source.get(rt), program_bytes, q, capture) catch |err| switch (err) {
-                error.BytecodeCorrupt => return null,
-                // The runtime interrupt handler fired (host interrupt or
-                // termination): uncatchable, as in the interpreter.
-                error.Timeout => {
-                    try exception_ops.throwInterrupted(ctx, objectFromValue(try realm.get(rt)).?);
-                    unreachable;
-                },
-                else => |other| return other,
+            const result = regExpSplitSearch(rt, try source.get(rt), program_bytes, q, capture) catch |err| {
+                // The realm object is only needed to throw the uncatchable interrupt.
+                const realm_object = if (err == error.Timeout) objectFromValue(try realm.get(rt)).? else global;
+                try regexp_ops.recoverExecError(ctx, realm_object, err);
+                return null;
             };
             switch (result) {
                 .match => {},
@@ -1598,7 +1590,7 @@ pub const ReplaceMatch = struct {
 };
 
 /// Precise root for the match list `regExpSymbolReplaceGeneric` builds
-/// before it runs a single replacement (spec step 14 "results"). The list
+/// before it runs a single replacement (spec step 12, `results`). The list
 /// lives on the Zig heap and its values are scattered inside structs, so
 /// neither a `ValueRootSlice` nor the conservative stack scan sees them;
 /// the replacer callback (or a user `exec`) runs JS with every earlier
@@ -1704,7 +1696,7 @@ pub fn regExpSymbolReplaceGeneric(
         if (!values[6].is(.object)) {
             return error.InvalidExecResult;
         }
-        // Step 11: collect the results; each one's fields are read in step 14,
+        // Step 12: collect the results; each one's fields are read in step 15,
         // interleaved with its replacement. Only a global replace reads
         // ToString(result[0]) here, to advance past an empty match.
         try matches.append(ctx.runtime.nativeAllocator(), .{
@@ -1736,14 +1728,14 @@ pub fn regExpSymbolReplaceGeneric(
     defer out.deinit(ctx.runtime.nativeAllocator());
     var next_source_position: usize = 0;
     for (matches.items) |*slot| {
-        // Step 14.a-k: this result's length, 0, index, captures and groups.
+        // Step 15.a-j: this result's length, "0", index, captures, and groups.
         slot.* = try captureReplaceMatch(ctx, output, objectFromValue(values[0]).?, slot.result, values[2], caller_function, caller_frame);
         const match = slot.*;
         const matched_len = core.string.stringValueLen(match.matched);
         const position = @min(match.index, source_units.items.len);
 
-        // Step 14.l: the replacement is computed for every result; only its
-        // use (step 14.o) depends on the position.
+        // Steps 15.k-l: the replacement is computed for every result; only its
+        // use (step 15.m) depends on the position.
         const replacement = if (functional_replace) blk: {
             // Rebuild from updated roots after earlier callbacks and collections.
             var replacer_call = CallSite.initInternal(ctx, output, objectFromValue(values[0]).?, core.JSValue.undefinedValue(), values[3], caller_function, caller_frame);
@@ -1763,7 +1755,7 @@ pub fn regExpSymbolReplaceGeneric(
             if (replacement.isString()) try ensureStringRoom(out.items.len, core.string.stringValueLenUnchecked(replacement));
             try appendStringValueUnits(ctx.runtime, &out, replacement);
         }
-        // Step 15.o: unclamped, so a match reaching past the end suppresses
+        // Step 15.m.iii: not clamped, so a match reaching past the end suppresses
         // every later result (`position < nextSourcePosition`).
         next_source_position = position + matched_len;
     }
@@ -1857,27 +1849,12 @@ fn regExpReplaceFastRooted(
 
     const alloc_count = compiled.allocCount();
     const capture_count = compiled.captureCount();
-    var inline_capture_slots: [regexp_ops.small_exec_slots]usize = undefined;
-    var heap_capture_slots: []usize = &.{};
-    defer if (heap_capture_slots.len != 0) ctx.runtime.nativeAllocator().free(heap_capture_slots);
-    const capture = if (alloc_count <= inline_capture_slots.len)
-        inline_capture_slots[0..alloc_count]
-    else capture: {
-        heap_capture_slots = try ctx.runtime.nativeAllocator().alloc(usize, alloc_count);
-        break :capture heap_capture_slots;
-    };
-
-    // The last successful match, kept for the legacy RegExp statics that
-    // every RegExpBuiltinExec match records; applied once borrowing ends.
-    var inline_last_slots: [regexp_ops.small_exec_slots]usize = undefined;
-    var heap_last_slots: []usize = &.{};
-    defer if (heap_last_slots.len != 0) ctx.runtime.nativeAllocator().free(heap_last_slots);
-    const last_match = if (alloc_count <= inline_last_slots.len)
-        inline_last_slots[0..alloc_count]
-    else last: {
-        heap_last_slots = try ctx.runtime.nativeAllocator().alloc(usize, alloc_count);
-        break :last heap_last_slots;
-    };
+    // Current match plus the last successful match (legacy RegExp statics).
+    var match_storage: regexp_ops.ExecSlots(2) = .{};
+    defer match_storage.deinit(ctx.runtime.nativeAllocator());
+    try match_storage.prepare(ctx.runtime.nativeAllocator(), alloc_count);
+    const capture = match_storage.slices[0];
+    const last_match = match_storage.slices[1];
     var matched = false;
 
     var b = StringBuffer{ .allocator = ctx.runtime.nativeAllocator() };
@@ -1895,13 +1872,9 @@ fn regExpReplaceFastRooted(
             if (is_global or is_sticky) try setRegExpLastIndexZero(ctx.runtime, rx_object);
             break;
         }
-        const result = regexp_ops.execCaptureSlotsOnResolvedStringFromIndex(ctx.runtime, compiled, sp_data, last_index, capture) catch |err| switch (err) {
-            error.BytecodeCorrupt => return null,
-            error.Timeout => {
-                try exception_ops.throwInterrupted(ctx, global);
-                unreachable;
-            },
-            else => return err,
+        const result = regexp_ops.execCaptureSlotsOnResolvedStringFromIndex(ctx.runtime, compiled, sp_data, last_index, capture) catch |err| {
+            try regexp_ops.recoverExecError(ctx, global, err);
+            return null;
         };
         if (result != .match) {
             if (is_global or is_sticky) try setRegExpLastIndexZero(ctx.runtime, rx_object);
@@ -2069,7 +2042,7 @@ fn captureReplaceMatchRooted(
     try realm.set(rt, global.value());
     try result_root.set(rt, result);
     try source_root.set(rt, string_value);
-    // RegExp.prototype[@@replace] step 14: length, then "0", then "index".
+    // RegExp.prototype[@@replace] step 15.a-e: length, then "0", then "index".
     try temporary.set(rt, try getValueProperty(ctx, output, objectFromValue(try realm.get(rt)).?, try result_root.get(rt), core.atom.ids.length, caller_function, caller_frame));
     const length = try toLengthIndex(ctx, output, objectFromValue(try realm.get(rt)).?, try temporary.get(rt));
 
@@ -2431,55 +2404,36 @@ pub fn stringPrototypeMethod(
     // `JS_ToStringCheckObject` "null or undefined are forbidden" used by the
     // remaining bodies. They therefore run their own nullish check below and are
     // dispatched before the coarse check.
-    if (method_id == string_id_lookup.legacy_split_method_id) {
-        return stringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_search_method_id) {
-        return stringSearch(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_match_method_id) {
-        return stringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_replace_method_id) {
-        return stringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_replace_all_method_id) {
-        return stringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_match_all_method_id) {
-        return stringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
+    const legacy = stringLegacyId(method_id);
+    if (legacy) |method| {
+        switch (method) {
+            .split => return stringSplit(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .search => return stringSearch(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .match => return stringMatch(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .replace => return stringReplace(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .replace_all => return stringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .match_all => return stringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame),
+            else => {},
+        }
     }
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    if (method_id == 10) {
-        return stringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
-    // file (Phase 6b-3 STEP 3B moved them back from the transitional String
-    // owner): they
-    // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
-    // bodies (search/match/split/replaceAll/matchAll and
-    // `stringSearchPositionMethod`, which observes RegExp via
-    // `isRegExpObservable`) and the BOTH bodies (concat) also stay in exec.
-    if (method_id == 34 or method_id == 35) {
-        return stringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
-    }
-    if (method_id == 11 or method_id == 12 or method_id == 13 or method_id == 14 or method_id == 15 or
-        method_id == 16 or method_id == 17 or method_id == 18 or method_id == 19 or method_id == 20 or
-        method_id == 23 or method_id == 24 or method_id == 26)
-    {
-        return stringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
-    }
-    if (method_id == string_id_lookup.legacy_normalize_method_id) {
-        return stringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == 36) {
-        return stringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
-    if (method_id == 4 or method_id == 5 or method_id == 6 or method_id == 7 or method_id == 28) {
-        return stringSearchPositionMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
-    }
-    if (method_id == 0 or method_id == 1 or method_id == 25 or method_id == 29 or method_id == 30 or method_id == 31 or method_id == 32 or method_id == 33) {
-        return stringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+    if (legacy) |method| {
+        switch (method) {
+            .concat => return stringConcat(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .pad_start, .pad_end => return stringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame),
+            .anchor, .big, .blink, .bold, .fixed, .fontcolor, .fontsize, .italics, .link, .small, .strike, .sub, .sup => {
+                return stringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+            },
+            .normalize => return stringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .locale_compare => return stringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame),
+            .index_of, .includes, .starts_with, .ends_with, .last_index_of => {
+                return stringSearchPositionMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+            },
+            .char_at, .substring, .substr, .char_code_at, .at, .code_point_at, .slice, .repeat => {
+                return stringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+            },
+            else => {},
+        }
     }
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     return callStringBody(ctx, string_value, method_id, args);
@@ -2523,12 +2477,12 @@ pub fn stringSearchPositionMethod(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     values[1] = try toStringForAnnexB(ctx, output, objectFromValue(values[0]).?, values[1], caller_function, caller_frame);
-    if (method_id == 5 or method_id == 6 or method_id == 7) {
+    if (stringLegacyId(method_id)) |method| if (method == .includes or method == .starts_with or method == .ends_with) {
         // js_string_includes: a regexp search argument to
         // includes/startsWith/endsWith throws TypeError "regexp not supported".
         if (try isRegExpObservable(ctx, output, objectFromValue(values[0]).?, values[2], caller_function, caller_frame))
             return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "regexp not supported");
-    }
+    };
     values[2] = try toStringForAnnexB(ctx, output, objectFromValue(values[0]).?, values[2], caller_function, caller_frame);
     if (!values[3].is(.undefined_value)) {
         values[3] = try toPrimitiveForNumber(ctx, output, objectFromValue(values[0]).?, values[3]);
@@ -3778,7 +3732,9 @@ fn stringPadRooted(
 
     // padEnd: source first, then fill. padStart: fill first, then source.
     // (quickjs.c, magic 0 = padStart / 1 = padEnd; here 34 = start.)
-    if (method_id == 35) try buffer.appendStringValue(rt, try source.get(rt));
+    if (stringLegacyId(method_id)) |method| {
+        if (method == .pad_end) try buffer.appendStringValue(rt, try source.get(rt));
+    }
 
     var remaining = pad_count;
     while (remaining > 0) {
@@ -3788,7 +3744,9 @@ fn stringPadRooted(
         remaining -= chunk;
     }
 
-    if (method_id == 34) try buffer.appendStringValue(rt, try source.get(rt));
+    if (stringLegacyId(method_id)) |method| {
+        if (method == .pad_start) try buffer.appendStringValue(rt, try source.get(rt));
+    }
 
     return buffer.finish(ctx.runtime);
 }
@@ -3930,8 +3888,8 @@ fn stringNumericArgsMethodRooted(
     // Only declared parameters are converted: substring/substr/slice take
     // two, charAt/charCodeAt/at/codePointAt/repeat one. An extra argument
     // is never observed.
-    const parameter_count: usize = switch (method_id) {
-        1, 25, 32 => 2,
+    const parameter_count: usize = switch (stringLegacyId(method_id) orelse .char_at) {
+        .substring, .substr, .slice => 2,
         else => 1,
     };
     const count = @min(args.len, parameter_count);
@@ -3950,15 +3908,14 @@ fn stringNumericArgsMethodRooted(
             try value_ops.toNumberRejectingBigInt(ctx, output, try expectObject(try global_root.get(rt)), arg);
     }
     const string_value = try source.get(rt);
-    if (method_id == 1) {
-        if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value;
-    }
-    if (method_id == 0) {
-        const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
-        return callStringCharAtBody(ctx, string_value, index);
-    }
-    if (method_id == 25) {
-        return stringSubstr(ctx, string_value, coerced[0..count]);
+    switch (stringLegacyId(method_id) orelse .concat) {
+        .substring => if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value,
+        .char_at => {
+            const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
+            return callStringCharAtBody(ctx, string_value, index);
+        },
+        .substr => return stringSubstr(ctx, string_value, coerced[0..count]),
+        else => {},
     }
     return callStringBody(ctx, string_value, method_id, coerced[0..count]);
 }
@@ -4038,22 +3995,40 @@ pub fn stringHtmlMethod(
     defer string_units.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &string_units, string_value);
 
-    switch (method_id) {
-        11 => return stringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        12 => return stringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        13 => return stringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        14 => return stringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        15 => return stringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        16 => return stringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        17 => return stringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        18 => return stringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        19 => return stringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        20 => return stringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        23 => return stringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        24 => return stringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        26 => return stringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        else => return error.TypeError,
+    const legacy = stringLegacyId(method_id) orelse return error.TypeError;
+    const wrap = htmlWrap(legacy) orelse return error.TypeError;
+    const attr_value = if (wrap.attr.len != 0 and args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    return stringCreateHtml(ctx, string_units.items, wrap.tag, wrap.attr, attr_value, wrap.attr.len != 0, output, global, caller_function, caller_frame);
+}
+
+const HtmlWrap = struct {
+    id: StringLegacyId,
+    tag: []const u8,
+    attr: []const u8,
+};
+
+/// Looked up by `LegacyId`. An empty `attr` means the wrapper has no attribute.
+const html_wraps = [_]HtmlWrap{
+    .{ .id = .anchor, .tag = "a", .attr = "name" },
+    .{ .id = .big, .tag = "big", .attr = "" },
+    .{ .id = .blink, .tag = "blink", .attr = "" },
+    .{ .id = .bold, .tag = "b", .attr = "" },
+    .{ .id = .fixed, .tag = "tt", .attr = "" },
+    .{ .id = .fontcolor, .tag = "font", .attr = "color" },
+    .{ .id = .fontsize, .tag = "font", .attr = "size" },
+    .{ .id = .italics, .tag = "i", .attr = "" },
+    .{ .id = .link, .tag = "a", .attr = "href" },
+    .{ .id = .small, .tag = "small", .attr = "" },
+    .{ .id = .strike, .tag = "strike", .attr = "" },
+    .{ .id = .sub, .tag = "sub", .attr = "" },
+    .{ .id = .sup, .tag = "sup", .attr = "" },
+};
+
+fn htmlWrap(method: StringLegacyId) ?HtmlWrap {
+    inline for (html_wraps) |wrap| {
+        if (wrap.id == method) return wrap;
     }
+    return null;
 }
 
 fn stringCreateHtml(
@@ -4712,12 +4687,12 @@ fn stringCall(
     // routing back through it would re-enter this record and recurse.
     if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
         const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
-        if (method_id == 0) {
+        if (stringLegacyId(method_id)) |method| if (method == .char_at) {
             // `String.prototype.charAt` body (its own helper; `methodCall` does
             // not handle id 0). The exec caller forwards the index as args[0].
             const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             return charAtValue(ctx.runtime, this_value, index) catch |err| return @as(HostError, @errorCast(err));
-        }
+        };
         return methodCall(ctx.runtime, this_value, method_id, args) catch |err| return @as(HostError, @errorCast(err));
     }
 
@@ -4896,24 +4871,25 @@ pub fn charAtValue(rt: *core.JSRuntime, string_value: core.JSValue, index_value:
 /// flattening them unless a search needs contiguous units.
 pub fn methodCall(rt: *core.JSRuntime, string_value: core.JSValue, id: u32, args: []const core.JSValue) !core.JSValue {
     if (!string_value.isString()) return error.TypeError;
-    return switch (id) {
-        1 => substringString(rt, string_value, args),
-        4 => flatStringSearch(rt, string_value, args, .first),
-        5 => flatStringSearch(rt, string_value, args, .contains),
-        6 => flatStringSearch(rt, string_value, args, .starts),
-        7 => flatStringSearch(rt, string_value, args, .ends),
-        8 => trimStringValue(rt, string_value, .both),
-        21 => trimStringValue(rt, string_value, .start),
-        22 => trimStringValue(rt, string_value, .end),
-        legacy_split_method_id => splitString(rt, string_value, args),
-        28 => flatStringSearch(rt, string_value, args, .last),
-        29 => charCodeAtString(rt, string_value, args),
-        30 => atString(rt, string_value, args),
-        31 => codePointAtString(rt, string_value, args),
-        32 => sliceString(rt, string_value, args),
-        33 => repeatString(rt, string_value, args),
-        38 => core.JSValue.boolean(isWellFormedString(string_value)),
-        39 => toWellFormedString(rt, string_value),
+    const legacy = stringLegacyId(id) orelse return error.TypeError;
+    return switch (legacy) {
+        .substring => substringString(rt, string_value, args),
+        .index_of => flatStringSearch(rt, string_value, args, .first),
+        .includes => flatStringSearch(rt, string_value, args, .contains),
+        .starts_with => flatStringSearch(rt, string_value, args, .starts),
+        .ends_with => flatStringSearch(rt, string_value, args, .ends),
+        .trim => trimStringValue(rt, string_value, .both),
+        .trim_start => trimStringValue(rt, string_value, .start),
+        .trim_end => trimStringValue(rt, string_value, .end),
+        .split => splitString(rt, string_value, args),
+        .last_index_of => flatStringSearch(rt, string_value, args, .last),
+        .char_code_at => charCodeAtString(rt, string_value, args),
+        .at => atString(rt, string_value, args),
+        .code_point_at => codePointAtString(rt, string_value, args),
+        .slice => sliceString(rt, string_value, args),
+        .repeat => repeatString(rt, string_value, args),
+        .is_well_formed => core.JSValue.boolean(isWellFormedString(string_value)),
+        .to_well_formed => toWellFormedString(rt, string_value),
         else => error.TypeError,
     };
 }

@@ -459,6 +459,23 @@ pub fn createDataFunction(rt: *core.JSRuntime, global: *core.Object, name: []con
     return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
 }
 
+/// Nameless internal callback: `createDataFunction` plus its callable tag.
+/// The new function is rooted across the tag store, which allocates the rare payload.
+pub fn createInternalCallback(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    length: i32,
+    tag: core.host_function.InternalCallableTag,
+) !*core.Object {
+    var callback = try createDataFunction(rt, global, "", length);
+    var roots = core.runtime.rootValues(.{&callback});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, tag);
+    return callback_object;
+}
+
 pub fn addCollectionEntriesFromIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

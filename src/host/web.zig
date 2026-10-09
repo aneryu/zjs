@@ -46,7 +46,7 @@ fn materializeNavigator(header: *core.gc.Header) zjs.RuntimeError!core.JSValue {
     const rt = ctx.runtime;
     // 0: Navigator prototype, 1: scratch (tag, getter), 2: navigator.
     var roots: core.runtime.ExactValueRoots(3) = .{};
-    roots.activate(rt) catch return error.InvalidBuiltinRegistry;
+    roots.activate(rt) catch |err| std.debug.panic("activate navigator roots: {s}", .{@errorName(err)});
     defer roots.deactivate();
     const slots = &roots.storage;
 
@@ -55,6 +55,7 @@ fn materializeNavigator(header: *core.gc.Header) zjs.RuntimeError!core.JSValue {
     slots[1] = try value_ops.createStringValue(rt, "Navigator");
     try objectAt(slots[0]).defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, core.Descriptor.data(slots[1], .{ .configurable = true }));
     var facade = zjs.borrowContext(ctx);
+    // A collection after activation may move the realm global, so re-read it.
     slots[1] = facade.createFunction("get userAgent", zjs.native.managed(userAgent), .{ .length = 0, .realm_global = (ctx.global orelse return error.InvalidBuiltinRegistry).value() }) catch |err| return engineError(err);
     try objectAt(slots[0]).defineOwnPropertyAssumingNew(rt, core.atom.ids.userAgent, core.Descriptor.accessor(slots[1], core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }));
     slots[2] = (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, objectAt(slots[0]), 0)).value();
@@ -91,7 +92,7 @@ fn materializePerformance(header: *core.gc.Header) zjs.RuntimeError!core.JSValue
     const rt = ctx.runtime;
     // 0: performance, 1: now.
     var roots: core.runtime.ExactValueRoots(2) = .{};
-    roots.activate(rt) catch return error.InvalidBuiltinRegistry;
+    roots.activate(rt) catch |err| std.debug.panic("activate performance roots: {s}", .{@errorName(err)});
     defer roots.deactivate();
     const slots = &roots.storage;
 
@@ -107,6 +108,7 @@ fn materializePerformance(header: *core.gc.Header) zjs.RuntimeError!core.JSValue
         return err;
     };
     var facade = zjs.borrowContext(ctx);
+    // A collection after activation may move the realm global, so re-read it.
     slots[1] = facade.createFunction("now", zjs.native.managed(PerformanceClock.now), .{ .length = 0, .state = clock, .realm_global = (ctx.global orelse return error.InvalidBuiltinRegistry).value() }) catch |err| return engineError(err);
     try objectAt(slots[0]).defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("now", .string).?, core.Descriptor.data(slots[1], .method));
     const time_origin_ms = @as(f64, @floatFromInt(clock_mod.realNanos())) / std.time.ns_per_ms;

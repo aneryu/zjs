@@ -54,7 +54,7 @@ const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
 const objectFromValue = object_ops.objectFromValue;
 const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
-const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const toObjectReceiver = object_ops.toObjectReceiver;
 const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
 const propertyIndexFromLengthKey = object_ops.propertyIndexFromLengthKey;
 const collectIteratorValues = call_runtime.collectIteratorValues;
@@ -137,6 +137,8 @@ pub fn pushFunctionClosure(
 /// Every method body it dispatches to is `noinline`: this frame (and the
 /// glue above it) stays live under each callback a method makes, so it must
 /// not reserve the largest body's locals for all of them.
+const ArrayReceiverKind = enum { array, typed };
+
 pub fn arrayPrototypeNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -151,8 +153,9 @@ pub fn arrayPrototypeNativeRecord(
     const array_mod = method_ids.array;
     const function_object_nonnull = function_object orelse return error.TypeError;
     const typed_method = std.enums.fromInt(TypedArrayMethod, id);
+    const kind: ArrayReceiverKind = if (typed_method != null) .typed else .array;
     if (typed_method) |method| switch (method) {
-        .set => return typedArraySetCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
+        .set => return typedArraySetCall(ctx, output, global, receiver, kind, args, caller_function, caller_frame),
         .slice => return typedArraySliceSubarrayCall(ctx, output, global, receiver, args, false),
         .subarray => return typedArraySliceSubarrayCall(ctx, output, global, receiver, args, true),
         else => {},
@@ -162,32 +165,32 @@ pub fn arrayPrototypeNativeRecord(
     else
         id;
     if (arrayIterationModeFromRecordId(method_id)) |mode| {
-        return arrayIterationModeCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
+        return arrayIterationModeCall(ctx, output, global, receiver, kind, args, caller_function, caller_frame, mode);
     }
     return switch (method_id) {
         @intFromEnum(array_mod.PrototypeMethod.to_string) => arrayToStringCall(ctx, output, global, receiver, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => arrayToLocaleStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.reduce) => arrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, false),
-        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => arrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, true),
-        @intFromEnum(array_mod.PrototypeMethod.at) => arrayAtCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.includes) => arraySearchCall(ctx, output, global, receiver, function_object_nonnull, args, .includes),
-        @intFromEnum(array_mod.PrototypeMethod.index_of) => arraySearchCall(ctx, output, global, receiver, function_object_nonnull, args, .index_of),
-        @intFromEnum(array_mod.PrototypeMethod.last_index_of) => arraySearchCall(ctx, output, global, receiver, function_object_nonnull, args, .last_index_of),
-        @intFromEnum(array_mod.PrototypeMethod.copy_within) => arrayCopyWithinCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.fill) => arrayFillCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.reduce) => arrayReduceCall(ctx, output, global, receiver, kind, args, false),
+        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => arrayReduceCall(ctx, output, global, receiver, kind, args, true),
+        @intFromEnum(array_mod.PrototypeMethod.at) => arrayAtCall(ctx, output, global, receiver, kind, args),
+        @intFromEnum(array_mod.PrototypeMethod.includes) => arraySearchCall(ctx, output, global, receiver, kind, args, .includes),
+        @intFromEnum(array_mod.PrototypeMethod.index_of) => arraySearchCall(ctx, output, global, receiver, kind, args, .index_of),
+        @intFromEnum(array_mod.PrototypeMethod.last_index_of) => arraySearchCall(ctx, output, global, receiver, kind, args, .last_index_of),
+        @intFromEnum(array_mod.PrototypeMethod.copy_within) => arrayCopyWithinCall(ctx, output, global, receiver, kind, args),
+        @intFromEnum(array_mod.PrototypeMethod.fill) => arrayFillCall(ctx, output, global, receiver, kind, args),
         @intFromEnum(array_mod.PrototypeMethod.shift) => arrayShiftCall(ctx, output, global, receiver, function_object_nonnull.value()),
         @intFromEnum(array_mod.PrototypeMethod.unshift) => arrayUnshiftCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.reverse) => arrayReverseCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.reverse) => arrayReverseCall(ctx, output, global, receiver, kind, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.slice) => arraySliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.join) => arrayJoinCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.join) => arrayJoinCall(ctx, output, global, receiver, kind, args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.concat) => arrayConcatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.sort) => arraySortCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.sort) => arraySortCall(ctx, output, global, receiver, kind, args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.flat) => arrayFlatCall(ctx, output, global, receiver, args, false, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.flat_map) => arrayFlatCall(ctx, output, global, receiver, args, true, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.to_reversed) => arrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, .to_reversed, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.to_sorted) => arrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, .to_sorted, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.to_spliced) => arrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, .to_spliced, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.with_) => arrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, .with_, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_reversed) => arrayByCopyCall(ctx, output, global, receiver, kind, args, .to_reversed, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_sorted) => arrayByCopyCall(ctx, output, global, receiver, kind, args, .to_sorted, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_spliced) => arrayByCopyCall(ctx, output, global, receiver, kind, args, .to_spliced, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.with_) => arrayByCopyCall(ctx, output, global, receiver, kind, args, .with_, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.keys),
         @intFromEnum(array_mod.PrototypeMethod.values),
         @intFromEnum(array_mod.PrototypeMethod.entries),
@@ -202,33 +205,7 @@ pub fn arrayPrototypeNativeRecord(
 fn typedArraySharedMethod(method: TypedArrayMethod) ?PrototypeMethod {
     return switch (method) {
         .from, .of, .set, .slice, .subarray => null,
-        .to_locale_string => .to_locale_string,
-        .map => .map,
-        .filter => .filter,
-        .reduce => .reduce,
-        .reduce_right => .reduce_right,
-        .for_each => .for_each,
-        .some => .some,
-        .every => .every,
-        .find => .find,
-        .find_index => .find_index,
-        .find_last => .find_last,
-        .find_last_index => .find_last_index,
-        .includes => .includes,
-        .index_of => .index_of,
-        .last_index_of => .last_index_of,
-        .at => .at,
-        .copy_within => .copy_within,
-        .fill => .fill,
-        .join => .join,
-        .reverse => .reverse,
-        .sort => .sort,
-        .to_reversed => .to_reversed,
-        .to_sorted => .to_sorted,
-        .with_ => .with_,
-        .keys => .keys,
-        .values => .values,
-        .entries => .entries,
+        else => std.meta.stringToEnum(PrototypeMethod, @tagName(method)),
     };
 }
 
@@ -910,12 +887,12 @@ pub noinline fn typedArraySetCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    function_object: *core.Object,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     const target = objectFromValue(receiver) orelse return if (is_typed_method) error.NotATypedArray else null;
     if (!core.typed_array.isTypedArrayObject(target)) return if (is_typed_method) error.NotATypedArray else null;
     const source = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -1032,7 +1009,6 @@ test "typedArraySetCall roots typed array snapshot while reading source" {
     _ = try core.typed_array.typedArraySetIndex(rt, source, 0, first_big);
     _ = try core.typed_array.typedArraySetIndex(rt, source, 1, second_big);
 
-    const function_object = try core.Object.create(rt, core.class.ids.object, null);
     const args = [_]core.JSValue{source_value};
 
     var probe = ActiveRootValueProbe{
@@ -1041,7 +1017,7 @@ test "typedArraySetCall roots typed array snapshot while reading source" {
     const saved_trigger_fn = rt.gc.heap_budget.installProbe(.{ .run = ActiveRootValueProbe.trigger, .context = &probe });
     defer rt.gc.heap_budget.restoreProbe(saved_trigger_fn);
 
-    _ = (try typedArraySetCall(ctx, null, global, target_value, function_object, &args, null, null)) orelse return error.TypeError;
+    _ = (try typedArraySetCall(ctx, null, global, target_value, .array, &args, null, null)) orelse return error.TypeError;
 
     // The probe forced a cycle-removal pass during the typed-array set; the
     // copied heap bigint survives into the target only because the in-flight
@@ -1095,11 +1071,15 @@ pub fn addCollectionEntriesFromArray(
     }
 }
 
-/// ToObject. Null and undefined throw `error.NullishToObject`.
-fn toObjectReceiver(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !core.JSValue {
-    if (value.is(.null_value) or value.is(.undefined_value)) return error.NullishToObject;
-    if (objectFromValue(value) != null) return value;
-    return primitiveObjectForAccess(ctx.runtime, global, value);
+/// `base` is the length the negative offset is added to. `limit` is the length
+/// the result must be inside. TypedArray `with` passes the pre-coercion length
+/// as `base` and the post-conversion length as `limit`.
+fn relativeIndexInBounds(base: usize, limit: usize, rel: f64) ?usize {
+    const base_number: f64 = @floatFromInt(base);
+    const limit_number: f64 = @floatFromInt(limit);
+    const actual = if (rel >= 0) rel else base_number + rel;
+    if (!(actual >= 0 and actual < limit_number) or !std.math.isFinite(actual)) return null;
+    return @intFromFloat(actual);
 }
 
 pub noinline fn arrayAtCall(
@@ -1107,11 +1087,10 @@ pub noinline fn arrayAtCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-    const typed_array_method = isTypedArrayPrototypeMethod(function_object);
+    const typed_array_method = kind == .typed;
 
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
@@ -1119,14 +1098,10 @@ pub noinline fn arrayAtCall(
     const length = try arrayMethodLength(ctx, output, global, receiver_object_value, object, typed_array_method, null, null);
 
     const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    // ToIntegerOrInfinity and the relative index stay in f64 (length is at
-    // most 2^53 - 1, so exact) until the bounds check has passed.
     const relative_index = try toIntegerOrInfinity(ctx, output, global, index_arg);
-    const length_number: f64 = @floatFromInt(length);
-    const actual_index = if (relative_index >= 0) relative_index else length_number + relative_index;
-    if (!(actual_index >= 0 and actual_index < length_number)) return core.JSValue.undefinedValue();
+    const actual_index = relativeIndexInBounds(length, length, relative_index) orelse return core.JSValue.undefinedValue();
 
-    const key = try propertyAtomFromLengthIndex(ctx.runtime, @intFromFloat(actual_index));
+    const key = try propertyAtomFromLengthIndex(ctx.runtime, actual_index);
     defer key.deinit(ctx.runtime);
     return try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
 }
@@ -1170,7 +1145,7 @@ noinline fn arrayIterationModeCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    function_object: *core.Object,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -1179,7 +1154,7 @@ noinline fn arrayIterationModeCall(
     const find_family = arrayIterationModeIsFind(mode);
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
     const length = try arrayMethodLength(ctx, output, global, receiver_object_value, object, is_typed_method, caller_function, caller_frame);
     if (args.len < 1 or !isCallableValue(args[0])) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a function"));
@@ -1392,15 +1367,13 @@ pub noinline fn arrayReduceCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     from_right: bool,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
     const length = try arrayMethodLength(ctx, output, global, receiver_object_value, object, is_typed_method, null, null);
     if (args.len < 1 or !isCallableValue(args[0])) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a function"));
@@ -1791,23 +1764,194 @@ fn scanFloatPredicate(comptime T: type, bytes: []const u8, k: usize, stop: usize
     return null;
 }
 
-pub fn arrayFirstIndexStart(
+pub noinline fn arraySearchCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    receiver: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
-    length: usize,
-) !usize {
-    if (args.len < 2) return 0;
-    const n = try toIntegerOrInfinity(ctx, output, global, args[1]);
-    if (std.math.isNan(n)) return 0;
-    if (std.math.isPositiveInf(n)) return length;
-    if (std.math.isNegativeInf(n)) return 0;
-    if (n >= @as(f64, @floatFromInt(length))) return length;
-    if (n >= 0) return @intFromFloat(@trunc(n));
-    const offset = @as(f64, @floatFromInt(length)) + @trunc(n);
-    if (offset <= 0) return 0;
-    return @intFromFloat(offset);
+    mode: TypedSearchMode,
+) !?core.JSValue {
+    const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
+    const object = objectFromValue(receiver_object_value) orelse return null;
+    const is_typed_method = kind == .typed;
+    if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
+    const length = try arrayMethodLength(ctx, output, global, receiver_object_value, object, is_typed_method, null, null);
+    if (length == 0) return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
+
+    const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    // Typed arrays: raw-buffer per-class scan (qjs js_typed_array_indexOf,
+    // quickjs.c). Normalize the search value once with an
+    // early can't-fit short-circuit, then scan the backing buffer per element
+    // kind instead of boxing each element through typedArrayGetIndex. The
+    // fromIndex coercion below mirrors what the generic loop already ran.
+    const from_right = mode == .last_index_of;
+    var cursor = if (from_right)
+        try arrayLastIndexStart(ctx, output, global, args, length)
+    else
+        try arrayRelativeIndex(ctx, output, global, args, 1, length, 0);
+    if (is_typed_method) {
+        return try typedArraySearchScan(ctx.runtime, object, mode, search_value, cursor, length);
+    }
+    // Unique dense paths stay separate. lastIndexOf requires a full-density
+    // fast array and returns -1 if the dense scan misses. indexOf/includes
+    // scan the dense PREFIX then fall through to the generic tail (qjs
+    // js_array_indexOf/includes, quickjs.c).
+    if (from_right) {
+        if (object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
+            const elements = object.arrayElements();
+            if (cursor > elements.len) cursor = elements.len;
+            while (cursor > 0) {
+                cursor -= 1;
+                if (try valuesStrictEqual(ctx.runtime, elements[cursor], search_value)) return lengthIndexValue(cursor);
+            }
+            return core.JSValue.int32(-1);
+        }
+    } else if (object.isFastArray()) {
+        const elements = object.arrayElements();
+        const dense_end = @min(elements.len, length);
+        while (cursor < dense_end) : (cursor += 1) {
+            const item = elements[cursor];
+            if (mode == .includes) {
+                if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+            } else {
+                if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
+            }
+        }
+    }
+
+    // Generic present-element search: propertyAtom + has (except includes)
+    // + get + sameValueZero / valuesStrictEqual; direction taken at runtime.
+    // Typed arrays returned early above.
+    // Over a huge length, jump between possibly present indices. A hole
+    // reads as undefined, so `includes(undefined)` must visit every index.
+    var sparse_walk = length >= sparse_walk_min_length and
+        (mode != .includes or !search_value.is(.undefined_value));
+    var remaining: usize = if (from_right) cursor else length - cursor;
+    while (remaining > 0) : ({
+        remaining -= 1;
+        if (!from_right) cursor += 1;
+    }) {
+        if (sparse_walk) {
+            const candidate = if (from_right)
+                try previousSparseCandidate(ctx.runtime, object, cursor)
+            else
+                try nextSparseCandidate(ctx.runtime, object, cursor);
+            switch (candidate) {
+                .none => break,
+                .index => |index| if (from_right) {
+                    cursor = index + 1;
+                    remaining = index + 1;
+                } else {
+                    if (index >= length) break;
+                    cursor = index;
+                    remaining = length - index;
+                },
+                .unknown => sparse_walk = false,
+            }
+        }
+        if (from_right) cursor -= 1;
+        const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+        defer key.deinit(ctx.runtime);
+        if (mode != .includes and !try hasValueProperty(ctx, output, global, object, key.atom, null, null)) continue;
+        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        if (mode == .includes) {
+            if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+        } else {
+            if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
+        }
+    }
+    return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
+}
+
+pub noinline fn arrayConcatCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const function_object = callableObjectFromValue(func) orelse return null;
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.concat))) return null;
+
+    const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
+
+    const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, 0, caller_function, caller_frame);
+    const out = try property_ops.expectObject(out_value);
+    var next_index: usize = 0;
+    try concatAppendValue(ctx, output, global, out, &next_index, receiver_object_value, caller_function, caller_frame);
+    for (args) |arg| try concatAppendValue(ctx, output, global, out, &next_index, arg, caller_function, caller_frame);
+    // Set(A, "length", n, true): a failed write throws, and an Array rejects
+    // a length above 2^32 - 1 with a RangeError.
+    _ = try object_ops.setValuePropertyWithThrow(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(next_index), caller_function, caller_frame, true);
+    return out_value;
+}
+
+pub fn concatAppendValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    out: *core.Object,
+    next_index: *usize,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    if (objectFromValue(value)) |object| {
+        if (try isConcatSpreadable(ctx, output, global, value, object, caller_function, caller_frame)) {
+            const length_value = try concatSpreadLengthValue(ctx, output, global, value, object, caller_function, caller_frame);
+            const length = try toLengthIndex(ctx, output, global, length_value);
+            if (next_index.* > core.array.max_safe_length or length > core.array.max_safe_length - next_index.*) return error.ArrayTooLong;
+            // A hole only advances n, so a huge length visits just the
+            // indices that may be present.
+            const start = next_index.*;
+            var sparse_walk = length >= sparse_walk_min_length and !core.typed_array.isTypedArrayObject(object);
+            var index: usize = 0;
+            while (index < length) : (index += 1) {
+                try exception_ops.pollNativeLoop(ctx, global);
+                if (sparse_walk) switch (try nextSparseCandidate(ctx.runtime, object, index)) {
+                    .none => break,
+                    .index => |candidate| index = candidate,
+                    .unknown => sparse_walk = false,
+                };
+                if (index >= length) break;
+                try arrayCopyPresentIndex(ctx, output, global, value, object, index, out, start + index, caller_function, caller_frame);
+            }
+            next_index.* = start + length;
+            return;
+        }
+    }
+    if (next_index.* >= core.array.max_safe_length) return error.ArrayTooLong;
+    const key = try propertyAtomFromLengthIndex(ctx.runtime, next_index.*);
+    defer key.deinit(ctx.runtime);
+    try createDataPropertyOrThrow(ctx, output, global, out, key.atom, value, caller_function, caller_frame);
+    next_index.* += 1;
+}
+
+pub fn concatSpreadLengthValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const dynamic = try getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
+    if (!core.typed_array.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
+    if (try core.typed_array.typedArrayOutOfBounds(object)) return dynamic;
+    const own = (try object.getOwnProperty(ctx.runtime, core.atom.ids.length)) orelse return dynamic;
+    if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
+    const own_number = value_ops.numberValue(own.value) orelse return dynamic;
+    const dynamic_number = value_ops.numberValue(dynamic) orelse return dynamic;
+    if (own_number > dynamic_number) {
+        return own.value;
+    }
+    return dynamic;
 }
 
 pub fn arrayLastIndexStart(
@@ -1848,10 +1992,7 @@ pub noinline fn arraySliceCall(
     const length = try lengthOfArrayLike(ctx, output, global, receiver_object_value, object, null, null);
 
     const start = try arrayRelativeIndex(ctx, output, global, args, 0, length, 0);
-    const end = if (args.len >= 2 and !args[1].is(.undefined_value))
-        try arrayRelativeIndex(ctx, output, global, args, 1, length, length)
-    else
-        length;
+    const end = try relativeSliceIndex(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), length, true);
     const count = if (end > start) end - start else 0;
 
     // qjs js_array_slice fast case: when the species ctor is
@@ -1937,10 +2078,7 @@ pub noinline fn typedArraySliceSubarrayCall(
     if (is_slice and (try core.typed_array.typedArrayDetached(object) or try core.typed_array.typedArrayOutOfBounds(object))) return error.TypedArrayOutOfBounds;
     const length = @as(usize, @intCast(try core.typed_array.typedArrayLength(ctx.runtime, object)));
     const start = try arrayRelativeIndex(ctx, output, global, args, 0, length, 0);
-    const end = if (args.len >= 2 and !args[1].is(.undefined_value))
-        try arrayRelativeIndex(ctx, output, global, args, 1, length, length)
-    else
-        length;
+    const end = try relativeSliceIndex(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), length, true);
     const count = if (end > start) end - start else 0;
     if (count > std.math.maxInt(i32)) return error.RangeError;
 
@@ -2274,11 +2412,10 @@ pub noinline fn arrayCopyWithinCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
 
     if (is_typed_method) {
         const object = objectFromValue(receiver) orelse return error.NotATypedArray;
@@ -2295,20 +2432,13 @@ pub noinline fn arrayCopyWithinCall(
             try toIntegerOrInfinity(ctx, output, global, args[1])
         else
             @as(f64, 0);
-        const end_number = if (args.len >= 3 and !args[2].is(.undefined_value))
-            try toIntegerOrInfinity(ctx, output, global, args[2])
-        else
-            null;
+        const final = try relativeSliceIndex(ctx, output, global, if (args.len >= 3) args[2] else core.JSValue.undefinedValue(), initial_length, true);
 
         // §23.2.3.6: indices are relative to the length read before the
         // coercions. Only a non-empty copy revalidates the buffer (step 17);
         // a buffer shrunk by the coercions then clamps the copied range.
         const to_start = arrayRelativeIndexFromNumber(initial_length, target_number);
         const from_start = arrayRelativeIndexFromNumber(initial_length, start_number);
-        const final = if (end_number) |end|
-            arrayRelativeIndexFromNumber(initial_length, end)
-        else
-            initial_length;
         const requested = @min(final -| from_start, initial_length -| to_start);
         if (requested == 0) return receiver;
         if (try core.typed_array.typedArrayDetached(object)) return error.TypedArrayOutOfBounds;
@@ -2339,10 +2469,7 @@ pub noinline fn arrayCopyWithinCall(
 
     const to_start = try arrayRelativeIndex(ctx, output, global, args, 0, length, 0);
     const from_start = try arrayRelativeIndex(ctx, output, global, args, 1, length, 0);
-    const final = if (args.len >= 3 and !args[2].is(.undefined_value))
-        try arrayRelativeIndex(ctx, output, global, args, 2, length, length)
-    else
-        length;
+    const final = try relativeSliceIndex(ctx, output, global, if (args.len >= 3) args[2] else core.JSValue.undefinedValue(), length, true);
     var count = @min(final -| from_start, length -| to_start);
     var from = from_start;
     var to = to_start;
@@ -2377,11 +2504,10 @@ pub noinline fn arrayFillCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method and !receiver.is(.object)) return error.NotATypedArray;
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
@@ -2395,10 +2521,7 @@ pub noinline fn arrayFillCall(
         const value = try typedArrayByCopyCoerceValue(ctx, output, global, object, raw_value);
 
         const start = try arrayRelativeIndex(ctx, output, global, args, 1, initial_length, 0);
-        const final = if (args.len >= 3 and !args[2].is(.undefined_value))
-            try arrayRelativeIndex(ctx, output, global, args, 2, initial_length, initial_length)
-        else
-            initial_length;
+        const final = try relativeSliceIndex(ctx, output, global, if (args.len >= 3) args[2] else core.JSValue.undefinedValue(), initial_length, true);
 
         if (try core.typed_array.typedArrayDetached(object) or try core.typed_array.typedArrayOutOfBounds(object)) return error.TypedArrayOutOfBounds;
 
@@ -2418,10 +2541,7 @@ pub noinline fn arrayFillCall(
     const length = try lengthOfArrayLike(ctx, output, global, receiver_object_value, object, null, null);
 
     const start = try arrayRelativeIndex(ctx, output, global, args, 1, length, 0);
-    const final = if (args.len >= 3 and !args[2].is(.undefined_value))
-        try arrayRelativeIndex(ctx, output, global, args, 2, length, length)
-    else
-        length;
+    const final = try relativeSliceIndex(ctx, output, global, if (args.len >= 3) args[2] else core.JSValue.undefinedValue(), length, true);
     // Array.prototype.fill on a TypedArray receiver converts at each Set.
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
 
@@ -2778,14 +2898,13 @@ pub noinline fn arrayReverseCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return error.TypeError;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
     if (is_typed_method) {
         if (try core.typed_array.typedArrayDetached(object) or try core.typed_array.typedArrayOutOfBounds(object)) return error.TypedArrayOutOfBounds;
@@ -3351,14 +3470,10 @@ fn fromAsyncAwait(
 ) !void {
     const rt = ctx.runtime;
     try fromAsyncStateSet(rt, state, core.atom.ids.phase, core.JSValue.int32(phase));
-    const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
-    const awaited = try promise_ops.promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{value}, null, null);
-    const on_fulfilled = try fromAsyncContinuation(rt, global, state, false);
-    const on_rejected = try fromAsyncContinuation(rt, global, state, true);
-    try promise_ops.performPromiseThen(ctx, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try promise_ops.awaitInternal(ctx, output, global, value, .{ .array_from_async = state }, null, null);
 }
 
-fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core.Object, rejected: bool) !core.JSValue {
+pub fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core.Object, rejected: bool) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .array_from_async_continuation);
@@ -4050,19 +4165,18 @@ pub noinline fn arraySortCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
     const comparator = if (args.len >= 1 and !args[0].is(.undefined_value)) args[0] else core.JSValue.undefinedValue();
     if (!comparator.is(.undefined_value) and !isCallableValue(comparator)) return error.NotAFunction;
 
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return error.TypeError;
 
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     const is_typed_array = core.typed_array.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.NotATypedArray;
     if (is_typed_method) {
@@ -4340,21 +4454,19 @@ pub noinline fn arrayByCopyCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    func: core.JSValue,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     mode: ByCopyMode,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-
     if (mode == .to_sorted and args.len >= 1 and !args[0].is(.undefined_value) and !isCallableValue(args[0])) {
         return error.NotAFunction;
     }
 
     const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
     if (is_typed_method) {
         if (try typedArrayByCopyCall(ctx, output, global, object, mode, args, caller_function, caller_frame)) |value| return value;
@@ -4422,9 +4534,7 @@ pub noinline fn arrayByCopyCall(
 
     if (mode == .with_) {
         const relative_index = try toIntegerOrInfinity(ctx, output, global, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        const actual_index = if (relative_index < 0) @as(f64, @floatFromInt(length)) + relative_index else relative_index;
-        if (actual_index < 0 or actual_index >= @as(f64, @floatFromInt(length)) or !std.math.isFinite(actual_index)) return error.InvalidArrayIndex;
-        const replace_index: usize = @intFromFloat(actual_index);
+        const replace_index = relativeIndexInBounds(length, length, relative_index) orelse return error.InvalidArrayIndex;
         const replacement = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const out = try createArrayByCopyOutput(ctx.runtime, global, length);
         for (0..length) |index| {
@@ -4538,12 +4648,10 @@ pub fn typedArrayByCopyCall(
 
     if (mode == .with_) {
         const relative_index = try toIntegerOrInfinity(ctx, output, global, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        const actual_index = if (relative_index < 0) @as(f64, @floatFromInt(length)) + relative_index else relative_index;
         const replacement = try typedArrayByCopyCoerceValue(ctx, output, global, object, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
 
         const current_length = @as(usize, @intCast(try core.typed_array.typedArrayLength(ctx.runtime, object)));
-        if (actual_index < 0 or actual_index >= @as(f64, @floatFromInt(current_length)) or !std.math.isFinite(actual_index)) return error.InvalidArrayIndex;
-        const replace_index: usize = @intFromFloat(actual_index);
+        const replace_index = relativeIndexInBounds(length, current_length, relative_index) orelse return error.InvalidArrayIndex;
 
         const out_value = try typedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
         const out = objectFromValue(out_value) orelse return error.TypeError;
@@ -4981,7 +5089,7 @@ pub noinline fn putDenseArrayElementAppendOwnedFast(rt: *core.JSRuntime, object_
     if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
     const index: u32 = @intCast(index_i32);
     if (index > core.atom.max_int_atom) return .miss;
-    const appended = object.appendDenseArrayIndexOwned(rt, index, core.Atom.taggedInt(index), value) catch |err| switch (err) {
+    const appended = object.appendDenseArrayIndex(rt, index, core.Atom.taggedInt(index), value) catch |err| switch (err) {
         error.OutOfMemory => return .out_of_memory,
     };
     return if (appended) .handled else .miss;
@@ -5513,7 +5621,7 @@ pub noinline fn arrayJoinCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    function_object: *core.Object,
+    kind: ArrayReceiverKind,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -5526,7 +5634,7 @@ pub noinline fn arrayJoinCall(
     if (ctx.runtime.stack.checkNativeOverflow(0)) return error.StackOverflow;
     const object_value = try toObjectReceiver(ctx, global, this_value);
     const object = core.value_semantics.objectFromValue(object_value) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
+    const is_typed_method = kind == .typed;
     if (is_typed_method) {
         if (!core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
     } else if (try fastDensePrimitiveArrayJoin(ctx.runtime, object, args)) |joined| return joined;
@@ -5930,52 +6038,22 @@ pub const PrototypeMethod = core.host_function.builtin_method_ids.array.Prototyp
 pub const ConstructorMethod = core.host_function.builtin_method_ids.array.ConstructorMethod;
 pub const TypedArrayMethod = core.host_function.builtin_method_ids.array.TypedArrayMethod;
 pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
-    if (std.mem.eql(u8, name, "fromAsync")) return @intFromEnum(StaticMethod.from_async);
-    if (std.mem.eql(u8, name, "isArray")) return @intFromEnum(StaticMethod.is_array);
-    if (std.mem.eql(u8, name, "of")) return @intFromEnum(StaticMethod.of);
+    // Install-time only. fromInt walks every enum field once per entry.
+    @setEvalBranchQuota(20000);
+    for (internal_entries) |entry| {
+        if (std.enums.fromInt(StaticMethod, entry.id) == null) continue;
+        if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    }
     return null;
 }
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
-    if (std.mem.eql(u8, name, "toLocaleString")) return @intFromEnum(PrototypeMethod.to_locale_string);
-    if (std.mem.eql(u8, name, "map")) return @intFromEnum(PrototypeMethod.map);
-    if (std.mem.eql(u8, name, "filter")) return @intFromEnum(PrototypeMethod.filter);
-    if (std.mem.eql(u8, name, "reduce")) return @intFromEnum(PrototypeMethod.reduce);
-    if (std.mem.eql(u8, name, "reduceRight")) return @intFromEnum(PrototypeMethod.reduce_right);
-    if (std.mem.eql(u8, name, "forEach")) return @intFromEnum(PrototypeMethod.for_each);
-    if (std.mem.eql(u8, name, "push")) return @intFromEnum(PrototypeMethod.push);
-    if (std.mem.eql(u8, name, "pop")) return @intFromEnum(PrototypeMethod.pop);
-    if (std.mem.eql(u8, name, "shift")) return @intFromEnum(PrototypeMethod.shift);
-    if (std.mem.eql(u8, name, "unshift")) return @intFromEnum(PrototypeMethod.unshift);
-    if (std.mem.eql(u8, name, "some")) return @intFromEnum(PrototypeMethod.some);
-    if (std.mem.eql(u8, name, "every")) return @intFromEnum(PrototypeMethod.every);
-    if (std.mem.eql(u8, name, "find")) return @intFromEnum(PrototypeMethod.find);
-    if (std.mem.eql(u8, name, "findIndex")) return @intFromEnum(PrototypeMethod.find_index);
-    if (std.mem.eql(u8, name, "findLast")) return @intFromEnum(PrototypeMethod.find_last);
-    if (std.mem.eql(u8, name, "findLastIndex")) return @intFromEnum(PrototypeMethod.find_last_index);
-    if (std.mem.eql(u8, name, "includes")) return @intFromEnum(PrototypeMethod.includes);
-    if (std.mem.eql(u8, name, "indexOf")) return @intFromEnum(PrototypeMethod.index_of);
-    if (std.mem.eql(u8, name, "lastIndexOf")) return @intFromEnum(PrototypeMethod.last_index_of);
-    if (std.mem.eql(u8, name, "at")) return @intFromEnum(PrototypeMethod.at);
-    if (std.mem.eql(u8, name, "copyWithin")) return @intFromEnum(PrototypeMethod.copy_within);
-    if (std.mem.eql(u8, name, "fill")) return @intFromEnum(PrototypeMethod.fill);
-    if (std.mem.eql(u8, name, "slice")) return @intFromEnum(PrototypeMethod.slice);
-    if (std.mem.eql(u8, name, "splice")) return @intFromEnum(PrototypeMethod.splice);
-    if (std.mem.eql(u8, name, "join")) return @intFromEnum(PrototypeMethod.join);
-    if (std.mem.eql(u8, name, "concat")) return @intFromEnum(PrototypeMethod.concat);
-    if (std.mem.eql(u8, name, "reverse")) return @intFromEnum(PrototypeMethod.reverse);
-    if (std.mem.eql(u8, name, "sort")) return @intFromEnum(PrototypeMethod.sort);
-    if (std.mem.eql(u8, name, "flat")) return @intFromEnum(PrototypeMethod.flat);
-    if (std.mem.eql(u8, name, "flatMap")) return @intFromEnum(PrototypeMethod.flat_map);
-    if (std.mem.eql(u8, name, "toReversed")) return @intFromEnum(PrototypeMethod.to_reversed);
-    if (std.mem.eql(u8, name, "toSorted")) return @intFromEnum(PrototypeMethod.to_sorted);
-    if (std.mem.eql(u8, name, "toSpliced")) return @intFromEnum(PrototypeMethod.to_spliced);
-    if (std.mem.eql(u8, name, "with")) return @intFromEnum(PrototypeMethod.with_);
-    if (std.mem.eql(u8, name, "keys")) return @intFromEnum(PrototypeMethod.keys);
-    if (std.mem.eql(u8, name, "values")) return @intFromEnum(PrototypeMethod.values);
-    if (std.mem.eql(u8, name, "entries")) return @intFromEnum(PrototypeMethod.entries);
+    // Install-time only. fromInt walks every enum field once per entry.
+    @setEvalBranchQuota(20000);
+    for (internal_entries) |entry| {
+        if (std.enums.fromInt(PrototypeMethod, entry.id) == null) continue;
+        if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    }
     return null;
 }
 
@@ -6488,196 +6566,6 @@ test "array constructWithPrototype roots direct function bytecode elements while
 }
 
 pub const expectArray = core_array.expectArray;
-
-pub noinline fn arraySearchCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    mode: TypedSearchMode,
-) !?core.JSValue {
-    const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
-    const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_method = isTypedArrayPrototypeMethod(function_object);
-    if (is_typed_method and !core.typed_array.isTypedArrayObject(object)) return error.NotATypedArray;
-    const length = try arrayMethodLength(ctx, output, global, receiver_object_value, object, is_typed_method, null, null);
-    if (length == 0) return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
-
-    const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    // Typed arrays: raw-buffer per-class scan (qjs js_typed_array_indexOf,
-    // quickjs.c). Normalize the search value once with an
-    // early can't-fit short-circuit, then scan the backing buffer per element
-    // kind instead of boxing each element through typedArrayGetIndex. The
-    // fromIndex coercion below mirrors what the generic loop already ran.
-    const from_right = mode == .last_index_of;
-    var cursor = if (from_right)
-        try arrayLastIndexStart(ctx, output, global, args, length)
-    else
-        try arrayFirstIndexStart(ctx, output, global, args, length);
-    if (is_typed_method) {
-        return try typedArraySearchScan(ctx.runtime, object, mode, search_value, cursor, length);
-    }
-    // Unique dense paths stay separate. lastIndexOf requires a full-density
-    // fast array and returns -1 if the dense scan misses. indexOf/includes
-    // scan the dense PREFIX then fall through to the generic tail (qjs
-    // js_array_indexOf/includes, quickjs.c).
-    if (from_right) {
-        if (object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
-            const elements = object.arrayElements();
-            if (cursor > elements.len) cursor = elements.len;
-            while (cursor > 0) {
-                cursor -= 1;
-                if (try valuesStrictEqual(ctx.runtime, elements[cursor], search_value)) return lengthIndexValue(cursor);
-            }
-            return core.JSValue.int32(-1);
-        }
-    } else if (object.isFastArray()) {
-        const elements = object.arrayElements();
-        const dense_end = @min(elements.len, length);
-        while (cursor < dense_end) : (cursor += 1) {
-            const item = elements[cursor];
-            if (mode == .includes) {
-                if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-            } else {
-                if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-            }
-        }
-    }
-
-    // Generic present-element search: propertyAtom + has (except includes)
-    // + get + sameValueZero / valuesStrictEqual; direction taken at runtime.
-    // Typed arrays returned early above.
-    // Over a huge length, jump between possibly present indices. A hole
-    // reads as undefined, so `includes(undefined)` must visit every index.
-    var sparse_walk = length >= sparse_walk_min_length and
-        (mode != .includes or !search_value.is(.undefined_value));
-    var remaining: usize = if (from_right) cursor else length - cursor;
-    while (remaining > 0) : ({
-        remaining -= 1;
-        if (!from_right) cursor += 1;
-    }) {
-        if (sparse_walk) {
-            const candidate = if (from_right)
-                try previousSparseCandidate(ctx.runtime, object, cursor)
-            else
-                try nextSparseCandidate(ctx.runtime, object, cursor);
-            switch (candidate) {
-                .none => break,
-                .index => |index| if (from_right) {
-                    cursor = index + 1;
-                    remaining = index + 1;
-                } else {
-                    if (index >= length) break;
-                    cursor = index;
-                    remaining = length - index;
-                },
-                .unknown => sparse_walk = false,
-            }
-        }
-        if (from_right) cursor -= 1;
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-        defer key.deinit(ctx.runtime);
-        if (mode != .includes and !try hasValueProperty(ctx, output, global, object, key.atom, null, null)) continue;
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-        if (mode == .includes) {
-            if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-        } else {
-            if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-        }
-    }
-    return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
-}
-
-pub noinline fn arrayConcatCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    func: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.concat))) return null;
-
-    const receiver_object_value = try toObjectReceiver(ctx, global, receiver);
-
-    const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, 0, caller_function, caller_frame);
-    const out = try property_ops.expectObject(out_value);
-    var next_index: usize = 0;
-    try concatAppendValue(ctx, output, global, out, &next_index, receiver_object_value, caller_function, caller_frame);
-    for (args) |arg| try concatAppendValue(ctx, output, global, out, &next_index, arg, caller_function, caller_frame);
-    // Set(A, "length", n, true): a failed write throws, and an Array rejects
-    // a length above 2^32 - 1 with a RangeError.
-    _ = try object_ops.setValuePropertyWithThrow(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(next_index), caller_function, caller_frame, true);
-    return out_value;
-}
-
-pub fn concatAppendValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    out: *core.Object,
-    next_index: *usize,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    if (objectFromValue(value)) |object| {
-        if (try isConcatSpreadable(ctx, output, global, value, object, caller_function, caller_frame)) {
-            const length_value = try concatSpreadLengthValue(ctx, output, global, value, object, caller_function, caller_frame);
-            const length = try toLengthIndex(ctx, output, global, length_value);
-            if (next_index.* > core.array.max_safe_length or length > core.array.max_safe_length - next_index.*) return error.ArrayTooLong;
-            // A hole only advances n, so a huge length visits just the
-            // indices that may be present.
-            const start = next_index.*;
-            var sparse_walk = length >= sparse_walk_min_length and !core.typed_array.isTypedArrayObject(object);
-            var index: usize = 0;
-            while (index < length) : (index += 1) {
-                try exception_ops.pollNativeLoop(ctx, global);
-                if (sparse_walk) switch (try nextSparseCandidate(ctx.runtime, object, index)) {
-                    .none => break,
-                    .index => |candidate| index = candidate,
-                    .unknown => sparse_walk = false,
-                };
-                if (index >= length) break;
-                try arrayCopyPresentIndex(ctx, output, global, value, object, index, out, start + index, caller_function, caller_frame);
-            }
-            next_index.* = start + length;
-            return;
-        }
-    }
-    if (next_index.* >= core.array.max_safe_length) return error.ArrayTooLong;
-    const key = try propertyAtomFromLengthIndex(ctx.runtime, next_index.*);
-    defer key.deinit(ctx.runtime);
-    try createDataPropertyOrThrow(ctx, output, global, out, key.atom, value, caller_function, caller_frame);
-    next_index.* += 1;
-}
-
-pub fn concatSpreadLengthValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    object: *core.Object,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const dynamic = try getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
-    if (!core.typed_array.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
-    if (try core.typed_array.typedArrayOutOfBounds(object)) return dynamic;
-    const own = (try object.getOwnProperty(ctx.runtime, core.atom.ids.length)) orelse return dynamic;
-    if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
-    const own_number = value_ops.numberValue(own.value) orelse return dynamic;
-    const dynamic_number = value_ops.numberValue(dynamic) orelse return dynamic;
-    if (own_number > dynamic_number) {
-        return own.value;
-    }
-    return dynamic;
-}
 
 pub fn isConcatSpreadable(
     ctx: *core.JSContext,

@@ -180,5 +180,7 @@ any nightly job fails.
 same tier as a host `perf stat` session: run it when a GC-shaped question needs it, not
 as a gate.
 
+`runtime-allocator-bench` builds `tools/runtime/allocator_bench.zig` to compare host allocators. The engine GC backing store stays unchanged, and the step is not a CI gate.
+
 Performance steps never run in CI; the measurement contract forbids publishing
 performance numbers from shared runners.

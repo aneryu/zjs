@@ -49,6 +49,7 @@ const exception_ops = @import("exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
+const disposable_ops = @import("disposable_ops.zig");
 const object_ops = @import("object_ops.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const cachedRealmObject = object_ops.cachedRealmObject;
@@ -1894,9 +1895,8 @@ pub fn promiseCapability(
     _ = try slot.promiseCapabilityResolveSlot(ctx.runtime);
     _ = try slot.promiseCapabilityRejectSlot(ctx.runtime);
 
-    executor_value = try builtin_glue.createDataFunction(ctx.runtime, constructor_global, "", 2);
-    const executor_object = objectFromValue(executor_value) orelse return error.TypeError;
-    try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
+    const executor_object = try builtin_glue.createInternalCallback(ctx.runtime, constructor_global, 2, .promise_capability_executor);
+    executor_value = executor_object.value();
     try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, slot_value);
 
     promise_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{executor_value}, caller_function, caller_frame);
@@ -2099,14 +2099,12 @@ pub fn promiseCombinatorCallback(
     state: *core.Object,
     index: u32,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .promise_combinator_element);
     (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value());
     (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
     (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
-    return callback;
+    return callback_object.value();
 }
 
 pub fn promiseRejectCapability(
@@ -2243,6 +2241,44 @@ fn combinatorInvokeThen(
     _ = try callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
 }
 
+const CombinatorIteratorStep = struct {
+    done: bool,
+    value: core.JSValue,
+};
+
+/// IteratorStep for a combinator. One `catch` at the call rejects the capability.
+fn combinatorIteratorStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+    iterator_next: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !CombinatorIteratorStep {
+    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame);
+    const next_result = try property_ops.expectObject(next_result_value);
+    const done_value = try getValueProperty(ctx, output, global, next_result.value(), core.atom.ids.done, null, null);
+    if (value_ops.isTruthy(done_value)) return .{ .done = true, .value = core.JSValue.undefinedValue() };
+    return .{
+        .done = false,
+        .value = try getValueProperty(ctx, output, global, next_result.value(), core.atom.ids.value, null, null),
+    };
+}
+
+fn combinatorCountElement(rt: *core.JSRuntime, state: *core.Object, values: *core.Object, index: u32) !void {
+    const remaining = state.promiseCombinatorRemaining();
+    try promiseSetArrayIndex(rt, values, index, core.JSValue.undefinedValue());
+    (try state.promiseCombinatorRemainingSlot(rt)).* = remaining + 1;
+}
+
+fn combinatorDrainRemaining(rt: *core.JSRuntime, state: *core.Object) !bool {
+    const remaining = state.promiseCombinatorRemaining();
+    const next_remaining = remaining - 1;
+    (try state.promiseCombinatorRemainingSlot(rt)).* = next_remaining;
+    return next_remaining == 0;
+}
+
 pub fn promiseCombinatorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2256,9 +2292,7 @@ pub fn promiseCombinatorCall(
     // `promiseStaticCall` has already checked that `constructor_value` is a
     // constructor object.
     const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-
-    const resolve_key = core.atom.ids.resolve;
-    const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
+    const promise_resolve = getValueProperty(ctx, output, global, constructor_value, core.atom.ids.resolve, caller_function, caller_frame) catch |err| {
         return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     if (!isCallableValue(promise_resolve)) {
@@ -2285,9 +2319,6 @@ pub fn promiseCombinatorCall(
     if (!isCallableValue(iterator_next)) {
         return rejectCombinator(ctx, output, global, &capability, error.NotAFunction, caller_function, caller_frame);
     }
-    const done_key = core.atom.ids.done;
-    const value_key = core.atom.ids.value;
-
     // The combinator result array (Promise.all/allSettled) and the Promise.any
     // errors array (reuses this `values`) must carry %Array.prototype% so
     // `result instanceof Array` holds — qjs js_promise_all uses JS_NewArray,
@@ -2297,25 +2328,12 @@ pub fn promiseCombinatorCall(
 
     var index: u32 = 0;
     while (true) {
-        const next_result_value = callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
+        const step = combinatorIteratorStep(ctx, output, global, iterator_value, iterator_next, caller_function, caller_frame) catch |err| {
             return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        const next_result = property_ops.expectObject(next_result_value) catch |err| {
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-        const done_value = getValueProperty(ctx, output, global, next_result.value(), done_key, null, null) catch |err| {
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-        if (value_ops.isTruthy(done_value)) break;
-        const step_value = getValueProperty(ctx, output, global, next_result.value(), value_key, null, null) catch |err| {
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
+        if (step.done) break;
 
-        if (state) |state_object| {
-            const remaining = state_object.promiseCombinatorRemaining();
-            try promiseSetArrayIndex(ctx.runtime, values.?, index, core.JSValue.undefinedValue());
-            (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
-        }
+        if (state) |state_object| try combinatorCountElement(ctx.runtime, state_object, values.?, index);
 
         const on_fulfilled = switch (mode) {
             .all => try promiseCombinatorCallback(ctx.runtime, global, .all_resolve, state.?, index),
@@ -2328,7 +2346,7 @@ pub fn promiseCombinatorCall(
             .any => try promiseCombinatorCallback(ctx.runtime, global, .any_reject, state.?, index),
             .race => capability.reject,
         };
-        combinatorInvokeThen(ctx, output, global, constructor_value, promise_resolve, step_value, on_fulfilled, on_rejected, caller_function, caller_frame) catch |err| {
+        combinatorInvokeThen(ctx, output, global, constructor_value, promise_resolve, step.value, on_fulfilled, on_rejected, caller_function, caller_frame) catch |err| {
             try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator_value);
             return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
@@ -2336,10 +2354,7 @@ pub fn promiseCombinatorCall(
     }
 
     if (state) |state_object| {
-        const remaining = state_object.promiseCombinatorRemaining();
-        const next_remaining = remaining - 1;
-        (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
-        if (next_remaining == 0) {
+        if (try combinatorDrainRemaining(ctx.runtime, state_object)) {
             switch (mode) {
                 .all, .all_settled => {
                     _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
@@ -2371,9 +2386,7 @@ pub fn promiseKeyedCombinatorCall(
     // `promiseStaticCall` has already checked that `constructor_value` is a
     // constructor object.
     const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-
-    const resolve_key = core.atom.ids.resolve;
-    const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
+    const promise_resolve = getValueProperty(ctx, output, global, constructor_value, core.atom.ids.resolve, caller_function, caller_frame) catch |err| {
         return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     if (!isCallableValue(promise_resolve)) {
@@ -2415,9 +2428,7 @@ pub fn promiseKeyedCombinatorCall(
         };
         try promiseSetArrayIndex(ctx.runtime, keys, index, key_value);
 
-        const remaining = state.promiseCombinatorRemaining();
-        try promiseSetArrayIndex(ctx.runtime, values, index, core.JSValue.undefinedValue());
-        (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
+        try combinatorCountElement(ctx.runtime, state, values, index);
 
         const on_fulfilled = if (all_settled)
             try promiseCombinatorCallback(ctx.runtime, global, .all_settled_keyed_fulfill, state, index)
@@ -2433,10 +2444,7 @@ pub fn promiseKeyedCombinatorCall(
         index += 1;
     }
 
-    const remaining = state.promiseCombinatorRemaining();
-    const next_remaining = remaining - 1;
-    (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
-    if (next_remaining == 0) {
+    if (try combinatorDrainRemaining(ctx.runtime, state)) {
         const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
         _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
             return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
@@ -2705,6 +2713,101 @@ pub fn clearHandledRejectionException(ctx: *core.JSContext) void {
     if (!ctx.hasUnhandledRejection() and ctx.hasException()) ctx.clearException();
 }
 
+pub const InternalAwaitTarget = union(enum) {
+    async_function: *core.Object,
+    async_generator: struct { gen: *core.Object, action: ResolveAction },
+    disposable_stack: *core.Object,
+    array_from_async: *core.Object,
+};
+
+fn internalAwaitTargetValue(target: InternalAwaitTarget) core.JSValue {
+    return switch (target) {
+        .async_function => |object| object.value(),
+        .async_generator => |spec| spec.gen.value(),
+        .disposable_stack => |object| object.value(),
+        .array_from_async => |object| object.value(),
+    };
+}
+
+/// PromiseResolve(%Promise%, value), then PerformPromiseThen with undefined
+/// capabilities. The target value and both handlers share one root frame, so
+/// creating the second handler cannot drop the first. Only `.async_function`
+/// short-circuits an already-fulfilled native promise into one AsyncResume
+/// job; the other targets always attach reactions.
+pub fn awaitInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    target: InternalAwaitTarget,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!void {
+    var target_value = internalAwaitTargetValue(target);
+    var awaited = value;
+    var on_fulfilled = core.JSValue.undefinedValue();
+    var on_rejected = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &target_value, &awaited, &on_fulfilled, &on_rejected });
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    const promise_constructor = try promiseDefaultConstructor(ctx, global);
+    awaited = try promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{awaited}, caller_function, caller_frame);
+    if (target == .async_function) {
+        // PromiseResolve can run a constructor getter that settles its input.
+        // Only the resulting fulfilled Promise has an immutable value ready for
+        // direct scheduling. Pending/rejected keep the paired internal handlers.
+        const fulfilled = if (objectFromValue(awaited)) |promise|
+            promise.class_id == core.class.ids.promise and promise.promiseResult() != null and !promise.promiseIsRejected()
+        else
+            false;
+        if (fulfilled) {
+            // Await has no observable result capability: one typed FIFO entry is
+            // the complete reaction. Prepare capacity while the source Promise
+            // and continuation are rooted, then publish without allocating.
+            const promise = objectFromValue(awaited).?;
+            try ctx.runtime.job_queue.reserveEntries(1);
+            ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initAsyncResume(ctx, target_value, promise.promiseResult().?));
+            return;
+        }
+    }
+    try attachInternalAwait(ctx, global, awaited, &on_fulfilled, &on_rejected, target);
+}
+
+/// Attach the target's internal reaction pair. Callers root `awaited` and the
+/// two handler slots. `completedReturn` uses this on an already-resolved
+/// promise: a second PromiseResolve would re-read `constructor`.
+fn attachInternalAwait(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    awaited: core.JSValue,
+    on_fulfilled: *core.JSValue,
+    on_rejected: *core.JSValue,
+    target: InternalAwaitTarget,
+) HostError!void {
+    switch (target) {
+        .async_function => |continuation| {
+            on_fulfilled.* = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
+            on_rejected.* = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
+        },
+        .async_generator => |spec| {
+            on_fulfilled.* = try resolveFunction(ctx.runtime, global, spec.gen, spec.action, false);
+            on_rejected.* = try resolveFunction(ctx.runtime, global, spec.gen, spec.action, true);
+        },
+        .disposable_stack => |stack| {
+            on_fulfilled.* = try disposable_ops.asyncDisposableStackContinuation(ctx.runtime, global, stack, false);
+            on_rejected.* = try disposable_ops.asyncDisposableStackContinuation(ctx.runtime, global, stack, true);
+        },
+        .array_from_async => |state| {
+            on_fulfilled.* = try array_ops.fromAsyncContinuation(ctx.runtime, global, state, false);
+            on_rejected.* = try array_ops.fromAsyncContinuation(ctx.runtime, global, state, true);
+        },
+    }
+    // qjs js_async_function_resume: internal perform_promise_then, never a
+    // user-visible Promise.prototype.then read.
+    try performPromiseThen(ctx, awaited, on_fulfilled.*, on_rejected.*, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+}
+
 pub fn asyncFunctionAwait(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2712,42 +2815,7 @@ pub fn asyncFunctionAwait(
     continuation: *core.Object,
     awaited_value: core.JSValue,
 ) HostError!void {
-    var continuation_value = continuation.value();
-    var awaited = awaited_value;
-    var on_fulfilled = core.JSValue.undefinedValue();
-    var on_rejected = core.JSValue.undefinedValue();
-    var roots = core.runtime.rootValues(.{ &continuation_value, &awaited, &on_fulfilled, &on_rejected });
-    roots.activate(ctx.runtime);
-    defer roots.deactivate(ctx.runtime);
-
-    const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    awaited = try promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{awaited}, null, null);
-
-    // PromiseResolve can run a constructor getter that settles its input.
-    // Only the resulting fulfilled Promise has an immutable value ready for
-    // direct scheduling. Pending/rejected keep the paired internal handlers.
-    const fulfilled = if (objectFromValue(awaited)) |promise|
-        promise.class_id == core.class.ids.promise and promise.promiseResult() != null and !promise.promiseIsRejected()
-    else
-        false;
-    if (fulfilled) {
-        // PromiseResolve (including any constructor getter) has completed.
-        // Await has no observable result capability: one typed FIFO entry is
-        // the complete reaction. Prepare capacity while the source Promise
-        // and continuation are rooted, then publish without allocating.
-        const promise = objectFromValue(awaited).?;
-        try ctx.runtime.job_queue.reserveEntries(1);
-        ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initAsyncResume(ctx, continuation_value, promise.promiseResult().?));
-        return;
-    }
-    on_fulfilled = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
-    on_rejected = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
-
-    // qjs js_async_function_resume: the resume
-    // callbacks attach through the INTERNAL perform_promise_then with
-    // undefined resolving funcs — a (patched) Promise.prototype.then property
-    // is never read for a native-promise await.
-    try performPromiseThen(ctx, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try awaitInternal(ctx, output, global, awaited_value, .{ .async_function = continuation }, null, null);
 }
 
 test "fulfilled await preparation OOM never publishes a partial FIFO job" {
@@ -3191,8 +3259,12 @@ pub fn asyncGeneratorReceiver(value: core.JSValue) ?*core.Object {
     return if (object.class_id == core.class.ids.async_generator) object else null;
 }
 
+fn rejectWithIntrinsicPromise(ctx: *core.JSContext, global: *core.Object, err: HostError) HostError!core.JSValue {
+    return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+}
+
 pub fn asyncGeneratorRejectedTypeError(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
-    return rejectedPromiseForRuntimeError(ctx, global, error.NotAGenerator, promisePrototypeFromGlobal(ctx.runtime, global));
+    return rejectWithIntrinsicPromise(ctx, global, error.NotAGenerator);
 }
 
 pub const AsyncFromSyncIteratorMethod = enum { next, return_, throw };
@@ -3217,9 +3289,9 @@ pub fn asyncFromSyncIteratorMethodCall(
     };
 }
 
-/// Mirrors the GEN_MAGIC_THROW arm of js_async_from_sync_iterator_next:
-/// `.throw` is re-read per call; absent throw closes
-/// the sync iterator and rejects TypeError "throw is not a method".
+/// `%AsyncFromSyncIteratorPrototype%.throw` (§27.1.5.2.3). `.throw` is re-read
+/// per call. Absent/null is a protocol TypeError after IteratorClose; a
+/// present non-callable is GetMethod's TypeError and does not close.
 pub fn asyncFromSyncIteratorThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3229,29 +3301,32 @@ pub fn asyncFromSyncIteratorThrow(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const throw_key = core.atom.ids.throw;
-    const throw_method = getValueProperty(ctx, output, global, sync_iterator, throw_key, caller_function, caller_frame) catch |err| {
-        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+    const throw_method = getValueProperty(ctx, output, global, sync_iterator, core.atom.ids.throw, caller_function, caller_frame) catch |err| {
+        return rejectWithIntrinsicPromise(ctx, global, err);
     };
     if (throw_method.is(.undefined_value) or throw_method.is(.null_value)) {
-        // IteratorClose(sync_iter) with no pending exception; a close failure
-        // rejects with that error, otherwise reject the TypeError
+        // Step 8: IteratorClose, then a fresh TypeError. The message is
+        // implementation-defined ("throw is not a method"). This is not
+        // `return`: a missing `return` fulfills `{value, done: true}`
+        // (§27.1.5.2.2 step 8). A present non-callable is GetMethod's
+        // "not a function" and skips this close.
         iterator_ops.iteratorClose(ctx, output, global, sync_iterator, caller_function, caller_frame) catch |err| {
-            return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+            return rejectWithIntrinsicPromise(ctx, global, err);
         };
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
         return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(throw_method)) {
-        const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
-        return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+        // GetMethod throws before step 8. Same error as a non-callable
+        // `return`, and IteratorClose does not run.
+        return rejectWithIntrinsicPromise(ctx, global, error.NotAFunction);
     }
     const result = if (args.len > 0)
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, throw_method, args[0..1], caller_function, caller_frame)
     else
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, throw_method, &.{}, caller_function, caller_frame);
     const throw_result = result catch |err| {
-        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+        return rejectWithIntrinsicPromise(ctx, global, err);
     };
     return asyncFromSyncIteratorContinuation(ctx, output, global, throw_result, sync_iterator, true, caller_function, caller_frame);
 }
@@ -3264,11 +3339,9 @@ pub fn asyncFromSyncIteratorCloseWrap(
     global: *core.Object,
     sync_iterator: core.JSValue,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_close_wrap);
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .async_from_sync_iterator_close_wrap);
     try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), sync_iterator);
-    return callback;
+    return callback_object.value();
 }
 
 pub fn asyncFromSyncIteratorCloseWrapCall(
@@ -3308,7 +3381,7 @@ pub fn asyncFromSyncIteratorNext(
     else
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, next_method, &.{}, caller_function, caller_frame);
     const next_result = result catch |err| {
-        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+        return rejectWithIntrinsicPromise(ctx, global, err);
     };
     return asyncFromSyncIteratorContinuation(ctx, output, global, next_result, sync_iterator, true, caller_function, caller_frame);
 }
@@ -3322,26 +3395,25 @@ pub fn asyncFromSyncIteratorReturn(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const return_key = core.atom.ids.return_;
     // GetMethod failures go through IfAbruptRejectPromise.
-    const return_method = getValueProperty(ctx, output, global, sync_iterator, return_key, caller_function, caller_frame) catch |err| {
-        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+    const return_method = getValueProperty(ctx, output, global, sync_iterator, core.atom.ids.return_, caller_function, caller_frame) catch |err| {
+        return rejectWithIntrinsicPromise(ctx, global, err);
     };
     if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
-        // §27.1.6.2.2 step 7: complete with the value passed to return().
+        // §27.1.5.2.2 step 8: complete with the value passed to return().
         const done_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
         const done_result = try createIteratorResult(ctx.runtime, global, done_value, true);
         return core.promise.fulfilledWithPrototype(ctx, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) {
-        return rejectedPromiseForRuntimeError(ctx, global, error.NotAFunction, promisePrototypeFromGlobal(ctx.runtime, global));
+        return rejectWithIntrinsicPromise(ctx, global, error.NotAFunction);
     }
     const result = if (args.len > 0)
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, return_method, args[0..1], caller_function, caller_frame)
     else
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, return_method, &.{}, caller_function, caller_frame);
     const return_result = result catch |err| {
-        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+        return rejectWithIntrinsicPromise(ctx, global, err);
     };
     return asyncFromSyncIteratorContinuation(ctx, output, global, return_result, sync_iterator, false, caller_function, caller_frame);
 }
@@ -3358,38 +3430,26 @@ pub fn asyncFromSyncIteratorContinuation(
 ) !core.JSValue {
     const capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
 
-    const result_object = property_ops.expectObject(result) catch |err| {
-        try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.promise;
-    };
-    const done_key = core.atom.ids.done;
-    const done_value = getValueProperty(ctx, output, global, result_object.value(), done_key, caller_function, caller_frame) catch |err| {
-        try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.promise;
-    };
-    const done = valueTruthy(done_value);
-
-    const value_key = core.atom.ids.value;
-    const value = getValueProperty(ctx, output, global, result_object.value(), value_key, caller_function, caller_frame) catch |err| {
+    const fields = asyncFromSyncIteratorFields(ctx, output, global, result, caller_function, caller_frame) catch |err| {
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
         return capability.promise;
     };
 
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    const value_wrapper_promise = promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{value}, caller_function, caller_frame) catch |err| {
+    const value_wrapper_promise = promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{fields.value}, caller_function, caller_frame) catch |err| {
         // PromiseResolve threw: close the sync iterator with the exception
         // pending, then reject.
-        if (close_on_rejection and !done) {
+        if (close_on_rejection and !fields.done) {
             try iterator_ops.iteratorCloseForThrow(ctx, output, global, sync_iterator);
         }
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
         return capability.promise;
     };
 
-    const unwrap = try asyncFromSyncIteratorUnwrap(ctx.runtime, global, done);
+    const unwrap = try asyncFromSyncIteratorUnwrap(ctx.runtime, global, fields.done);
 
     // onRejected close-wrap only when `!done && magic != GEN_MAGIC_RETURN`
-    const close_wrap: core.JSValue = if (close_on_rejection and !done)
+    const close_wrap: core.JSValue = if (close_on_rejection and !fields.done)
         try asyncFromSyncIteratorCloseWrap(ctx.runtime, global, sync_iterator)
     else
         core.JSValue.undefinedValue();
@@ -3408,31 +3468,51 @@ pub fn asyncFromSyncIteratorContinuation(
     return capability.promise;
 }
 
+const AsyncFromSyncIteratorFields = struct {
+    done: bool,
+    value: core.JSValue,
+};
+
+fn asyncFromSyncIteratorFields(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    result: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !AsyncFromSyncIteratorFields {
+    const result_object = try property_ops.expectObject(result);
+    const done_value = try getValueProperty(ctx, output, global, result_object.value(), core.atom.ids.done, caller_function, caller_frame);
+    const value = try getValueProperty(ctx, output, global, result_object.value(), core.atom.ids.value, caller_function, caller_frame);
+    return .{ .done = valueTruthy(done_value), .value = value };
+}
+
+const AsyncFromSyncUnwrap = enum(u8) {
+    /// Rare-slot default: the callback is not an unwrap reaction.
+    none = 0,
+    done_false = 1,
+    done_true = 2,
+    /// %AsyncIteratorPrototype%[@@asyncDispose] fulfills with undefined.
+    to_undefined = 3,
+};
+
 pub fn asyncFromSyncIteratorUnwrap(
     rt: *core.JSRuntime,
     global: *core.Object,
     done: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_unwrap);
-    (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = if (done) 2 else 1;
-    return callback;
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .async_from_sync_iterator_unwrap);
+    (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = @intFromEnum(if (done) AsyncFromSyncUnwrap.done_true else AsyncFromSyncUnwrap.done_false);
+    return callback_object.value();
 }
 
 /// The `unwrap` closure of %AsyncIteratorPrototype%[@@asyncDispose]
 /// (§27.1.4.1 step 6.e): fulfils with undefined whatever `return()` gave.
 pub fn asyncIteratorDisposeUnwrap(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_unwrap);
-    (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = unwrap_to_undefined;
-    return callback;
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .async_from_sync_iterator_unwrap);
+    (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = @intFromEnum(AsyncFromSyncUnwrap.to_undefined);
+    return callback_object.value();
 }
-
-/// Unwrap mode of `asyncIteratorDisposeUnwrap`; 1 and 2 build an iterator
-/// result with `done` false / true.
-const unwrap_to_undefined: u8 = 3;
 
 pub fn asyncFromSyncIteratorUnwrapCall(
     ctx: *core.JSContext,
@@ -3440,12 +3520,86 @@ pub fn asyncFromSyncIteratorUnwrapCall(
     function_object: *core.Object,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const mode = function_object.functionAsyncFromSyncUnwrapDone();
-    if (mode == 0) return null;
-    if (mode == unwrap_to_undefined) return core.JSValue.undefinedValue();
-    if (mode != 1 and mode != 2) return error.TypeError;
-    const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    return try createIteratorResult(ctx.runtime, global, payload, mode == 2);
+    const mode = std.enums.fromInt(AsyncFromSyncUnwrap, function_object.functionAsyncFromSyncUnwrapDone()) orelse return error.TypeError;
+    switch (mode) {
+        .none => return null,
+        .to_undefined => return core.JSValue.undefinedValue(),
+        .done_false, .done_true => {
+            const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return try createIteratorResult(ctx.runtime, global, payload, mode == .done_true);
+        },
+    }
+}
+
+test "async-from-sync throw distinguishes a missing method from a non-callable one" {
+    const Probe = struct {
+        fn closeThunk(ctx: *core.JSContext, _: core.JSValue, _: [*]const core.JSValue, _: u32, entry: *const core.NativeEntry, _: ?*core.Object) callconv(.c) core.JSValue {
+            const flag: *bool = @ptrCast(@alignCast(entry.state.?));
+            flag.* = true;
+            const obj = core.Object.createPlainObject(ctx.runtime, null) catch {
+                return @import("builtin_dispatch.zig").embedderErrorToValue(ctx, error.OutOfMemory);
+            };
+            return obj.value();
+        }
+
+        fn rejectionMessage(rt: *core.JSRuntime, ctx: *core.JSContext, global: *core.Object, promise_value: core.JSValue) ![]u8 {
+            const promise = try core.Object.expect(promise_value);
+            try std.testing.expect(promise.promiseIsRejected());
+            const reason = promise.promiseResult() orelse return error.TypeError;
+            const message = try getValueProperty(ctx, null, global, reason, core.atom.ids.message, null, null);
+            var text = std.ArrayList(u8).empty;
+            errdefer text.deinit(rt.nativeAllocator());
+            try value_ops.appendRawString(rt, &text, message);
+            return try text.toOwnedSlice(rt.nativeAllocator());
+        }
+    };
+
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+
+    const close_method = try core.function.nativeFunction(ctx, "close", 0);
+    var missing_closed = false;
+    const missing_entry = try rt.allocNativeEntry(.{
+        .target = core.NativeEntry.code(&Probe.closeThunk),
+        .kind = .managed,
+        .state = &missing_closed,
+    });
+    objectFromValue(close_method).?.installNativeEntry(missing_entry);
+
+    const missing = try core.Object.createPlainObject(rt, null);
+    try missing.defineOwnProperty(rt, core.atom.ids.return_, core.Descriptor.data(close_method, .all));
+    const missing_promise = try asyncFromSyncIteratorThrow(ctx, null, global, missing.value(), &.{}, null, null);
+    const missing_message = try Probe.rejectionMessage(rt, ctx, global, missing_promise);
+    defer rt.nativeAllocator().free(missing_message);
+    try std.testing.expect(missing_closed);
+    try std.testing.expectEqualStrings("throw is not a method", missing_message);
+
+    var bad_closed = false;
+    const bad_method = try core.function.nativeFunction(ctx, "close", 0);
+    const bad_entry = try rt.allocNativeEntry(.{
+        .target = core.NativeEntry.code(&Probe.closeThunk),
+        .kind = .managed,
+        .state = &bad_closed,
+    });
+    objectFromValue(bad_method).?.installNativeEntry(bad_entry);
+    const bad = try core.Object.createPlainObject(rt, null);
+    try bad.defineOwnProperty(rt, core.atom.ids.throw, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try bad.defineOwnProperty(rt, core.atom.ids.return_, core.Descriptor.data(bad_method, .all));
+    const bad_promise = try asyncFromSyncIteratorThrow(ctx, null, global, bad.value(), &.{}, null, null);
+    const bad_message = try Probe.rejectionMessage(rt, ctx, global, bad_promise);
+    defer rt.nativeAllocator().free(bad_message);
+    try std.testing.expect(!bad_closed);
+    try std.testing.expectEqualStrings("not a function", bad_message);
+
+    const bad_return_iter = try core.Object.createPlainObject(rt, null);
+    try bad_return_iter.defineOwnProperty(rt, core.atom.ids.return_, core.Descriptor.data(core.JSValue.int32(1), .all));
+    const bad_return = try asyncFromSyncIteratorReturn(ctx, null, global, bad_return_iter.value(), &.{}, null, null);
+    const return_message = try Probe.rejectionMessage(rt, ctx, global, bad_return);
+    defer rt.nativeAllocator().free(return_message);
+    try std.testing.expectEqualStrings("not a function", return_message);
 }
 
 pub const PromiseFinallyCallbackMode = enum(u8) {
@@ -3474,14 +3628,12 @@ pub fn promiseFinallyCallback(
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const callback = try builtin_glue.createDataFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .promise_finally_callback);
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, if (mode == .fulfill or mode == .reject) 1 else 0, .promise_finally_callback);
     (try callback_object.functionPromiseFinallyModeSlot(rt)).* = @intFromEnum(mode);
     if (payload != null) try callback_object.setFunctionPromiseFinallyPayload(rt, rooted_payload);
     if (on_finally != null) try callback_object.setFunctionPromiseFinallyCallback(rt, rooted_on_finally);
     if (constructor_value != null) try callback_object.setFunctionPromiseFinallyConstructor(rt, rooted_constructor);
-    return callback;
+    return callback_object.value();
 }
 
 test "promiseFinallyCallback roots direct symbol payload while allocating callback" {
@@ -4396,13 +4548,11 @@ fn resolveFunction(
     action: ResolveAction,
     is_reject: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = object_ops.objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_generator_resolve);
+    const callback_object = try builtin_glue.createInternalCallback(rt, global, 1, .async_generator_resolve);
     try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), gen.value());
     (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = is_reject;
     (try callback_object.functionAsyncGeneratorActionSlot(rt)).* = @intFromEnum(action);
-    return callback;
+    return callback_object.value();
 }
 
 fn asyncGeneratorAwait(
@@ -4413,12 +4563,7 @@ fn asyncGeneratorAwait(
     value: core.JSValue,
     action: ResolveAction,
 ) HostError!void {
-    const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    const promise = try promiseResolveStaticCall(ctx, output, global, promise_constructor, &.{value}, null, null);
-    const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, action, false);
-    const on_rejected = try resolveFunction(ctx.runtime, global, gen, action, true);
-    // "no need to create 'thrownawayCapability' as in the spec"
-    try performPromiseThen(ctx, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try awaitInternal(ctx, output, global, value, .{ .async_generator = .{ .gen = gen, .action = action } }, null, null);
 }
 
 /// Mirrors js_async_generator_completed_return, including
@@ -4443,9 +4588,16 @@ fn completedReturn(
         setState(gen, .completed);
         return settleHead(ctx, output, global, gen, reason, true);
     };
-    const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, false);
-    const on_rejected = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, true);
-    try performPromiseThen(ctx, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    var target_value = gen.value();
+    var awaited = promise;
+    var on_fulfilled = core.JSValue.undefinedValue();
+    var on_rejected = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &target_value, &awaited, &on_fulfilled, &on_rejected });
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    try attachInternalAwait(ctx, global, awaited, &on_fulfilled, &on_rejected, .{
+        .async_generator = .{ .gen = gen, .action = .awaiting_return },
+    });
 }
 
 // ---------------------------------------------------------------------------

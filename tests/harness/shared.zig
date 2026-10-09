@@ -29,6 +29,7 @@ const zjs = @import("zjs");
 const core = zjs.core;
 const exec = zjs.exec;
 const test_engine = @import("test_engine.zig");
+const gc = @import("gc.zig");
 
 const TestEngine = test_engine.TestEngine;
 
@@ -52,7 +53,7 @@ pub fn expectPrintsTs(source: []const u8, expected: []const u8) !void {
 
     var output_buffer: [8192]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalFileWithOutputMode(source, &output, .script, "test.ts");
+    const result = try js.evalWithOptions(source, .{ .output = &output, .mode = .script, .filename = "test.ts" });
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(expected, output.buffered());
@@ -160,7 +161,7 @@ pub fn sharedTestEngine() *TestEngine {
                 shared_engine_baseline.shape_props.?[idx].hash_next = core.shape.no_property_index;
             }
         }
-        _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
+        gc.reclaimNow(eng.runtime);
         shared_engine_baseline.allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
         shared_engine_baseline.allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
         shared_engine_baseline.module_count = eng.context.modules.count();
@@ -342,5 +343,5 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
             ) catch |err| std.debug.panic("restorePropertyLayout: {s}", .{@errorName(err)});
         }
     }
-    _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
+    gc.reclaimNow(eng.runtime);
 }
