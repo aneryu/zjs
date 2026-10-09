@@ -207,18 +207,18 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // reachable arms) so the island geometry is unchanged. ICF folds the pair.
     keep[0] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_opcodes.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.typeOfIsUndefined(vm.stack);
         }
     }.body);
     keep[1] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_opcodes.typeOfIsFunction(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.typeOfIsFunction(vm.stack);
         }
     }.body);
     t[op.is_undefined_or_null] = cold(vm_opcodes.isUndefinedOrNull);
     keep[2] = cold(struct {
         fn body(vm: *Vm) HostError!void {
-            try vm_opcodes.isUndefined(vm.ctx.runtime, vm.stack);
+            try vm_opcodes.isUndefined(vm.stack);
         }
     }.body);
     t[op.is_null] = cold(vm_opcodes.isNull);

@@ -1,4 +1,4 @@
-//! Integration-test harness for `tests/core.zig` and `tests/exec.zig`.
+//! Integration-test harness for the suites under `tests/core/` and `tests/exec/`.
 //!
 //! This is not an engine package. Unit tests next to `src/` must not
 //! import it; they only need `runObjectCycleRemoval` (see the local
@@ -13,6 +13,8 @@
 //! | `harness/test_engine.zig` | one-off TestEngine, host probes, scratch dirs |
 //! | `harness/shared.zig` | process-level shared engine and leak gate |
 //! | `harness/memory_modules.zig` | in-memory module source loader |
+//! | `harness/interrupts.zig` | interrupt poll probe |
+//! | `harness/bare_runtime.zig` | one runtime, context, and global with host builtins |
 
 pub const gc = @import("harness/gc.zig");
 pub const expect = @import("harness/expect.zig");
@@ -20,6 +22,8 @@ pub const fixture = @import("harness/fixture.zig");
 pub const test_engine = @import("harness/test_engine.zig");
 pub const shared = @import("harness/shared.zig");
 pub const memory_modules = @import("harness/memory_modules.zig");
+pub const interrupts = @import("harness/interrupts.zig");
+pub const bare_runtime = @import("harness/bare_runtime.zig");
 pub const MemoryModules = memory_modules.MemoryModules;
 pub const MemoryModule = memory_modules.Module;
 

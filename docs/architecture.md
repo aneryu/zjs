@@ -308,8 +308,10 @@ exactly like a builtin (`src/exec/vm_opcodes.zig`); native -> JS goes through
   (`src/parser/tests.zig`, `src/bytecode/tests.zig`,
   `src/compiler/tests.zig`) plus colocated `test` blocks
 - Integration-test harness: `tests/harness.zig` plus `tests/harness/`
-  (`gc`, `expect`, `fixture`, `test_engine`, `shared`). Used by
-  `tests/core.zig` and `tests/exec.zig`. Unit tests next to `src/` do
+  (`gc`, `expect`, `fixture`, `test_engine`, `shared`, `memory_modules`,
+  `interrupts`, `bare_runtime`). Suites under `tests/core/` and
+  `tests/exec/` import it; `tests/core.zig` and `tests/exec.zig` are the
+  index files that pull those suites in. Unit tests next to `src/` do
   not import it.
 - `tests/`: engine integration (public API, runtime/GC, VM/eval),
   public-root embedding, CLI smoke, OOM-injection, plus

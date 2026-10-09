@@ -3387,8 +3387,13 @@ test "Array length conversion runs inside [[DefineOwnProperty]] (proxies, define
 test "%RegExpStringIteratorPrototype% is one per realm; literals may hold lone surrogates" {
     try helpers.expectPrints(
         \\const p1 = Object.getPrototypeOf("a".matchAll(/a/g)), p2 = Object.getPrototypeOf("a".matchAll(/a/g));
-        \\p1.next = function () { return { done: true, value: undefined }; };
-        \\print(p1 === p2, [..."aa".matchAll(/a/g)].length);
+        \\const savedNext = p1.next;
+        \\try {
+        \\  p1.next = function () { return { done: true, value: undefined }; };
+        \\  print(p1 === p2, [..."aa".matchAll(/a/g)].length);
+        \\} finally {
+        \\  p1.next = savedNext;
+        \\}
         \\print(eval("'\ud800'").charCodeAt(0).toString(16), eval("`\udc00`").length, Function("return '\ud800x'")().length);
     ,
         \\true 0
@@ -3758,7 +3763,9 @@ test "global identifier resolution asks a proxy prototype has before typeof and 
     // unresolvable name is "undefined" without a [[Get]], and `delete` sees
     // the `has` trap and its exceptions. Expected output is node's.
     try helpers.expectPrints(
+        \\var savedProto = Object.getPrototypeOf(globalThis);
         \\var log = [];
+        \\try {
         \\Object.setPrototypeOf(globalThis, new Proxy({}, {
         \\  has(t, k) { if (k === 'zq' || k === 'boom' || k === 'zz') log.push('has:' + k); if (k === 'boom') throw new RangeError('b'); return false; },
         \\  get(t, k) { if (k === 'zq' || k === 'boom' || k === 'zz') log.push('get:' + k); return 1; },
@@ -3770,6 +3777,9 @@ test "global identifier resolution asks a proxy prototype has before typeof and 
         \\print(t(() => delete boom), log.join()); log = [];
         \\print(t(() => delete zz), log.join()); log = [];
         \\print(t(() => zq), log.join()); log = [];
+        \\} finally {
+        \\  Object.setPrototypeOf(globalThis, savedProto);
+        \\}
     ,
         \\undefined has:zq
         \\undefined has:zq

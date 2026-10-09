@@ -3154,12 +3154,12 @@ pub noinline fn typeOf(vm: *Vm) HostError!void {
     vm.stack.pushOwnedAssumeCapacity(out);
 }
 
-pub noinline fn typeOfIsUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsUndefined(stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value_ops.isHTMLDDA(value)));
 }
 
-pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsFunction(stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     // Keep the short comparison opcode exactly aligned with `typeOf`: native
     // c_functions, external host functions, and callable proxies all report
@@ -3177,7 +3177,7 @@ pub noinline fn logicalNot(vm: *Vm) HostError!void {
     vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(!value_ops.isTruthy(value)));
 }
 
-pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
+pub noinline fn drop(stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
     if (iterator_ops.isIteratorCatchMarker(value)) {
         return .value;
@@ -3404,7 +3404,7 @@ pub noinline fn isUndefinedOrNull(vm: *Vm) HostError!void {
     vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value.is(.null_value)));
 }
 
-pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isUndefined(stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value)));
 }
@@ -3705,13 +3705,13 @@ pub noinline fn execVm(vm: *Vm) HostError!void {
             try checkCtorReturnVm(vm);
         },
         bytecode.opcode.ext0_sub.is_undefined => {
-            try isUndefined(ctx.runtime, stack);
+            try isUndefined(stack);
         },
         bytecode.opcode.ext0_sub.typeof_is_undefined => {
-            try typeOfIsUndefined(ctx.runtime, stack);
+            try typeOfIsUndefined(stack);
         },
         bytecode.opcode.ext0_sub.typeof_is_function => {
-            try typeOfIsFunction(ctx.runtime, stack);
+            try typeOfIsFunction(stack);
         },
         bytecode.opcode.ext0_sub.insert4 => {
             try insert4(stack);

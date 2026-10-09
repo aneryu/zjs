@@ -56,8 +56,9 @@ is one `-Doptimize`; do not pin a second mode inside the graph.
 ### `tests/harness.zig`
 
 Integration-test harness (`helpers.*` names), not an engine package.
-`tests/core.zig` and `tests/exec.zig` import it. The work lives under
-`tests/harness/`:
+Suites under `tests/core/` and `tests/exec/` import it. `tests/core.zig`
+and `tests/exec.zig` are the index files that pull those suites in.
+The work lives under `tests/harness/`:
 
 | File | Owns |
 |---|---|
@@ -66,6 +67,9 @@ Integration-test harness (`helpers.*` names), not an engine package.
 | `fixture.zig` | hand-written bytecode and parse-then-run |
 | `test_engine.zig` | one-off `TestEngine`, host probes, scratch dirs |
 | `shared.zig` | process-level shared engine and leak gate |
+| `memory_modules.zig` | in-memory module source loader |
+| `interrupts.zig` | interrupt poll probe |
+| `bare_runtime.zig` | one runtime, context, and global with host builtins |
 
 Package unit tests (`src/parser/tests.zig`, `src/bytecode/tests.zig`)
 only reclaim with a local `reclaimNow` helper. They do not

@@ -2552,7 +2552,7 @@ pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 }
 fn op_drop(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (vm_opcodes.drop(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e)) {
+    switch (vm_opcodes.drop(vm.stack) catch |e| return vm.fail(e)) {
         .value => return coldNext(var_buf, vm),
         .catch_target => |target| {
             vm.catch_target.* = target;
@@ -6069,7 +6069,7 @@ pub fn op_using_typeof_is_function(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
     // publish left frame.pc on the sub byte; skip it so coldNext resumes after it.
     vm.publish(pc, sp);
     vm.frame.pc += 1;
-    vm_opcodes.typeOfIsFunction(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e);
+    vm_opcodes.typeOfIsFunction(vm.stack) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
 }
 
