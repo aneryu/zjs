@@ -26,7 +26,6 @@ const parser = @import("../parser.zig");
 const value_ops = @import("value_ops.zig");
 
 const atom_default = core.atom.predefinedId("default", .string).?;
-const atom_star = core.atom.predefinedId("*", .string).?;
 
 pub const LinkDiagnostic = struct {
     pub const Kind = enum {
@@ -128,7 +127,6 @@ fn pendingDefinitionFromArtifact(
     for (parsed.indirect_exports) |entry| _ = try requestName(parsed, entry.request_index);
     for (parsed.star_exports) |entry| {
         _ = try requestName(parsed, entry.request_index);
-        if (entry.export_name != atom_star) return error.InvalidBytecode;
     }
     for (parsed.import_attributes) |entry| _ = try requestName(parsed, entry.request_index);
     if (resolved_request_names) |names| {

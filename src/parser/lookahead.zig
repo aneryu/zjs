@@ -181,9 +181,8 @@ fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous
     if (!(lookahead_token.kind == .slash or lookahead_token.kind == .div_assign)) return;
     if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return;
 
-    const slash_offset = s.lex.mark_pos;
     s.lex.freeToken(lookahead_token);
-    s.lex.rescanRegexpInto(lookahead_token, slash_offset) catch |err| return mapLookaheadLexerError(s, err);
+    s.lex.rescanLastSlashAsRegexpInto(lookahead_token) catch |err| return mapLookaheadLexerError(s, err);
 }
 
 /// Delimiters seen by a brace-body scan, so `of` can be classified only at
@@ -367,9 +366,8 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
 pub fn skipRegexpInPredeclareScan(s: *State, previous_token_kind: ?tok.Kind) Error!bool {
     if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return false;
 
-    const slash_offset = s.lex.mark_pos;
     var regexp_token: tok.Token = undefined;
-    try s.lex.rescanRegexpInto(&regexp_token, slash_offset);
+    try s.lex.rescanLastSlashAsRegexpInto(&regexp_token);
     defer s.lex.freeToken(&regexp_token);
     return true;
 }
@@ -641,6 +639,7 @@ pub fn scanBalancedToken(s: *State, no_line_terminator: bool) Error!BalancedToke
             .assignment => .assign,
             .comma => .comma,
             .colon => .colon,
+            .question => .question,
             .left_brace => .lbrace,
             .right_paren => .rparen,
             .right_bracket => .rbracket,

@@ -557,6 +557,7 @@ pub const RealmContext = struct {
         // receivers and arguments -- without that a minor here reclaims
         // objects a running builtin is still walking.
         if (self.runtime.gc.shouldTryMinor() or self.runtime.gc.hasPendingMajorRequest()) {
+            // `failMajor` requeues `.collection_failed`; the next allocation poll retries it.
             _ = self.runtime.pollGC(.safepoint) catch {};
         }
         // Stress mode wants the collection window everywhere, not once per

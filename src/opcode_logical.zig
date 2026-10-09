@@ -12,8 +12,8 @@
 //!
 //! P1-2: `LogicalOpcode` is `enum(u16)` with explicit values. Final forms
 //! keep their current physical id so the two are legible side by side
-//! during migration; compiler-only (temp) forms start at 300 because their
-//! physical ids overlap the short opcodes at 178..196.
+//! during migration; compiler-only (temp) forms start at `temp_base`
+//! because their physical ids overlap the short opcodes at 178..196.
 //!
 //! This module imports nothing from `bytecode.zig`. The dependency runs
 //! exec -> bytecode -> here, never back (P0-3): 49 files under src/exec
@@ -61,6 +61,11 @@ pub const Format = enum(u8) {
     /// and tail into the following cache-bearing instruction.
     atom_cache_u8,
 };
+
+/// First compiler-only (temp) logical id. Physical ids overlap the shorts.
+pub const temp_base: u16 = 300;
+/// First cold-plane (carrier resident) logical id.
+pub const sub_base: u16 = 400;
 
 pub const LogicalOpcode = enum(u16) {
     invalid = 0,
@@ -321,7 +326,7 @@ pub const LogicalOpcode = enum(u16) {
     // demoted into the `using` carrier would sit outside the single
     // declaration source -- which is exactly how an identity-matching
     // scanner goes blind (5.2 clause 3). `plane` says where each lives.
-    using_create = 400,
+    using_create = sub_base,
     using_dispose = 401,
     using_dispose_throw = 402,
     using_is_undefined = 403,
@@ -351,7 +356,7 @@ pub const LogicalOpcode = enum(u16) {
     set_name_computed = 420,
     using_iterator_step = 421,
     // compiler-only (temp) forms; physical ids 178..196 overlap the short opcodes
-    enter_scope = 300,
+    enter_scope = temp_base,
     leave_scope = 301,
     label = 302,
     scope_get_var_undef = 303,
@@ -384,8 +389,8 @@ pub const Plane = union(enum) {
 
 pub fn planeOf(form: LogicalOpcode) Plane {
     const raw = @intFromEnum(form);
-    if (raw < 400) return .main;
-    return .{ .sub = .{ .carrier = .ext0, .slot = @intCast(raw - 400) } };
+    if (raw < sub_base) return .main;
+    return .{ .sub = .{ .carrier = .ext0, .slot = @intCast(raw - sub_base) } };
 }
 
 /// Derived rollup view (contract 1 / P0-5). Never an identity key.
@@ -913,7 +918,22 @@ pub const OperandKind = enum {
     var_ref_slot,
 };
 
-pub const Width = enum(u8) { u8 = 1, u16 = 2, u32 = 4, i8 = 11, i16 = 12, i32 = 14 };
+pub const Width = enum(u8) {
+    u8 = 1,
+    u16 = 2,
+    u32 = 4,
+    i8 = 11,
+    i16 = 12,
+    i32 = 14,
+
+    pub fn bytes(self: Width) u8 {
+        return switch (self) {
+            .u8, .i8 => 1,
+            .u16, .i16 => 2,
+            .u32, .i32 => 4,
+        };
+    }
+};
 
 /// P0-2: where a logical operand's value comes from is declared, never
 /// inferred from the physical id. The id is exactly what this work
@@ -1264,8 +1284,8 @@ pub fn subForm(tag: u8) ?LogicalOpcode {
     const table = comptime blk: {
         var t = [_]?LogicalOpcode{null} ** 256;
         for (@typeInfo(LogicalOpcode).@"enum".fields) |f| {
-            if (f.value < 400) continue;
-            t[f.value - 400] = @enumFromInt(f.value);
+            if (f.value < sub_base) continue;
+            t[f.value - sub_base] = @enumFromInt(f.value);
         }
         for (final_carrier_residents) |r| {
             // A resident that has reached the 400+ plane (window closed) is
@@ -1620,6 +1640,20 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .line_num, .fmt = .u32, .pop = 0, .push = 0 },
     .{ .form = .to_propkey, .fmt = .none, .pop = 1, .push = 1 },
 };
+
+comptime {
+    const max_id: usize = max_id: {
+        var m: usize = 0;
+        for (@typeInfo(LogicalOpcode).@"enum".fields) |f| m = @max(m, f.value);
+        break :max_id m;
+    };
+    var seen = [_]bool{false} ** (max_id + 1);
+    for (form_decls) |decl| {
+        const id = @intFromEnum(decl.form);
+        if (seen[id]) @compileError("duplicate form_decls row: " ++ @tagName(decl.form));
+        seen[id] = true;
+    }
+}
 
 /// Whether an opcode may suspend its current frame. New forms must be reviewed.
 pub const AsyncSuspension = enum { none, possible, unknown };

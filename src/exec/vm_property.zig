@@ -2219,7 +2219,7 @@ pub noinline fn checkedLocVm(vm: *Vm, opc: u8) HostError!void {
                     idx < function.varDefs().len and
                     function.varDefs()[idx].var_name == core.atom.ids.this_;
                 const err = if (is_derived_this) blk: {
-                    _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
+                    _ = exception_ops.throwReferenceErrorMessage(ctx, global, exception_ops.msg_derived_this_uninitialized) catch |err| break :blk err;
                     unreachable;
                 } else exception_ops.throwTdzReferenceError(ctx, localName(function, idx));
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;

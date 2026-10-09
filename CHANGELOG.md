@@ -202,6 +202,9 @@ roadmaps, plans, and measurement snapshots are available in Git history.
   exception with `pendingExceptionMatchesErrorName` /
   `consumePendingExceptionIfErrorName`. `formatExceptionStack` no longer
   replaces a pending exception.
+- **Embedding API (breaking):** `class.Definition` removed the never-honoured
+  `finalizer`, `call`, and `binding_identity` fields. `LegacyFinalizer` and
+  `class.Call` go with them; nothing read them.
 - **Embedding API:** export `zjs.ModuleSourceLoader` and add
   `Context.setModuleSourceLoader`. With a loader installed,
   `Context.eval(.module)` links the module graph through it (static imports

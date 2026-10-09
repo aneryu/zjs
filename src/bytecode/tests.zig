@@ -35,7 +35,7 @@ test "bytecode owns its code and a module record its metadata" {
     try mod_record.addImport(req_index, default_atom, local, 0, false);
     try mod_record.addExport(default_atom, local);
     try mod_record.addIndirectExport(req_index, local, default_atom, false);
-    try mod_record.addStarExport(req_index, default_atom);
+    try mod_record.addStarExport(req_index);
     try mod_record.addImportAttribute(req_index, local, default_atom);
     mod_record.has_top_level_await = true;
     try std.testing.expectEqual(@as(usize, 1), mod_record.requests.len);
@@ -1587,8 +1587,9 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     }
     try std.testing.expectEqual(@as(i32, 1), fb.cpool_count);
     try std.testing.expectEqual(@as(i32, 99), fb.cpoolSlice()[0].as(.int).?);
-    try std.testing.expectEqual(@as(i32, 7), fb.lineNum());
-    try std.testing.expectEqual(@as(i32, 3), fb.colNum());
+    const start = fb.startLocation();
+    try std.testing.expectEqual(@as(i32, 7), start.line_num);
+    try std.testing.expectEqual(@as(i32, 3), start.col_num);
     try std.testing.expect(fb.pc2lineBuf().len >= 2);
     try std.testing.expectEqualSlices(u8, &.{ 6, 2 }, fb.pc2lineBuf()[0..2]);
     try std.testing.expect(!@hasField(bytecode.function_bytecode.DebugInfo, "line_num"));

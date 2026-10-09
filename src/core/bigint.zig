@@ -233,6 +233,34 @@ pub const BigInt = struct {
         return @alignCast(@fieldParentPtr("header", header));
     }
 
+    /// Heap BigInt behind a value. Short BigInts and every other tag are null.
+    pub fn fromValue(value: JSValue) ?*BigInt {
+        if (!value.is(.big_int)) return null;
+        return fromHeader(value.refHeader() orelse return null);
+    }
+
+    pub const Parts = struct {
+        negative: bool,
+        limbs: []const Limb,
+    };
+
+    /// Short BigInts are expanded into `scratch`. Heap limbs are borrowed.
+    pub fn partsFromValue(value: JSValue, scratch: *[2]Limb) ?Parts {
+        if (value.as(.short_big_int)) |short| {
+            const signed: i128 = short;
+            var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
+            var len: usize = 0;
+            while (magnitude != 0) {
+                scratch[len] = @truncate(magnitude);
+                magnitude >>= @bitSizeOf(Limb);
+                len += 1;
+            }
+            return .{ .negative = short < 0, .limbs = scratch[0..len] };
+        }
+        const big = fromValue(value) orelse return null;
+        return .{ .negative = big.negative(), .limbs = big.limbs() };
+    }
+
     /// Bytes this wrapper (plus inline limbs) is registered with. External
     /// limbs are charged separately through the native allocator.
     pub fn accountedAllocationSize(self: *const BigInt) usize {

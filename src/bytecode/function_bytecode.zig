@@ -964,21 +964,13 @@ pub const FunctionBytecodeImpl = extern struct {
         }
         return (dbg.pc2line_buf.?)[0..len];
     }
-    /// Starting source line, or 0 when no debug info was captured.
-    pub inline fn lineNum(self: *const FunctionBytecodeImpl) i32 {
+    pub const StartLocation = struct { line_num: i32 = 0, col_num: i32 = 0 };
+    /// Header line and column, or 0:0 when debug info is absent or malformed.
+    pub inline fn startLocation(self: *const FunctionBytecodeImpl) StartLocation {
         const bytes = self.pc2lineBuf();
-        if (bytes.len != 0) {
-            if (pipeline_pc2line.decodeHeader(bytes)) |header| return header.line_num else |_| return 0;
-        }
-        return 0;
-    }
-    /// Starting source column, or 0 when no debug info was captured.
-    pub inline fn colNum(self: *const FunctionBytecodeImpl) i32 {
-        const bytes = self.pc2lineBuf();
-        if (bytes.len != 0) {
-            if (pipeline_pc2line.decodeHeader(bytes)) |header| return header.col_num else |_| return 0;
-        }
-        return 0;
+        if (bytes.len == 0) return .{};
+        const header = pipeline_pc2line.decodeHeader(bytes) catch return .{};
+        return .{ .line_num = header.line_num, .col_num = header.col_num };
     }
     /// Original source text, or `null` if none was captured. Materializes the
     /// `[]const u8` from the boxed `source_ptr` + `source_len` pair.
@@ -1248,12 +1240,7 @@ pub const FunctionBytecodeImpl = extern struct {
         // table and code byte above lives in the main FAM.
         if (debug_ptr) |dbg| {
             dbg.filename = atom.null_atom;
-            std.debug.assert(dbg.pc2line_len >= 0);
-            const pc2line_len: usize = @intCast(dbg.pc2line_len);
-            const pc2line_buf: []u8 = if (pc2line_len == 0)
-                &.{}
-            else
-                (dbg.pc2line_buf.?)[0..pc2line_len];
+            const pc2line_buf = self.pc2lineBuf();
             dbg.pc2line_buf = null;
             dbg.pc2line_len = 0;
             if (pc2line_buf.len != 0) mem.freeNative(u8, pc2line_buf);

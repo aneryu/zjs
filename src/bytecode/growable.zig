@@ -3,7 +3,6 @@
 //! A growable slice keeps `slice.*.len` as the used count and
 //! `slice.*.ptr[0..capacity.*]` as the allocator-owned backing buffer.
 const std = @import("std");
-const atom = @import("../core/atom.zig");
 
 /// Geometric growth helper.
 ///
@@ -40,32 +39,18 @@ pub inline fn growSliceBy(
 }
 
 /// Free the full backing buffer of a growable slice and reset both the
-/// visible slice and its capacity.
+/// visible slice and its capacity. Growth and install keep `capacity == 0`
+/// only for an empty slice.
 pub fn freeGrowableSlice(
     comptime T: type,
     allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
 ) void {
+    std.debug.assert(capacity.* != 0 or slice.len == 0);
     var old_buf: []T = &.{};
     if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
     slice.* = &.{};
     capacity.* = 0;
     if (old_buf.len != 0) allocator.free(old_buf);
-}
-
-pub fn freeGrowableAtomSlice(
-    allocator: std.mem.Allocator,
-    slice: *[]atom.Atom,
-    capacity: *usize,
-) void {
-    const items = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_capacity != 0) {
-        allocator.free(items.ptr[0..old_capacity]);
-    } else if (items.len != 0) {
-        allocator.free(items);
-    }
 }

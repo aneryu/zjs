@@ -24,7 +24,7 @@ const zjs_vm = @import("zjs_vm.zig");
 
 pub fn evalScriptSource(ctx: *core.JSContext, source_text: []const u8, options: core.context.ScriptEvalOptions) !core.JSValue {
     const global = options.realm_global orelse try zjs_vm.contextGlobal(ctx);
-    return call.evalGlobalScriptSource(ctx, options.output, global, source_text, options.filename);
+    return evalGlobalScriptSource(ctx, options.output, global, source_text, options.filename);
 }
 
 pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options: core.context.ScriptEvalOptions) !core.JSValue {
@@ -33,6 +33,86 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
     defer source.deinit(ctx.runtime.nativeAllocator());
     try string_ops.appendSourceStringUtf8(ctx.runtime, &source, source_value);
     return evalScriptSource(ctx, source.items, options);
+}
+
+pub fn evalGlobalScriptSource(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: []const u8,
+    filename: []const u8,
+) !core.JSValue {
+    // Arm the native recursion guard at this outermost script entry (the public
+    // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
+    // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
+    // a catchable SyntaxError/InternalError instead of a native crash.
+    if (ctx.runtime.stack.call_depth == 0) ctx.runtime.stack.captureNativeTop();
+
+    const context_global = ctx.global;
+    const use_global_lexicals = context_global == null or context_global.? != global;
+    const keep_active_lexicals = context_global == null;
+    const saved_lexicals = ctx.lexicals;
+    if (use_global_lexicals) ctx.setLexicals(global.globalLexicals(ctx.runtime));
+
+    const EvalResult = @typeInfo(@TypeOf(evalGlobalScriptSource)).@"fn".return_type.?;
+    const result: EvalResult = blk: {
+        const compile_realm = ctx.runtime.contexts.forGlobal(global, .include_constructing) orelse break :blk error.InvalidBuiltinRegistry;
+        var compiled = parser.compile(.{ .realm = compile_realm }, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
+        defer compiled.deinit();
+        if (compiled.syntax_error) |*parse_error| {
+            // Compile-error surface: own fileName/lineNumber/columnNumber +
+            // leading stack line (build_backtrace filename branch,
+            // quickjs.c).
+            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
+            _ = exception_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
+            break :blk error.SyntaxError;
+        }
+        const owned_root = compiled.takeFunctionBytecodeValue() orelse break :blk error.InvalidBytecode;
+        var root_function_value = object_ops.createRootBytecodeFunctionObject(
+            compile_realm,
+            global,
+            owned_root,
+            .root_global,
+        ) catch |err| break :blk err;
+        var root_values = [_]*core.JSValue{
+            &root_function_value,
+        };
+        var root_frame = core.runtime.ValueRootFrame{
+            .values = &root_values,
+        };
+        root_frame.activate(ctx.runtime);
+        defer root_frame.deactivate(ctx.runtime);
+        const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
+        const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
+        const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
+        var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
+        defer nested_stack.deinit(ctx.runtime);
+        break :blk zjs_vm.runWithCallEnv(.{
+            .ctx = compile_realm,
+            .stack = &nested_stack,
+            .function = function,
+            .initial_this_value = global.value(),
+            .var_refs = root_function_object.functionCaptures(),
+            .output = output,
+            .global = global,
+            .strict_unresolved_get_var = function.isStrictMode(),
+            .current_function_value = root_function_value,
+            .direct_eval_vars_reach_global = true,
+        }) catch |err| normalizeEvalRuntimeError(err);
+    };
+
+    if (use_global_lexicals) {
+        var rooted_result = result catch |err| {
+            try call.restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
+            return err;
+        };
+        var root_frame = core.runtime.rootValues(.{&rooted_result});
+        root_frame.activate(ctx.runtime);
+        defer root_frame.deactivate(ctx.runtime);
+        try call.restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
+        return rooted_result;
+    }
+    return result;
 }
 
 /// Intern the module name, if this is a module at all.
@@ -734,33 +814,18 @@ pub fn execDirectEval(
         }
     }
 
-    var args: []core.JSValue = &.{};
-    if (argc != 0) args = try ctx.runtime.nativeAllocator().alloc(core.JSValue, argc);
-    defer if (args.len != 0) ctx.runtime.nativeAllocator().free(args);
-
-    var remaining: usize = argc;
-    while (remaining > 0) {
-        remaining -= 1;
-        args[remaining] = try stack.pop();
-    }
-
-    var func = try stack.pop();
-    var rooted_args = args;
-    var root_values = [_]*core.JSValue{
-        &func,
-    };
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &rooted_args },
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-        .slices = &root_slices,
-    };
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
+    // Same borrow as execCall. directEval compiles and runs on a fresh nested
+    // stack; it does not receive this operand window. Catch handling does, so
+    // the window is popped before that path.
+    const total: usize = @as(usize, argc) + 1;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
+    const func = stack.values[region_base];
+    const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
     const result = if (isContextIntrinsicEval(ctx, func))
-        directEval(ctx, output, global, rooted_args, function, frame, eval_scope_head, caller_eval_global_var_bindings) catch |err| {
+        directEval(ctx, output, global, args, function, frame, eval_scope_head, caller_eval_global_var_bindings) catch |err| {
+            call_runtime.popOwnedStackRegion(stack, region_base);
             const eval_err = normalizeEvalRuntimeError(err);
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, eval_err)) {
                 return .continue_loop;
@@ -768,12 +833,14 @@ pub fn execDirectEval(
             return eval_err;
         }
     else
-        call_runtime.callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodeDispatch(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame, .borrow) catch |err| {
+            call_runtime.popOwnedStackRegion(stack, region_base);
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }
             return err;
         };
+    call_runtime.popOwnedStackRegion(stack, region_base);
     try stack.push(result);
     return .done;
 }

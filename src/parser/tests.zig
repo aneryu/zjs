@@ -477,10 +477,8 @@ test "F1.2: regex literal exposes pattern and flags" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
 
-    // Provide the slash directly to rescanRegexp; in real usage the
-    // parser would call this once it knew the / starts a regex.
     var lx = env.lexer("/a[bc]\\/d/gi");
-    var tok = try lx.rescanRegexp(0);
+    var tok = try lx.rescanRegexp();
     defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.Kind.regexp, tok.kind);
     try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
@@ -496,7 +494,7 @@ test "F1.2: regex literal may begin with equals after slash rescan" {
     defer freeToken(&lx, &div_assign);
     try std.testing.expectEqual(t.Kind.div_assign, div_assign.kind);
 
-    var tok = try lx.rescanRegexp(lx.mark_pos);
+    var tok = try lx.rescanRegexp();
     defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.Kind.regexp, tok.kind);
     try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
@@ -1471,15 +1469,12 @@ fn expectModuleIndirectExport(
 }
 
 fn expectModuleStarExport(
-    env: *TestEnv,
     record: *const engine.bytecode.module.Record,
     index: usize,
     request_index: u32,
-    export_name: []const u8,
 ) !void {
     const entry = record.star_exports[index];
     try std.testing.expectEqual(request_index, entry.request_index);
-    try expectAtomName(env, entry.export_name, export_name);
 }
 
 fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !Lowered {
@@ -2690,8 +2685,9 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     });
     defer std.testing.allocator.free(decoded);
 
-    var line_num = child.lineNum();
-    var col_num = child.colNum();
+    const start = child.startLocation();
+    var line_num = start.line_num;
+    var col_num = start.col_num;
     for (decoded) |slot| {
         if (slot.pc > close_pc) break;
         line_num = slot.line_num;
@@ -6314,7 +6310,7 @@ test "F8: export star" {
     const record = try moduleRecord(&fn_bc);
     try expectModuleRecordCounts(record, 1, 0, 0, 0, 1);
     try expectModuleRequest(&env, record, 0, "module");
-    try expectModuleStarExport(&env, record, 0, 0, "*");
+    try expectModuleStarExport(record, 0, 0);
 }
 
 test "F8: export star as namespace" {
@@ -14017,5 +14013,64 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         phase_ownership.setBuilderCommitted(&terminal, 0);
         try phase_ownership.expectTerminal(terminal);
         phase_ownership.dump(shape.*, "parse-only", "terminal", terminal);
+    }
+}
+
+test "typescript optional destructuring parameter keeps its default" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const sources = [_][]const u8{
+        "const d = { a: 1 }; const f = ({ a }?: T = d) => a;",
+        "const d = { a: 1 }; function g({ a }?: T = d) { return a; }",
+        "const d = [1]; const f = ([a]?: T = d) => a;",
+    };
+    for (sources) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "optional-pattern.ts" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "typescript optional marker after a declaration pattern is rejected" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const rejected = [_][]const u8{
+        "const d = { a: 1 }; const { a }?: T = d;",
+        "const d = { a: 1 }; let { a }?: T = d;",
+        "const d = { a: 1 }; var { a }?: T = d;",
+        "const d = [1]; const [a]?: T = d;",
+        "const d = { a: 1 }; const { a }? = d;",
+        "const d = { a: 1 }; for (const { a }? of [d]) {}",
+        "const d = [1]; for (let [a]? of [d]) {}",
+        "try {} catch ({ a }?) {}",
+        "try {} catch ([a]?) {}",
+        "try {} catch ({ a }?: T) {}",
+        "function f() { using { a }?: T = null; }",
+    };
+    for (rejected) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "optional-pattern.ts" });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestUnexpectedResult;
+        const expected: []const u8 = if (std.mem.indexOf(u8, source, "using ") != null)
+            "expected ';', got '{'"
+        else
+            "'?' is not allowed here";
+        try std.testing.expectEqualStrings(expected, syntax_error.message);
+    }
+
+    const accepted = [_][]const u8{
+        "const d = { a: 1 }; const f = ({ a }?: T = d) => a;",
+        "const d = { a: 1 }; function g({ a }?: T = d) { return a; }",
+        "const d = [1]; const f = ([a]?: T = d) => a;",
+        "const d = { a: 1 }; const { a }: T = d;",
+        "try {} catch ({ a }: T) {}",
+        "function g({ a }?: T) { return a; }",
+    };
+    for (accepted) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "optional-pattern.ts" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
     }
 }

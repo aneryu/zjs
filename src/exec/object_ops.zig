@@ -1247,8 +1247,39 @@ pub const PrimitiveMethod = enum(i32) {
     constructor_call = 3,
     description_get = 4,
     to_primitive = 5,
+    /// `BigInt.asIntN` and `Symbol.for`. Prototype dispatch rejects this slot.
+    static_a = 6,
+    /// `BigInt.asUintN` and `Symbol.keyFor`. Prototype dispatch rejects this slot.
+    static_b = 7,
     to_locale_string = 8,
 };
+
+/// `class * primitive_builtin_stride + method`. Install tables and record ids
+/// share this packing; the asserts pin the historical numeric results.
+pub fn primitiveBuiltinId(class: PrimitiveClass, method: PrimitiveMethod) u32 {
+    return @as(u32, @intCast(@intFromEnum(class))) * @as(u32, @intCast(primitive_builtin_stride)) + @as(u32, @intCast(@intFromEnum(method)));
+}
+
+comptime {
+    std.debug.assert(primitiveBuiltinId(.number, .value_of) == 12);
+    std.debug.assert(primitiveBuiltinId(.boolean, .to_string) == 21 and
+        primitiveBuiltinId(.boolean, .value_of) == 22 and
+        primitiveBuiltinId(.boolean, .constructor_call) == 23);
+    std.debug.assert(primitiveBuiltinId(.big_int, .to_string) == 31 and
+        primitiveBuiltinId(.big_int, .value_of) == 32 and
+        primitiveBuiltinId(.big_int, .static_a) == 36 and
+        primitiveBuiltinId(.big_int, .static_b) == 37 and
+        primitiveBuiltinId(.big_int, .to_locale_string) == 38);
+    std.debug.assert(primitiveBuiltinId(.symbol, .to_string) == 41 and
+        primitiveBuiltinId(.symbol, .value_of) == 42 and
+        primitiveBuiltinId(.symbol, .constructor_call) == 43 and
+        primitiveBuiltinId(.symbol, .description_get) == 44 and
+        primitiveBuiltinId(.symbol, .to_primitive) == 45 and
+        primitiveBuiltinId(.symbol, .static_a) == 46 and
+        primitiveBuiltinId(.symbol, .static_b) == 47);
+    std.debug.assert(primitiveBuiltinId(.string, .to_string) == 51 and
+        primitiveBuiltinId(.string, .value_of) == 52);
+}
 
 pub fn primitivePrototypeMethod(
     ctx: *core.JSContext,
@@ -1286,7 +1317,7 @@ pub fn primitivePrototypeMethod(
                 error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
             };
         },
-        .to_string, .value_of, .to_locale_string => {},
+        .to_string, .value_of, .to_locale_string, .static_a, .static_b => {},
     };
     const class_tag = @divTrunc(tag, primitive_builtin_stride);
     const primitive = primitivePrototypeThisValue(this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
@@ -1310,7 +1341,7 @@ pub fn primitivePrototypeMethod(
         .value_of => primitive,
         // BigInt.prototype.toLocaleString: no Intl, so the base-10 form.
         .to_locale_string => if (class_value == .big_int) bigIntPrototypeToString(ctx, output, global, primitive, &.{}, caller_function, caller_frame) else error.TypeError,
-        .constructor_call, .description_get, .to_primitive => error.TypeError,
+        .constructor_call, .description_get, .to_primitive, .static_a, .static_b => error.TypeError,
     };
 }
 
@@ -1874,18 +1905,8 @@ pub fn createGeneratorObject(
     var prepared_frame_ptr: ?*const zjs_vm.PreparedEntryFrame = null;
     if (detached_shell) {
         const stack_slots = try std.math.add(usize, @as(usize, fb.stack_size), 1);
-        const frame_arg_count = frame_mod.frameArgCount(fb, input_args.len);
         const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(fb);
-        const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
-        const var_ref_count = frame_mod.frameVarRefStorageCount(fb, input_var_refs);
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(fb);
-        const layout: frame_mod.SlabLayout = .{
-            .args = frame_arg_count,
-            .original_args = original_arg_count,
-            .locals = fb.var_count,
-            .var_refs = var_ref_count,
-            .open_var_refs = open_var_ref_count,
-        };
+        const layout = frame_mod.SlabLayout.forEntry(fb, input_args.len, input_var_refs);
         const frame_slots = try layout.totalSlots();
         try object.initGeneratorExecutionWithStorage(ctx.runtime, stack_slots, frame_slots);
         prepared_frame = .{

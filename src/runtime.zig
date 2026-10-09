@@ -836,7 +836,9 @@ pub const JSRuntime = struct {
     }
 
     noinline fn prepareHeapChargeSlow(self: *JSRuntime, bytes: usize) void {
-        gc_driver.admitHeapCharge(self, bytes) catch {};
+        gc_driver.admitHeapCharge(self, bytes) catch |err| switch (err) {
+            error.OutOfMemory => {},
+        };
     }
 
     /// Return the shared single-code-unit (latin1) string for `byte`,

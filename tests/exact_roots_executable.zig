@@ -3529,7 +3529,7 @@ fn verifyJsonStringifyOwnKeysRoots() !void {
         failure: ?core.gc.CollectionError = null,
         const methods = core.object.ExoticMethods{ .own_keys = ownKeys };
         fn ownKeys(object: *core.Object, rt: *core.JSRuntime) std.mem.Allocator.Error![]core.Atom {
-            const self: *@This() = @ptrCast(@alignCast(rt.classes.recordPtr(object.class_id).?.binding_data.?));
+            const self: *@This() = @ptrCast(@alignCast(rt.classes.recordPtr(object.class_id).?.def.binding_data.?));
             self.calls += 1;
             if (self.calls > 1) return error.OutOfMemory;
             const epoch = rt.gc.collection_epoch;

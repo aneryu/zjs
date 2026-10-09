@@ -139,11 +139,18 @@ pub fn callNativeFunctionRecord(
         // reaching here means the id is not installed, which only happens
         // for corrupt ids.
         .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp, .atomics, .promise, .weak_ref, .disposable => error.TypeError,
-        .engine_helper => blk: {
-            const realm = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
-            break :blk try callEngineHelperRecord(realm.realm, realm.global, this_value, native_ref.id);
-        },
+        .engine_helper => try callEngineHelperDomain(ctx, function_object, this_value, native_ref.id),
     };
+}
+
+pub fn callEngineHelperDomain(
+    ctx: *core.JSContext,
+    function_object: *core.Object,
+    this_value: core.JSValue,
+    id: u32,
+) HostError!core.JSValue {
+    const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+    return callEngineHelperRecord(view.realm, view.global, this_value, id);
 }
 
 /// `.engine_helper` native-builtin domain: engine helpers with no spec
@@ -751,88 +758,4 @@ test "four-class bytecode callable consumers accept every class" {
         const source = try functionToStringValue(rt, function_value);
         try std.testing.expect(source.isString());
     }
-}
-
-pub fn evalGlobalScriptSource(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    source: []const u8,
-    filename: []const u8,
-) !core.JSValue {
-    const parser = @import("../parser.zig");
-    const stack_mod = @import("stack.zig");
-    const zjs_vm = @import("zjs_vm.zig");
-
-    // Arm the native recursion guard at this outermost script entry (the public
-    // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
-    // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
-    // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.runtime.stack.call_depth == 0) ctx.runtime.stack.captureNativeTop();
-
-    const context_global = ctx.global;
-    const use_global_lexicals = context_global == null or context_global.? != global;
-    const keep_active_lexicals = context_global == null;
-    const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.setLexicals(global.globalLexicals(ctx.runtime));
-
-    const EvalResult = @typeInfo(@TypeOf(evalGlobalScriptSource)).@"fn".return_type.?;
-    const result: EvalResult = blk: {
-        const compile_realm = ctx.runtime.contexts.forGlobal(global, .include_constructing) orelse break :blk error.InvalidBuiltinRegistry;
-        var compiled = parser.compile(.{ .realm = compile_realm }, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
-        defer compiled.deinit();
-        if (compiled.syntax_error) |*parse_error| {
-            // Compile-error surface: own fileName/lineNumber/columnNumber +
-            // leading stack line (build_backtrace filename branch,
-            // quickjs.c).
-            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
-            _ = exception_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
-            break :blk error.SyntaxError;
-        }
-        const owned_root = compiled.takeFunctionBytecodeValue() orelse break :blk error.InvalidBytecode;
-        var root_function_value = object_ops.createRootBytecodeFunctionObject(
-            compile_realm,
-            global,
-            owned_root,
-            .root_global,
-        ) catch |err| break :blk err;
-        var root_values = [_]*core.JSValue{
-            &root_function_value,
-        };
-        var root_frame = core.runtime.ValueRootFrame{
-            .values = &root_values,
-        };
-        root_frame.activate(ctx.runtime);
-        defer root_frame.deactivate(ctx.runtime);
-        const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
-        const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
-        const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
-        var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
-        defer nested_stack.deinit(ctx.runtime);
-        break :blk zjs_vm.runWithCallEnv(.{
-            .ctx = compile_realm,
-            .stack = &nested_stack,
-            .function = function,
-            .initial_this_value = global.value(),
-            .var_refs = root_function_object.functionCaptures(),
-            .output = output,
-            .global = global,
-            .strict_unresolved_get_var = function.isStrictMode(),
-            .current_function_value = root_function_value,
-            .direct_eval_vars_reach_global = true,
-        }) catch |err| exception_ops.normalizeEvalRuntimeError(err);
-    };
-
-    if (use_global_lexicals) {
-        var rooted_result = result catch |err| {
-            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
-            return err;
-        };
-        var root_frame = core.runtime.rootValues(.{&rooted_result});
-        root_frame.activate(ctx.runtime);
-        defer root_frame.deactivate(ctx.runtime);
-        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
-        return rooted_result;
-    }
-    return result;
 }

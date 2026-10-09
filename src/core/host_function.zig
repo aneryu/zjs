@@ -17,6 +17,7 @@ const RealmContext = context.RealmContext;
 const global_slots = @import("global_slots.zig");
 const class = @import("class.zig");
 const errors = @import("errors.zig");
+const uri_codec = @import("uri.zig");
 const ClassId = class.ClassId;
 
 /// Leftover unique name→id if-ladders share one runtime scan. Tables stay
@@ -1521,10 +1522,11 @@ pub const builtin_method_id_lookup = struct {
         /// 4=decodeURIComponent). Pure name->id mapping; relocated to engine
         /// core in Phase 6b-3 STEP 2.
         pub fn methodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "encodeURI")) return 1;
-            if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;
-            if (std.mem.eql(u8, name, "decodeURI")) return 3;
-            if (std.mem.eql(u8, name, "decodeURIComponent")) return 4;
+            const UriMethod = uri_codec.UriMethod;
+            if (std.mem.eql(u8, name, "encodeURI")) return @intFromEnum(UriMethod.encode_uri);
+            if (std.mem.eql(u8, name, "encodeURIComponent")) return @intFromEnum(UriMethod.encode_uri_component);
+            if (std.mem.eql(u8, name, "decodeURI")) return @intFromEnum(UriMethod.decode_uri);
+            if (std.mem.eql(u8, name, "decodeURIComponent")) return @intFromEnum(UriMethod.decode_uri_component);
             return null;
         }
     };

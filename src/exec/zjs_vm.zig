@@ -58,7 +58,7 @@ pub fn runWithOutput(
             .current_function_value = root_function_value,
             .direct_eval_vars_reach_global = true,
         }) catch |err| {
-            if (!realm.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and realm.hasException()) realm.clearException();
+            clearStaleException(realm, err);
             return err;
         };
     }
@@ -137,9 +137,13 @@ pub fn runWithArgs(env: CallEnv) !core.JSValue {
     else
         runWithCallEnv(env);
     return result catch |err| {
-        if (!ctx.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and ctx.hasException()) ctx.clearException();
+        clearStaleException(ctx, err);
         return err;
     };
+}
+
+fn clearStaleException(ctx: *core.JSContext, err: anyerror) void {
+    if (!ctx.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and ctx.hasException()) ctx.clearException();
 }
 
 const SuppliedRootCaptures = struct {
@@ -275,6 +279,29 @@ fn unpinGlobalForInvocation(env: CallEnv, pinned: ?*core.Object) void {
     env.ctx.runtime.gc.pins.unpin(object.gcHeader());
 }
 
+/// Stack guard, skipped when a caller already charged this entry.
+pub inline fn enterCallDepthUnlessPrecharged(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    planned_stack_bytes: usize,
+    precharged: bool,
+) !?vm_opcodes.CallDepthGuard {
+    if (precharged) return null;
+    return try vm_opcodes.enterCallDepth(ctx, global, planned_stack_bytes);
+}
+
+/// Resident entry: size-0 guard, then the caller-realm interrupt poll.
+/// `precharged` skips the guard and still polls.
+pub inline fn preflightResidentEntry(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    precharged: bool,
+) !?vm_opcodes.CallDepthGuard {
+    const call_depth_guard = try enterCallDepthUnlessPrecharged(ctx, global, 0, precharged);
+    try exception_ops.pollInterrupt(ctx, global);
+    return call_depth_guard;
+}
+
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
     env.ctx.runtime.assertExecutionAllowed();
     const pinned_global = pinGlobalForInvocation(env);
@@ -285,13 +312,8 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         // resident entries that do not already carry an outer guard.
         var precharged = env;
         precharged.global = env.ctx.global orelse env.global;
-        const call_depth_guard = try vm_opcodes.enterCallDepth(
-            precharged.ctx,
-            precharged.global,
-            0,
-        );
-        defer call_depth_guard.deinit();
-        try exception_ops.pollInterrupt(precharged.ctx, precharged.global);
+        const call_depth_guard = try preflightResidentEntry(precharged.ctx, precharged.global, false);
+        defer if (call_depth_guard) |guard| guard.deinit();
         precharged.call_depth_precharged = true;
         return runWithCallEnvAfterInterruptPoll(precharged);
     }
@@ -318,14 +340,12 @@ pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
             env.args.len,
             env.copy_argv,
         );
-    var call_depth_guard: ?vm_opcodes.CallDepthGuard = null;
-    if (!env.call_depth_precharged) {
-        call_depth_guard = try vm_opcodes.enterCallDepth(
-            env.ctx,
-            env.global,
-            planned_stack_bytes,
-        );
-    }
+    const call_depth_guard = try enterCallDepthUnlessPrecharged(
+        env.ctx,
+        env.global,
+        planned_stack_bytes,
+        env.call_depth_precharged,
+    );
     defer if (call_depth_guard) |guard| guard.deinit();
 
     var effective = env;
@@ -498,14 +518,11 @@ noinline fn initFreshEntryFrame(
         prepared.need_original_args
     else
         argumentsNeedsOriginalSnapshot(entry_function);
-    const frame_arg_count = if (entry_prepared_frame) |prepared|
-        prepared.slab.args.len
-    else
-        frame_mod.frameArgCount(entry_function, args.len);
+    const slab_layout = frame_mod.SlabLayout.forEntry(entry_function, args.len, var_refs);
     const open_var_ref_count = if (entry_prepared_frame) |prepared|
         prepared.slab.open_var_refs.len
     else
-        frame_mod.frameOpenVarRefStorageCount(entry_function);
+        slab_layout.open_var_refs;
     const resident_frame_storage: []core.JSValue = if (entry_prepared_frame) |prepared|
         prepared.slab.storage
     else if (entry_generator_state) |generator|
@@ -516,13 +533,6 @@ noinline fn initFreshEntryFrame(
         @as(usize, entry_function.stack_size) + 1
     else
         0;
-    const slab_layout: frame_mod.SlabLayout = .{
-        .args = frame_arg_count,
-        .original_args = frame_mod.originalArgCount(args.len, need_original_args),
-        .locals = entry_function.var_count,
-        .var_refs = frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-        .open_var_refs = open_var_ref_count,
-    };
     const slab = if (entry_prepared_frame) |prepared| blk: {
         frame_storage.installResidentStorage(prepared.slab.storage);
         break :blk prepared.slab;
@@ -530,27 +540,19 @@ noinline fn initFreshEntryFrame(
         const windows = frame_mod.FrameSlab.partition(resident_frame_storage, slab_layout);
         frame_storage.installResidentStorage(resident_frame_storage);
         break :blk windows;
-    } else if (frame_arena) |arena| blk: {
-        // The arena slab carries the operand stack; a heap fallback keeps it
-        // separate (`.stack = 0`), as in the arena-less entry below.
-        var arena_layout = slab_layout;
-        arena_layout.stack = stack_count;
-        if (frame_mod.FrameSlab.carve(ctx.runtime, arena, arena_layout)) |windows| break :blk windows;
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(ctx.runtime.nativeAllocator(), slab_layout);
-        frame_storage.installOwnedStorage(heap_windows.storage);
-        break :blk heap_windows;
     } else blk: {
+        // The arena slab carries the operand stack; a heap fallback keeps it
+        // separate (`.stack = 0`). A carve miss uses that same heap slab.
+        if (frame_arena) |arena| {
+            var arena_layout = slab_layout;
+            arena_layout.stack = stack_count;
+            if (frame_mod.FrameSlab.carve(ctx.runtime, arena, arena_layout)) |windows| break :blk windows;
+        }
         const heap_windows = try frame_mod.FrameSlab.allocHeap(ctx.runtime.nativeAllocator(), slab_layout);
         frame_storage.installOwnedStorage(heap_windows.storage);
         break :blk heap_windows;
     };
-    const frame_windows = frame_mod.FrameStorageWindows{
-        .args = if (slab.args.len != 0) slab.args else null,
-        .original_args = if (slab.original_args.len != 0) slab.original_args else null,
-        .locals = if (slab.locals.len != 0) slab.locals else null,
-        .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
-        .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
-    };
+    const frame_windows = slab.windows();
     if (entry_stack.capacity == 0 and slab.stack.len != 0) {
         entry_stack.* = stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.stack.frame_storage, slab.stack);
     }

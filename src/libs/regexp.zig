@@ -374,7 +374,7 @@ pub fn getFlags(bytecode: []const u8) Flags {
     return Flags.fromBits(std.mem.readInt(u16, bytecode[0..2], .little));
 }
 
-fn groupNameFromBytecode(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
+pub fn groupNameFromBytecode(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
     if (one_based_capture_index == 0 or !getFlags(bytecode).named_groups) return null;
     const header = parseHeader(bytecode) catch return null;
     if (one_based_capture_index >= header.capture_count) return null;
@@ -389,10 +389,6 @@ fn groupNameFromBytecode(bytecode: []const u8, one_based_capture_index: usize) ?
         pos = end + 1;
     }
     return null;
-}
-
-pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
-    return groupNameFromBytecode(bytecode, one_based_capture_index);
 }
 
 //=== Compiled wrapper & exec entry points ================================
@@ -1329,28 +1325,40 @@ fn lreExecBacktrack(
 
 //=== Exec output & header parse ===========================================
 
-fn parseHeader(bytecode: []const u8) !REBytecodeHeader {
-    if (bytecode.len < header_len) return error.BytecodeCorrupt;
-    const bytecode_len = std.mem.readInt(u32, bytecode[re_header_bytecode_len..header_len], .little);
-    if (header_len + bytecode_len > bytecode.len) return error.BytecodeCorrupt;
+fn readHeaderFields(bytecode: []const u8) REBytecodeHeader {
     return .{
-        .flags = Flags.fromBits(std.mem.readInt(u16, bytecode[0..2], .little)),
+        .flags = Flags.fromBits(std.mem.readInt(u16, bytecode[0..re_header_capture_count], .little)),
         .capture_count = bytecode[re_header_capture_count],
         .register_count = bytecode[re_header_register_count],
-        .bytecode_len = bytecode_len,
+        .bytecode_len = std.mem.readInt(u32, bytecode[re_header_bytecode_len..header_len], .little),
     };
+}
+
+fn parseHeader(bytecode: []const u8) !REBytecodeHeader {
+    if (bytecode.len < header_len) return error.BytecodeCorrupt;
+    const header = readHeaderFields(bytecode);
+    if (header_len + header.bytecode_len > bytecode.len) return error.BytecodeCorrupt;
+    return header;
 }
 
 fn parseHeaderTrusted(bytecode: []const u8) REBytecodeHeader {
     std.debug.assert(bytecode.len >= header_len);
-    const bytecode_len = std.mem.readInt(u32, bytecode[re_header_bytecode_len..header_len], .little);
-    std.debug.assert(header_len + bytecode_len <= bytecode.len);
-    return .{
-        .flags = Flags.fromBits(std.mem.readInt(u16, bytecode[0..2], .little)),
-        .capture_count = bytecode[re_header_capture_count],
-        .register_count = bytecode[re_header_register_count],
-        .bytecode_len = bytecode_len,
-    };
+    const header = readHeaderFields(bytecode);
+    std.debug.assert(header_len + header.bytecode_len <= bytecode.len);
+    return header;
+}
+
+fn writeHeader(
+    header: []u8,
+    flags: Flags,
+    capture_count: u8,
+    register_count: u8,
+    bytecode_len: u32,
+) void {
+    std.mem.writeInt(u16, header[0..re_header_capture_count], flags.bits(), .little);
+    header[re_header_capture_count] = capture_count;
+    header[re_header_register_count] = register_count;
+    std.mem.writeInt(u32, header[re_header_bytecode_len..header_len], bytecode_len, .little);
 }
 
 inline fn decodeOp(byte: u8) ?REOPCodeEnum {
@@ -1605,9 +1613,9 @@ pub fn compileWithFlagsAndOptions(
 
     try s.emitHeader();
     if (!re_flags.sticky) {
-        try s.reEmitOpI32(.split_goto_first, 6);
+        try s.reEmitOpI32(.split_goto_first, search_forward_jump);
         try s.reEmitOp(.any);
-        try s.reEmitOpI32(.goto_, -11);
+        try s.reEmitOpI32(.goto_, search_back_jump);
     }
     try s.reEmitOpU8(.save_start, 0);
     try s.reParseDisjunction(null, false);
@@ -1649,6 +1657,30 @@ fn groupNamesEqual(lhs: []const u8, rhs: []const u8) bool {
     return lhs_index == lhs.len and rhs_index == rhs.len;
 }
 
+fn combineSurrogatePair(first: u21, second: u21) ?u21 {
+    if (!isHiSurrogate(first) or !isLoSurrogate(second)) return null;
+    return fromSurrogate(@intCast(first), @intCast(second));
+}
+
+fn decodePatternCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
+    if (index.* >= pattern.len) return error.InvalidPattern;
+    const byte = pattern[index.*];
+    if (byte < 0x80) {
+        index.* += 1;
+        return byte;
+    }
+    if (decodeWtf8Surrogate(pattern, index.*)) |decoded| {
+        index.* += decoded.len;
+        return decoded.code_point;
+    }
+    const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
+    if (index.* + width > pattern.len) return error.InvalidPattern;
+    const cp = std.unicode.utf8Decode(pattern[index.* .. index.* + width]) catch return error.InvalidPattern;
+    if (cp > max_code_point) return error.InvalidPattern;
+    index.* += width;
+    return @intCast(cp);
+}
+
 fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
     if (index.* >= pattern.len) return error.InvalidPattern;
     if (pattern[index.*] == '\\') {
@@ -1656,7 +1688,7 @@ fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
         if (isHiSurrogate(first)) {
             const saved = index.*;
             if (readUnicodeEscapeCodePoint(pattern, index)) |second| {
-                if (isLoSurrogate(second)) return fromSurrogate(@intCast(first), @intCast(second));
+                if (combineSurrogatePair(first, second)) |combined| return combined;
             } else |_| {}
             index.* = saved;
         }
@@ -1666,31 +1698,16 @@ fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
     // qjs:libregexp.c — unicode_from_utf8 then unconditionally recombine
     // a following low surrogate. CESU-8 / WTF-8 hi/lo halves must decode first
     // (std.unicode.utf8Decode rejects them) so non-u `new RegExp` sources work.
-    const first = try readGroupNameLiteralCodePoint(pattern, index);
+    const first = try decodePatternCodePoint(pattern, index);
     if (isHiSurrogate(first)) {
         const saved = index.*;
-        if (readGroupNameLiteralCodePoint(pattern, index)) |second| {
-            if (isLoSurrogate(second)) return fromSurrogate(@intCast(first), @intCast(second));
+        if (decodePatternCodePoint(pattern, index)) |second| {
+            if (combineSurrogatePair(first, second)) |combined| return combined;
         } else |_| {}
         index.* = saved;
     }
     if (first > max_code_point) return error.InvalidPattern;
     return first;
-}
-
-fn readGroupNameLiteralCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
-    if (index.* >= pattern.len) return error.InvalidPattern;
-    if (decodeWtf8Surrogate(pattern, index.*)) |decoded| {
-        index.* += decoded.len;
-        return decoded.code_point;
-    }
-    const byte = pattern[index.*];
-    const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
-    if (index.* + width > pattern.len) return error.InvalidPattern;
-    const cp = std.unicode.utf8Decode(pattern[index.* .. index.* + width]) catch return error.InvalidPattern;
-    if (cp > max_code_point) return error.InvalidPattern;
-    index.* += width;
-    return @intCast(cp);
 }
 
 fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
@@ -1910,24 +1927,29 @@ const REParseState = struct {
         if (has_named_groups) try self.byte_code.appendSlice(self.allocator, self.group_names.items);
         var header_flags = self.re_flags;
         header_flags.named_groups = has_named_groups;
-        std.mem.writeInt(u16, self.byte_code.items[0..2], header_flags.bits(), .little);
-        self.byte_code.items[2] = self.capture_count;
-        self.byte_code.items[3] = stack_size;
-        std.mem.writeInt(u32, self.byte_code.items[4..8], @intCast(bytecode_len), .little);
+        writeHeader(
+            self.byte_code.items[0..header_len],
+            header_flags,
+            self.capture_count,
+            stack_size,
+            @intCast(bytecode_len),
+        );
     }
 
     fn patchSearchLiteralPrefix(self: *REParseState) void {
         if (self.re_flags.sticky) return;
         const prelude = header_len;
-        const pattern_start = prelude + 11;
+        const pattern_start = prelude + search_span;
+        const any_at = prelude + opFixedSize(.split_goto_first).?;
+        const goto_at = any_at + opFixedSize(.any).?;
         const first_atom = pattern_start + 2;
         const code = self.byte_code.items;
         if (code.len < first_atom + 3) return;
         if (code[prelude] != opByte(.split_goto_first)) return;
-        if (std.mem.readInt(u32, code[prelude + 1 ..][0..4], .little) != 6) return;
-        if (code[prelude + 5] != opByte(.any)) return;
-        if (code[prelude + 6] != opByte(.goto_)) return;
-        if (@as(i32, @bitCast(std.mem.readInt(u32, code[prelude + 7 ..][0..4], .little))) != -11) return;
+        if (std.mem.readInt(u32, code[prelude + 1 ..][0..4], .little) != @as(u32, @intCast(search_forward_jump))) return;
+        if (code[any_at] != opByte(.any)) return;
+        if (code[goto_at] != opByte(.goto_)) return;
+        if (@as(i32, @bitCast(std.mem.readInt(u32, code[goto_at + 1 ..][0..4], .little))) != search_back_jump) return;
         if (code[pattern_start] != opByte(.save_start) or code[pattern_start + 1] != 0) return;
         // Leading lookarounds are zero-width: a match still has to start at
         // the literal that follows them (`(?<=\d+)x`), and skipping them keeps
@@ -3246,30 +3268,13 @@ const REParseState = struct {
             if (err == error.InvalidPattern) return first;
             return err;
         };
-        if (!isLoSurrogate(second)) {
-            self.buf_ptr = saved;
-            return first;
-        }
-        return fromSurrogate(@intCast(first), @intCast(second));
+        if (combineSurrogatePair(first, second)) |combined| return combined;
+        self.buf_ptr = saved;
+        return first;
     }
 
     fn readUtf8CodePoint(self: *REParseState) CompileError!u21 {
-        if (self.buf_ptr >= self.buf_start.len) return error.InvalidPattern;
-        const byte = self.buf_start[self.buf_ptr];
-        if (byte < 0x80) {
-            self.buf_ptr += 1;
-            return byte;
-        }
-        if (decodeWtf8Surrogate(self.buf_start, self.buf_ptr)) |decoded| {
-            self.buf_ptr += decoded.len;
-            return decoded.code_point;
-        }
-        const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
-        if (self.buf_ptr + width > self.buf_start.len) return error.InvalidPattern;
-        const cp = std.unicode.utf8Decode(self.buf_start[self.buf_ptr .. self.buf_ptr + width]) catch return error.InvalidPattern;
-        if (cp > max_code_point) return error.InvalidPattern;
-        self.buf_ptr += width;
-        return @intCast(cp);
+        return decodePatternCodePoint(self.buf_start, &self.buf_ptr);
     }
 
     fn looksLikeQuantifier(self: *const REParseState, start: usize) bool {
@@ -3752,6 +3757,14 @@ fn opFixedSize(op: REOPCodeEnum) ?usize {
         .save_reset, .range, .range_i, .range32, .range32_i => 3,
         .loop_split_goto_first, .loop_split_next_first, .loop_check_adv_split_goto_first, .loop_check_adv_split_next_first => 10,
     };
+}
+
+const search_forward_jump: i32 = @intCast(opFixedSize(.any).? + opFixedSize(.goto_).?);
+const search_span: usize = opFixedSize(.split_goto_first).? + @as(usize, @intCast(search_forward_jump));
+const search_back_jump: i32 = -@as(i32, @intCast(search_span));
+comptime {
+    std.debug.assert(search_forward_jump == 6);
+    std.debug.assert(search_back_jump == -11);
 }
 
 fn loopSplitOp(greedy: bool, need_check_advance: bool) REOPCodeEnum {

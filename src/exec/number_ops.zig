@@ -50,31 +50,22 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
 /// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    numberEntry("parseInt", 2, @intFromEnum(StaticMethod.parse_int)),
-    numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float)),
-    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan)),
-    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite)),
-    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.global_is_nan)),
-    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.global_is_finite)),
-    numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer)),
-    numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer)),
-    numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string)),
-    numberEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string)),
-    numberEntry("toFixed", 1, @intFromEnum(PrototypeMethod.to_fixed)),
-    numberEntry("toExponential", 1, @intFromEnum(PrototypeMethod.to_exponential)),
-    numberEntry("toPrecision", 1, @intFromEnum(PrototypeMethod.to_precision)),
+    numberEntry("parseInt", 2, @intFromEnum(StaticMethod.parse_int), &numberCall),
+    numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float), &numberCall),
+    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan), &numberCall),
+    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite), &numberCall),
+    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.global_is_nan), &numberCall),
+    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.global_is_finite), &numberCall),
+    numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer), &numberCall),
+    numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer), &numberCall),
+    numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string), &numberCall),
+    numberEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string), &numberCall),
+    numberEntry("toFixed", 1, @intFromEnum(PrototypeMethod.to_fixed), &numberCall),
+    numberEntry("toExponential", 1, @intFromEnum(PrototypeMethod.to_exponential), &numberCall),
+    numberEntry("toPrecision", 1, @intFromEnum(PrototypeMethod.to_precision), &numberCall),
 };
 
-fn numberEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&numberCall),
-    };
-}
+const numberEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the `.number` domain: realm parse/predicate
 /// and prototype methods take the VM-coercing exec ops, the bare-runtime

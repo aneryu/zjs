@@ -665,9 +665,9 @@ pub fn constructBuiltin(
         .string, .date => {
             const native_ref = core.function.decodeNativeBuiltinId(constructor.nativeFunctionId()) orelse return error.InvalidBuiltinRegistry;
             return if (kind == .string)
-                try call_runtime.constructStringBuiltinNativeVm(ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame)
+                try call_runtime.constructNativeInScope(call_runtime.constructStringBuiltinNativeInScope, ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame)
             else
-                try call_runtime.constructDateBuiltinNativeVm(ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame);
+                try call_runtime.constructNativeInScope(call_runtime.constructDateBuiltinNativeInScope, ctx, output, global, constructor, native_ref, new_target, args, caller_function, caller_frame);
         },
         .object,
         .array,

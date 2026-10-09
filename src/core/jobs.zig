@@ -923,19 +923,15 @@ test "typed job reservations preserve capacity without claiming a FIFO position"
     try std.testing.expect(rt.job_queue.takeFirst() == null);
 }
 
-// D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
-// state must not silently regress. The current pins are the `pins` tuple
-// below; the D1a before-values it replaced are history, not live numbers.
 comptime {
     std.debug.assert(@sizeOf(core.JSValue) == 8);
-    const pins = .{ 80, 56, 8, 24, 56, 48, 32 };
-    if (@sizeOf(Job) != pins[0]) @compileError("Job size drifted from the D1a pin");
-    if (@sizeOf(GenericPayload) != pins[1]) @compileError("GenericPayload size drifted from the D1a pin");
-    if (@sizeOf(PromisePayload) != pins[2]) @compileError("PromisePayload size drifted from the D1a pin");
-    if (@sizeOf(PromiseReactionPayload) != pins[3]) @compileError("PromiseReactionPayload size drifted from the D1a pin");
-    if (@sizeOf(PromiseThenablePayload) != pins[4]) @compileError("PromiseThenablePayload size drifted from the D1a pin");
-    if (@sizeOf(DynamicImportPayload) != pins[5]) @compileError("DynamicImportPayload size drifted from the D1a pin");
-    if (@sizeOf(FinalizationPayload) != pins[6]) @compileError("FinalizationPayload size drifted from the D1a pin");
+    std.debug.assert(@sizeOf(Job) == 80);
+    std.debug.assert(@sizeOf(GenericPayload) == 56);
+    std.debug.assert(@sizeOf(PromisePayload) == 8);
+    std.debug.assert(@sizeOf(PromiseReactionPayload) == 24);
+    std.debug.assert(@sizeOf(PromiseThenablePayload) == 56);
+    std.debug.assert(@sizeOf(DynamicImportPayload) == 48);
+    std.debug.assert(@sizeOf(FinalizationPayload) == 32);
 }
 
 /// The value is borrowed and precisely rooted throughout the notification.

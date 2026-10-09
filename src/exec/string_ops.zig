@@ -68,7 +68,6 @@ const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = value_ops.toLengthIndex;
 const toLengthNumber = value_ops.toLengthNumber;
-const toNumberLikeArgument = builtin_glue.toNumberLikeArgument;
 const toPrimitiveForNumber = value_ops.toPrimitiveForNumber;
 const toUint16CodeUnit = value_ops.toUint16CodeUnit;
 const toUint32Number = value_ops.toUint32Number;
@@ -3948,7 +3947,7 @@ fn stringNumericArgsMethodRooted(
         else if (arg.isNumber())
             arg
         else
-            try builtin_glue.toNumberLikeArgument(ctx, output, try expectObject(try global_root.get(rt)), arg);
+            try value_ops.toNumberRejectingBigInt(ctx, output, try expectObject(try global_root.get(rt)), arg);
     }
     const string_value = try source.get(rt);
     if (method_id == 1) {
@@ -4601,7 +4600,7 @@ inline fn stringCharCodeAtDirectHost(
     else if (stringPrimitiveInt32Sat(values[2])) |index|
         index
     else blk: {
-        const numeric = builtin_glue.toNumberLikeArgument(ctx, output, global, values[2]) catch |err| return @as(HostError, @errorCast(err));
+        const numeric = value_ops.toNumberRejectingBigInt(ctx, output, global, values[2]) catch |err| return @as(HostError, @errorCast(err));
         break :blk stringPrimitiveInt32Sat(numeric) orelse return error.TypeError;
     };
     const string_value = values[3];

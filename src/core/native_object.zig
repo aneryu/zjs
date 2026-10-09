@@ -2,7 +2,7 @@
 //! `zjs.native.Class`. An instance is an ordinary object of a dynamic class id
 //! whose payload arm word is the opaque embedder `self` (qjs `u.opaque`, Bun
 //! `m_ctx`); null means disposed. The per-runtime `NativeType` (class id,
-//! name, finalizer, owner) lives in the class record (`Record.native_type`),
+//! name, finalizer, owner) lives in the class record (`Record.def.native_type`),
 //! never in the object: the K2/K3 handlers only compare `class_id` and load
 //! `self` (`Object.nativeSelfAssumeClass`).
 //!
@@ -34,7 +34,7 @@ pub const NativeType = struct {
 
     pub fn fromRecord(rt: *const JSRuntime, class_id: class.ClassId) ?*const NativeType {
         const record = rt.classes.recordPtr(class_id) orelse return null;
-        const raw = record.native_type orelse return null;
+        const raw = record.def.native_type orelse return null;
         return @ptrCast(@alignCast(raw));
     }
 };

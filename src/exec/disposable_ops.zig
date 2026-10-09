@@ -17,6 +17,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const HostError = exception_ops.HostError;
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
+const value_ops = @import("value_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const PromiseCapabilityVm = promise_ops.PromiseCapabilityVm;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
@@ -142,7 +143,7 @@ fn disposableStackUse(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     if (value.is(.null_value) or value.is(.undefined_value)) return value;
     if (!value.is(.object)) return error.NotDisposable;
 
@@ -158,8 +159,8 @@ fn disposableStackAdopt(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
+    const on_dispose = value_ops.argOrUndefined(args, 1);
     if (!isCallableValue(on_dispose)) return error.NotAFunction;
     try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .sync, .direct);
     return value;
@@ -171,7 +172,7 @@ fn disposableStackDefer(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const on_dispose = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const on_dispose = value_ops.argOrUndefined(args, 0);
     if (!isCallableValue(on_dispose)) return error.NotAFunction;
     try stack.appendDisposableResource(rt, core.JSValue.undefinedValue(), on_dispose, .defer_, .sync, .direct);
     return core.JSValue.undefinedValue();
@@ -354,7 +355,7 @@ fn asyncDisposableStackUse(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     if (value.is(.null_value) or value.is(.undefined_value)) {
         try stack.appendDisposableResource(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .use, .async, .direct);
         return value;
@@ -380,8 +381,8 @@ fn asyncDisposableStackAdopt(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
+    const on_dispose = value_ops.argOrUndefined(args, 1);
     if (!isCallableValue(on_dispose)) return error.NotAFunction;
     try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .async, .direct);
     return value;
@@ -393,7 +394,7 @@ fn asyncDisposableStackDefer(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.DisposableStackDisposed;
-    const on_dispose = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const on_dispose = value_ops.argOrUndefined(args, 0);
     if (!isCallableValue(on_dispose)) return error.NotAFunction;
     try stack.appendDisposableResource(rt, core.JSValue.undefinedValue(), on_dispose, .defer_, .async, .direct);
     return core.JSValue.undefinedValue();

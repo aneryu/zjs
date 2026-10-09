@@ -12,6 +12,7 @@ const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
 const property_ops = @import("property_ops.zig");
+const value_ops = @import("value_ops.zig");
 
 const HostError = exception_ops.HostError;
 
@@ -110,9 +111,9 @@ fn reflectSetCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const set_value = value_ops.argOrUndefined(args, 2);
     const object = try property_ops.expectObject(args[0]);
-    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const key_value = value_ops.argOrUndefined(args, 1);
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     const receiver_value = if (args.len >= 4) args[3] else args[0];
     return core.JSValue.boolean(try setWithReceiver(ctx, output, global, object, receiver_value, atom_id, set_value, caller_function, caller_frame));
@@ -221,8 +222,8 @@ fn reflectHasCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // A missing target is not an Object; a missing key is ToPropertyKey(undefined).
-    const object = object_ops.objectFromValue(if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) orelse return error.NotAnObject;
-    const key = try object_ops.toPropertyKeyAtom(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), caller_function, caller_frame);
+    const object = object_ops.objectFromValue(value_ops.argOrUndefined(args, 0)) orelse return error.NotAnObject;
+    const key = try object_ops.toPropertyKeyAtom(ctx, output, global, value_ops.argOrUndefined(args, 1), caller_function, caller_frame);
     const found = if (object.proxyTarget() != null)
         try object_ops.hasValueProperty(ctx, output, global, object, key, caller_function, caller_frame)
     else
@@ -277,8 +278,8 @@ fn reflectGetCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // A missing target is not an Object; a missing key is ToPropertyKey(undefined).
-    const object = object_ops.objectFromValue(if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) orelse return error.NotAnObject;
-    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), caller_function, caller_frame);
+    const object = object_ops.objectFromValue(value_ops.argOrUndefined(args, 0)) orelse return error.NotAnObject;
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, value_ops.argOrUndefined(args, 1), caller_function, caller_frame);
     const receiver = if (args.len >= 3) args[2] else args[0];
     return try object_ops.getValuePropertyWithReceiver(ctx, output, global, args[0], object, receiver, atom_id, caller_function, caller_frame);
 }
@@ -289,7 +290,7 @@ fn reflectOwnKeysCall(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const object = try property_ops.expectObject(if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+    const object = try property_ops.expectObject(value_ops.argOrUndefined(args, 0));
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
     // A Proxy ownKeys result lives only in this native list across the
@@ -318,23 +319,6 @@ fn reflectOwnKeysCall(
 // Registry ids and native call decoding. The reflective operations above and
 // the object model own proxy traps and revocable targets/revoke closures.
 // Call inputs are borrowed and returned values are owned.
-pub fn methodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "defineProperty")) return @intFromEnum(StaticMethod.define_property);
-    if (std.mem.eql(u8, name, "getOwnPropertyDescriptor")) return @intFromEnum(StaticMethod.get_own_property_descriptor);
-    if (std.mem.eql(u8, name, "deleteProperty")) return @intFromEnum(StaticMethod.delete_property);
-    if (std.mem.eql(u8, name, "get")) return @intFromEnum(StaticMethod.get);
-    if (std.mem.eql(u8, name, "getPrototypeOf")) return @intFromEnum(StaticMethod.get_prototype_of);
-    if (std.mem.eql(u8, name, "set")) return @intFromEnum(StaticMethod.set);
-    if (std.mem.eql(u8, name, "setPrototypeOf")) return @intFromEnum(StaticMethod.set_prototype_of);
-    if (std.mem.eql(u8, name, "isExtensible")) return @intFromEnum(StaticMethod.is_extensible);
-    if (std.mem.eql(u8, name, "preventExtensions")) return @intFromEnum(StaticMethod.prevent_extensions);
-    if (std.mem.eql(u8, name, "has")) return @intFromEnum(StaticMethod.has);
-    if (std.mem.eql(u8, name, "ownKeys")) return @intFromEnum(StaticMethod.own_keys);
-    if (std.mem.eql(u8, name, "construct")) return @intFromEnum(StaticMethod.construct);
-    if (std.mem.eql(u8, name, "apply")) return @intFromEnum(StaticMethod.apply);
-    return null;
-}
-
 /// Declaration + dispatch table for the `.reflect` native-builtin domain
 /// (the `Reflect.*` statics plus the `Proxy.revocable` constructor helper and
 /// its revoke closure). One shared record handler `reflectCall` switches on the
@@ -344,41 +328,31 @@ pub fn methodId(name: []const u8) ?u32 {
 /// dispatch, property lookups) are also reached from opcode handlers. `id`
 /// doubles as `magic`, so the record carries no extra selector.
 ///
-/// Standard-global bootstrap resolves names/lengths through its Reflect method
-/// list and `methodId`; `proxy_revocable` and the dynamically materialized
-/// `proxy_revoke` closure bind by native-builtin id and also dispatch through
-/// `reflectCall`.
+/// `standard_globals` installs the `Reflect.*` prefix of this list and skips
+/// `revocable` / `revoke`. Those two bind by native-builtin id and still
+/// dispatch through `reflectCall`.
 /// This array is consumed by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = reflectEntries: {
     const Entry = core.host_function.InternalEntry;
     break :reflectEntries [_]Entry{
-        reflectEntry("apply", 3, @intFromEnum(StaticMethod.apply)),
-        reflectEntry("construct", 2, @intFromEnum(StaticMethod.construct)),
-        reflectEntry("defineProperty", 3, @intFromEnum(StaticMethod.define_property)),
-        reflectEntry("deleteProperty", 2, @intFromEnum(StaticMethod.delete_property)),
-        reflectEntry("get", 2, @intFromEnum(StaticMethod.get)),
-        reflectEntry("getOwnPropertyDescriptor", 2, @intFromEnum(StaticMethod.get_own_property_descriptor)),
-        reflectEntry("getPrototypeOf", 1, @intFromEnum(StaticMethod.get_prototype_of)),
-        reflectEntry("has", 2, @intFromEnum(StaticMethod.has)),
-        reflectEntry("isExtensible", 1, @intFromEnum(StaticMethod.is_extensible)),
-        reflectEntry("ownKeys", 1, @intFromEnum(StaticMethod.own_keys)),
-        reflectEntry("preventExtensions", 1, @intFromEnum(StaticMethod.prevent_extensions)),
-        reflectEntry("set", 3, @intFromEnum(StaticMethod.set)),
-        reflectEntry("setPrototypeOf", 2, @intFromEnum(StaticMethod.set_prototype_of)),
-        reflectEntry("revocable", 2, @intFromEnum(StaticMethod.proxy_revocable)),
-        reflectEntry("revoke", 0, @intFromEnum(StaticMethod.proxy_revoke)),
+        reflectEntry("apply", 3, @intFromEnum(StaticMethod.apply), &reflectCall),
+        reflectEntry("construct", 2, @intFromEnum(StaticMethod.construct), &reflectCall),
+        reflectEntry("defineProperty", 3, @intFromEnum(StaticMethod.define_property), &reflectCall),
+        reflectEntry("deleteProperty", 2, @intFromEnum(StaticMethod.delete_property), &reflectCall),
+        reflectEntry("get", 2, @intFromEnum(StaticMethod.get), &reflectCall),
+        reflectEntry("getOwnPropertyDescriptor", 2, @intFromEnum(StaticMethod.get_own_property_descriptor), &reflectCall),
+        reflectEntry("getPrototypeOf", 1, @intFromEnum(StaticMethod.get_prototype_of), &reflectCall),
+        reflectEntry("has", 2, @intFromEnum(StaticMethod.has), &reflectCall),
+        reflectEntry("isExtensible", 1, @intFromEnum(StaticMethod.is_extensible), &reflectCall),
+        reflectEntry("ownKeys", 1, @intFromEnum(StaticMethod.own_keys), &reflectCall),
+        reflectEntry("preventExtensions", 1, @intFromEnum(StaticMethod.prevent_extensions), &reflectCall),
+        reflectEntry("set", 3, @intFromEnum(StaticMethod.set), &reflectCall),
+        reflectEntry("setPrototypeOf", 2, @intFromEnum(StaticMethod.set_prototype_of), &reflectCall),
+        reflectEntry("revocable", 2, @intFromEnum(StaticMethod.proxy_revocable), &reflectCall),
+        reflectEntry("revoke", 0, @intFromEnum(StaticMethod.proxy_revoke), &reflectCall),
     };
 };
-fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&reflectCall),
-    };
-}
+const reflectEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the `.reflect` domain: the `Proxy.revocable`
 /// helper and its revoke closure run their reflect ops above, while the 13

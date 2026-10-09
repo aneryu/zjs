@@ -84,23 +84,6 @@ fn checkU16Index(next_index: usize) error{BytecodeOverflow}!void {
     if (next_index > std.math.maxInt(u16)) return error.BytecodeOverflow;
 }
 
-fn freeGrowableNamedSlice(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    slice: *[]T,
-    capacity: *usize,
-) void {
-    const items = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = &.{};
-    capacity.* = 0;
-    if (old_capacity != 0) {
-        allocator.free(items.ptr[0..old_capacity]);
-    } else if (items.len != 0) {
-        allocator.free(items);
-    }
-}
-
 /// Mirrors `JSFunctionDef`.
 pub const FunctionDefImpl = struct {
     /// Ordinary buffers. Same account as `artifacts`, probed on alloc.
@@ -1100,7 +1083,7 @@ pub const FunctionDefImpl = struct {
             self.allocator.destroy(v2b);
         }
 
-        freeGrowableNamedSlice(VarDef, self.allocator, &self.vars, &self.vars_capacity);
+        freeGrowableSlice(VarDef, self.allocator, &self.vars, &self.vars_capacity);
         self.function_var_index.deinit(self.artifacts);
         self.closure_row_index.deinit(self.artifacts);
         self.closure_row_next.deinit(self.artifacts);
@@ -1112,11 +1095,11 @@ pub const FunctionDefImpl = struct {
         self.closure_dynamic_env_rows.deinit(self.artifacts);
         self.function_var_indexed_len = 0;
 
-        freeGrowableNamedSlice(VarDef, self.allocator, &self.args, &self.args_capacity);
+        freeGrowableSlice(VarDef, self.allocator, &self.args, &self.args_capacity);
 
         freeGrowableSlice(VarScope, self.allocator, &self.scopes, &self.scopes_capacity);
 
-        freeGrowableNamedSlice(GlobalVar, self.allocator, &self.global_vars, &self.global_vars_capacity);
+        freeGrowableSlice(GlobalVar, self.allocator, &self.global_vars, &self.global_vars_capacity);
 
         const old_cpool = self.cpool;
         const old_cpool_capacity = self.cpool_capacity;
@@ -1130,7 +1113,7 @@ pub const FunctionDefImpl = struct {
         }
         if (old_cpool_capacity != 0) self.allocator.free(old_cpool.ptr[0..old_cpool_capacity]);
 
-        freeGrowableNamedSlice(ClosureVar, self.allocator, &self.closure_var, &self.closure_var_capacity);
+        freeGrowableSlice(ClosureVar, self.allocator, &self.closure_var, &self.closure_var_capacity);
 
         if (self.source_text) |source| self.allocator.free(@constCast(source.ptr[0 .. source.len + 1]));
 

@@ -31,16 +31,16 @@ pub fn uint8ArrayCodecCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (std.mem.eql(u8, name, "fromHex")) {
-        var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        var bytes = try uint8ArrayStringBytes(ctx.runtime, value_ops.argOrUndefined(args, 0));
         defer bytes.deinit(ctx.runtime.nativeAllocator());
         var decoded = try decodeHexBytes(ctx.runtime, bytes.items, true);
         defer decoded.deinit(ctx.runtime.nativeAllocator());
         return try createUint8ArrayFromBytes(ctx.runtime, global, decoded.items);
     }
     if (std.mem.eql(u8, name, "fromBase64")) {
-        var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        var bytes = try uint8ArrayStringBytes(ctx.runtime, value_ops.argOrUndefined(args, 0));
         defer bytes.deinit(ctx.runtime.nativeAllocator());
-        const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        const options = value_ops.argOrUndefined(args, 1);
         // Mirrors js_uint8array_from_base64: GetOptionsObject
         // runs after the string check, before any option Get.
         try uint8ArrayCheckOptionsObject(options);
@@ -59,7 +59,7 @@ pub fn uint8ArrayCodecCall(
     }
     if (std.mem.eql(u8, name, "toBase64")) {
         const object = try expectUint8ArrayObject(this_value);
-        const options = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        const options = value_ops.argOrUndefined(args, 0);
         // Mirrors js_uint8array_to_base64: GetOptionsObject
         // runs after the receiver check, before any option Get.
         try uint8ArrayCheckOptionsObject(options);
@@ -72,7 +72,7 @@ pub fn uint8ArrayCodecCall(
     }
     if (std.mem.eql(u8, name, "setFromHex")) {
         const object = try expectUint8ArrayObject(this_value);
-        const source_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        const source_value = value_ops.argOrUndefined(args, 0);
         var source = try uint8ArrayStringBytes(ctx.runtime, source_value);
         defer source.deinit(ctx.runtime.nativeAllocator());
         const target = try uint8ArrayViewBytes(ctx, global, object);
@@ -81,9 +81,9 @@ pub fn uint8ArrayCodecCall(
     }
     if (std.mem.eql(u8, name, "setFromBase64")) {
         const object = try expectUint8ArrayObject(this_value);
-        var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        var source = try uint8ArrayStringBytes(ctx.runtime, value_ops.argOrUndefined(args, 0));
         defer source.deinit(ctx.runtime.nativeAllocator());
-        const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        const options = value_ops.argOrUndefined(args, 1);
         // Mirrors js_uint8array_set_from_base64:
         // GetOptionsObject runs after the receiver and string checks, before
         // any option Get.

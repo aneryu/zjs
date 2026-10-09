@@ -1880,10 +1880,20 @@ pub fn parseDestructuringElement(
     const allow_outer_initializer = options.allow_outer_initializer;
     s.features.insert(.destructuring);
     const topology = try scanPatternTopology(s);
+    // `({a}?: T = v)` is a parameter. The same `?` after a declaration,
+    // `for` binding, or `catch` pattern is a syntax error.
+    const parameter_pattern = switch (mode) {
+        .binding => |binding| binding.is_parameter,
+        .assignment => false,
+    };
+    const annotation_follows = switch (mode) {
+        .binding => topology.following == .colon or
+            (parameter_pattern and topology.following == .question),
+        .assignment => false,
+    };
     const has_initializer = allow_outer_initializer and
         (topology.following == .assign or
-            (mode == .binding and
-                (topology.following == .colon or topology.following == .question) and
+            (annotation_follows and
                 try typescript.tsPatternHasInitializerAfterAnnotation(s)));
     if (!has_value and !has_initializer)
         return s.failWithMessage(null, "destructuring declaration requires an initializer");
@@ -1911,8 +1921,10 @@ pub fn parseDestructuringElement(
         else => return Error.ParserInvariant,
     }
     if (mode == .binding) {
-        // TypeScript `{...}?: T` on a binding pattern.
-        if (s.peekKind() == .question) try s.advance();
+        if (s.peekKind() == .question) {
+            if (!parameter_pattern) return s.failWithMessage(null, "'?' is not allowed here");
+            try s.advance();
+        }
         try typescript.tsParseTypeAnnotationOpt(s);
     }
 

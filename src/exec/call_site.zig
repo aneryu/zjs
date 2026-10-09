@@ -383,9 +383,9 @@ inline fn callOnceIntoInternal(
         // resident Machine and must not be re-targeted while a call is live).
         if (inline_calls.resolveInlineFunction(global, callee)) |resolved| {
             const target = resolved.bind(this_value, callee);
-            if (machineMatches(active.machine, ctx, output, global)) {
+            if (call_runtime.machineMatches(active.machine, ctx, output, global)) {
                 const simple = inline_calls.Machine.nativeBoundarySimpleEligible(&target);
-                return runOnInvocation(null, false, active, simple, &target, ctx, global, &this_value, &callee, args, null, out);
+                return call_runtime.runOnInvocation(null, false, active, simple, &target, ctx, global, &this_value, &callee, args, null, out);
             }
         }
     } else if (hostEligible(ctx, global)) {
@@ -401,7 +401,7 @@ inline fn callOnceIntoInternal(
             // target, not out of this frame: the guard above proved
             // `target.callable == callee`, and pointing at the parameters
             // would spill both 16-byte values to the caller's frame.
-            return runOnInvocation(null, true, &host.invocation, route.simple, route.target, ctx, global, &route.target.this_value, &route.target.callable, args, route.lean, out);
+            return call_runtime.runOnInvocation(null, true, &host.invocation, route.simple, route.target, ctx, global, &route.target.this_value, &route.target.callable, args, route.lean, out);
         }
     }
     return callGeneric(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
@@ -436,17 +436,13 @@ inline fn enterBytecode(
         // A Machine other than the one the site was prepared under may still
         // run the callee: the route is Machine-independent, only the
         // execution authority (context, Realm global, output) has to agree.
-        if (active == route.invocation or machineMatches(active.machine, ctx, output, global)) {
-            return runOnInvocation(fixed_argc, false, active, route.simple, target, ctx, global, this_value, callee, args, lean, out);
+        if (active == route.invocation or call_runtime.machineMatches(active.machine, ctx, output, global)) {
+            return call_runtime.runOnInvocation(fixed_argc, false, active, route.simple, target, ctx, global, this_value, callee, args, lean, out);
         }
     } else if (route.host_eligible) {
         return runOnHostInvocation(fixed_argc, ctx, output, global, route, target, this_value, callee, args, lean, out);
     }
     return callGeneric(ctx, output, global, this_value.*, callee.*, args, caller_function, caller_frame, out);
-}
-
-inline fn machineMatches(machine: *const inline_calls.Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool {
-    return machine.ctx == ctx and machine.global == global and machine.output == output;
 }
 
 /// The JS_Call-shaped root path: a fresh execution root in the callee's
@@ -472,29 +468,9 @@ fn callGeneric(
         args,
         caller_function,
         caller_frame,
-        true,
+        .copy,
     );
     pinnedStore(out, value);
-}
-
-inline fn runOnInvocation(
-    comptime fixed_argc: ?usize,
-    comptime idle_machine: bool,
-    invocation: *inline_calls.ActiveInvocation,
-    simple: bool,
-    target: *const inline_calls.InlineTarget,
-    ctx: *core.JSContext,
-    global: *core.Object,
-    this_value: *const JSValue,
-    callee: *const JSValue,
-    args: []const JSValue,
-    lean: ?*inline_calls.LeanFrame,
-    out: *JSValue,
-) HostError!void {
-    if (simple) {
-        return call_runtime.runSyncInlineRouteCopiedArgs(fixed_argc, idle_machine, invocation, target, global, this_value, args, lean, out);
-    }
-    return call_runtime.runSyncInlineRouteOwnedCopy(idle_machine, invocation, target, ctx, global, this_value.*, callee.*, args, out);
 }
 
 /// Embedder -> JS with no invocation active: publish the runtime's resident
@@ -523,7 +499,7 @@ inline fn runOnHostInvocation(
     };
     host.publish(rt);
     defer host.unpublish(rt);
-    return runOnInvocation(fixed_argc, true, &host.invocation, route.simple, target, ctx, global, this_value, callee, args, lean, out);
+    return call_runtime.runOnInvocation(fixed_argc, true, &host.invocation, route.simple, target, ctx, global, this_value, callee, args, lean, out);
 }
 
 /// Cold arm of the site's host-invocation binding: the runtime's resident
@@ -561,8 +537,7 @@ inline fn resolveRoute(
         .host_eligible = false,
     };
     if (inline_calls.activeInvocation(ctx.runtime)) |active| {
-        const machine = active.machine;
-        if (machine.ctx == ctx and machine.global == global and machine.output == output) {
+        if (call_runtime.machineMatches(active.machine, ctx, output, global)) {
             route.invocation = active;
         }
     }

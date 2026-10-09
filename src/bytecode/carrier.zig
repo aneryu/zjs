@@ -13,7 +13,6 @@ const function_bytecode_mod = function_bytecode;
 const growable = @import("growable.zig");
 const growSliceBy = growable.growSliceBy;
 const freeGrowableSlice = growable.freeGrowableSlice;
-const freeGrowableAtomSlice = growable.freeGrowableAtomSlice;
 
 pub const Flags = packed struct(u16) {
     has_prototype: bool = false,
@@ -181,7 +180,7 @@ pub const BytecodeImpl = struct {
         self.name = atom.null_atom;
         self.filename = atom.null_atom;
         self.script_or_module = atom.null_atom;
-        freeGrowableAtomSlice(self.allocator, &self.atom_operands, &self.atom_operands_capacity);
+        freeGrowableSlice(atom.Atom, self.allocator, &self.atom_operands, &self.atom_operands_capacity);
         freeGrowableSlice(u8, self.allocator, &self.code, &self.code_capacity);
         freeGrowableSlice(pipeline_pc2line.SourceLocSlot, self.allocator, &self.source_loc_slots, &self.source_loc_capacity);
         const pc2line_buf = self.pc2line_buf;

@@ -74,6 +74,18 @@ pub const FrameSlab = struct {
         };
     }
 
+    /// Non-empty windows as optional slices. Empty windows stay null so the
+    /// frame allocator does not treat them as caller-provided storage.
+    pub fn windows(self: FrameSlab) FrameStorageWindows {
+        return .{
+            .args = if (self.args.len != 0) self.args else null,
+            .original_args = if (self.original_args.len != 0) self.original_args else null,
+            .locals = if (self.locals.len != 0) self.locals else null,
+            .var_refs = if (self.var_refs.len != 0) self.var_refs else null,
+            .open_var_refs = if (self.open_var_refs.len != 0) self.open_var_refs else null,
+        };
+    }
+
     /// Carve one slab from the VM stack arena; null when the layout overflows
     /// or the arena is exhausted (the caller then falls back to `allocHeap`).
     pub fn carve(rt: *JSRuntime, arena: *runtime.VmStackArena, layout: SlabLayout) ?FrameSlab {
@@ -104,6 +116,19 @@ pub const SlabLayout = struct {
 
     fn valueSlots(self: SlabLayout) usize {
         return self.args + self.original_args + self.locals + self.stack;
+    }
+
+    /// Standard entry layout: argument padding, the original-args snapshot,
+    /// locals, and var-ref windows. The operand stack is added by the caller
+    /// when the arena slab carries it.
+    pub fn forEntry(function: *const bytecode.FunctionBytecode, argc: usize, var_refs: []const *core.VarRef) SlabLayout {
+        return .{
+            .args = frameArgCount(function, argc),
+            .original_args = originalArgCount(argc, argumentsNeedsOriginalSnapshot(function)),
+            .locals = function.var_count,
+            .var_refs = frameVarRefStorageCount(function, var_refs),
+            .open_var_refs = frameOpenVarRefStorageCount(function),
+        };
     }
 
     /// Total JSValue slots the slab needs, with every step overflow-checked.
@@ -376,9 +401,11 @@ pub const Frame = struct {
             @memset(args, JSValue.undefinedValue());
             self.args = owned_args;
         }
-        if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], true, windows.original_args);
-        }
+        // The source slice is cleared above. Snapshot the moved slots, and pass
+        // the empty source when there is nothing to move so an unset `self.args`
+        // is not sliced.
+        const snapshot_args: []const JSValue = if (args.len == 0) args else self.args[0..args.len];
+        try self.initOriginalArgsSnapshot(account, snapshot_args, need_original_snapshot, windows.original_args);
     }
 
     /// Transfer already-owned argument slots into the frame without copying the
@@ -395,9 +422,7 @@ pub const Frame = struct {
     ) !void {
         self.actual_arg_count = @intCast(args.len);
         std.debug.assert(args.len >= @as(usize, @intCast(self.function.arg_count)));
-        if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, args, true, windows.original_args);
-        }
+        try self.initOriginalArgsSnapshot(account, args, need_original_snapshot, windows.original_args);
         self.args = args;
     }
 

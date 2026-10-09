@@ -92,8 +92,9 @@ pub fn execCall(
     // OP_call is never a constructor call. Legal super() is emitted as
     // call_constructor (or apply(1)); superclass identity alone cannot grant a
     // normal call permission to invoke a class constructor.
-    const result = callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
+    const result = callValueOrBytecodeDispatch(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame, .borrow) catch |err| {
         popOwnedStackRegion(stack, region_base);
+        // This close runs return() after the call window is popped. tryCatchInFrame scans again, sees the iterator slot already undefined, and does not call return() a second time.
         try iterator_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
@@ -234,7 +235,7 @@ pub fn callValueOrBytecodeRoot(
     // Switch protection to the owned snapshot before a callback can mutate
     // the caller's original argument window. Cleanup does not collect.
     root_slices[1] = .{ .borrowed = rooted_args };
-    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, rooted_args, caller_function, caller_frame, true);
+    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, rooted_args, caller_function, caller_frame, .copy);
 }
 
 /// Eagerly coerce the receiver of an async function start, whose `this` is
@@ -284,14 +285,17 @@ pub fn callNativeBuiltinRecordForVm(
     // builtins they do not live in internal_builtins.table. Dispatch them by id
     // here.
     if (native_ref.domain == .engine_helper) {
-        const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
-        return try call_mod.callEngineHelperRecord(view.realm, view.global, this_value, native_ref.id);
+        return try call_mod.callEngineHelperDomain(ctx, function_object, this_value, native_ref.id);
     }
     // Standard-native domains are table-dispatched. A null result now only
     // identifies an invalid or stale standard-native id for the caller to
     // classify.
     return null;
 }
+
+/// `.copy` is JS_CALL_FLAG_COPY_ARGV. `.borrow` is flags=0: the opcode window
+/// may be borrowed when the actual arity already covers the formals.
+pub const ArgvMode = enum { copy, borrow };
 
 /// Variant for callers whose `this_value`, `func`, and `args` are already
 /// rooted (e.g. borrowed directly from a frame-rooted operand stack).
@@ -307,23 +311,7 @@ pub fn callValueOrBytecodeRootPreRooted(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, true);
-}
-
-/// Bytecode-opcode call whose argument window is already rooted. Unlike the
-/// C-API/JS_Call-shaped helper above, OP_call and shadowed OP_eval pass
-/// flags=0 and may borrow argv when the actual arity already covers formals.
-pub fn callValueOrBytecodeRootPreRootedInternal(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    func: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
-    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
+    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, .copy);
 }
 
 /// VM fast-call fallback after the opcode path has already performed the
@@ -338,7 +326,7 @@ pub fn callValueOrBytecodeRootPreRootedAfterInterruptPoll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, .borrow);
 }
 
 /// Transactional owned staging for a synchronous native -> bytecode call.
@@ -356,15 +344,10 @@ const OwnedArgList = struct {
     root: array_ops.ValueSliceRoot = .{},
     heap_backed: bool = false,
 
-    fn init(
-        self: *OwnedArgList,
-        rt: *core.JSRuntime,
-        receiver: core.JSValue,
-        callable: core.JSValue,
-        args: []const core.JSValue,
-    ) HostError!void {
+    /// Allocate `total` slots and publish an empty rooted prefix. Callers
+    /// advance `rooted_prefix` only after the corresponding slots are written.
+    inline fn reserve(self: *OwnedArgList, rt: *core.JSRuntime, total: usize) HostError!void {
         std.debug.assert(self.rt == null);
-        const total = try std.math.add(usize, args.len, 2);
         self.rt = rt;
         self.values = if (total <= self.inline_values.len)
             self.inline_values[0..total]
@@ -374,6 +357,17 @@ const OwnedArgList = struct {
         };
         self.rooted_prefix = self.values[0..0];
         self.root.init(rt, &self.rooted_prefix);
+    }
+
+    fn init(
+        self: *OwnedArgList,
+        rt: *core.JSRuntime,
+        receiver: core.JSValue,
+        callable: core.JSValue,
+        args: []const core.JSValue,
+    ) HostError!void {
+        const total = try std.math.add(usize, args.len, 2);
+        try self.reserve(rt, total);
         errdefer self.deinit();
 
         self.values[0] = receiver;
@@ -393,17 +387,8 @@ const OwnedArgList = struct {
         callable: core.JSValue,
         args: []core.JSValue,
     ) HostError!void {
-        std.debug.assert(self.rt == null);
         const total = try std.math.add(usize, args.len, 2);
-        self.rt = rt;
-        self.values = if (total <= self.inline_values.len)
-            self.inline_values[0..total]
-        else blk: {
-            self.heap_backed = true;
-            break :blk try rt.nativeAllocator().alloc(core.JSValue, total);
-        };
-        self.rooted_prefix = self.values[0..0];
-        self.root.init(rt, &self.rooted_prefix);
+        try self.reserve(rt, total);
         errdefer self.deinit();
 
         self.values[0] = receiver;
@@ -436,6 +421,11 @@ const SyncInlineRoute = struct {
     target: inline_calls.InlineTarget,
 };
 
+/// Same execution authority: context, Realm global, and output.
+pub inline fn machineMatches(machine: *const inline_calls.Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool {
+    return machine.ctx == ctx and machine.global == global and machine.output == output;
+}
+
 inline fn resolveSyncInlineRoute(
     route: *SyncInlineRoute,
     ctx: *core.JSContext,
@@ -445,13 +435,7 @@ inline fn resolveSyncInlineRoute(
     func: core.JSValue,
 ) bool {
     const invocation = inline_calls.activeInvocation(ctx.runtime) orelse return false;
-    const machine = invocation.machine;
-    if (machine.ctx != ctx or
-        machine.global != global or
-        machine.output != output)
-    {
-        return false;
-    }
+    if (!machineMatches(invocation.machine, ctx, output, global)) return false;
     route.invocation = invocation;
     return inline_calls.resolveInlineTargetInto(
         &route.target,
@@ -608,6 +592,29 @@ noinline fn runSyncInlineRouteOwnedArgsGeneral(
     return runSyncInlineRouteMoved(false, invocation, target, global, owned_args.values, out);
 }
 
+/// Copied-args prologue when `simple`, otherwise the owned-copy prologue.
+/// `this_value` is the receiver cell the lean arm copies; the owned arm reads
+/// that cell and `callee`.
+pub inline fn runOnInvocation(
+    comptime fixed_argc: ?usize,
+    comptime idle_machine: bool,
+    invocation: *inline_calls.ActiveInvocation,
+    simple: bool,
+    target: *const inline_calls.InlineTarget,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: *const core.JSValue,
+    callee: *const core.JSValue,
+    args: []const core.JSValue,
+    lean: ?*inline_calls.LeanFrame,
+    out: *core.JSValue,
+) HostError!void {
+    if (simple) {
+        return runSyncInlineRouteCopiedArgs(fixed_argc, idle_machine, invocation, target, global, this_value, args, lean, out);
+    }
+    return runSyncInlineRouteOwnedCopy(idle_machine, invocation, target, ctx, global, this_value.*, callee.*, args, out);
+}
+
 /// Explicit synchronous internal call boundary for native algorithms that
 /// must receive a bytecode callback result before they can finish. Inputs must
 /// remain rooted for this call (native invocation arguments and algorithm
@@ -641,23 +648,22 @@ pub inline fn callValueOrBytecodeSyncInternal(
             args,
             caller_function,
             caller_frame,
-            true,
+            .copy,
         );
 
     var out: core.JSValue = undefined;
-    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-        try runSyncInlineRouteCopiedArgs(null, false, route.invocation, &route.target, global, &route.target.this_value, args, null, &out);
-        return out;
-    }
-    try runSyncInlineRouteOwnedCopy(
+    try runOnInvocation(
+        null,
         false,
         route.invocation,
+        inline_calls.Machine.nativeBoundarySimpleEligible(&route.target),
         &route.target,
         ctx,
         global,
-        this_value,
-        func,
+        &route.target.this_value,
+        &route.target.callable,
         args,
+        null,
         &out,
     );
     return out;
@@ -720,7 +726,7 @@ pub inline fn callOwnedArgsValueOrBytecodeSyncInternal(
             args,
             caller_function,
             caller_frame,
-            true,
+            .copy,
         );
     var out: core.JSValue = undefined;
     if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
@@ -810,7 +816,7 @@ noinline fn callRawFunctionBytecode(
     this_value: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     // The dispatcher already required the function_bytecode tag. A header
     // that does not decode is a zero payload, not a user type mismatch.
@@ -827,7 +833,7 @@ noinline fn callRawFunctionBytecode(
         &.{},
         output,
         global,
-        .{ .copy_argv = copy_argv },
+        .{ .copy_argv = argv == .copy },
     );
 }
 
@@ -839,7 +845,7 @@ noinline fn callFunctionObjectBytecode(
     func: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     // The dispatcher already selected a bytecode function class.
     const function_value = function_object.functionBytecode() orelse return error.InvalidBytecode;
@@ -858,7 +864,7 @@ noinline fn callFunctionObjectBytecode(
         function_object.functionCaptures(),
         output,
         global,
-        .{ .copy_argv = copy_argv },
+        .{ .copy_argv = argv == .copy },
     );
 }
 
@@ -924,7 +930,7 @@ noinline fn callNativeCallableObject(
     };
 }
 
-fn callValueOrBytecodeDispatch(
+pub fn callValueOrBytecodeDispatch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -933,10 +939,10 @@ fn callValueOrBytecodeDispatch(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     try exception_ops.pollInterrupt(ctx, global);
-    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, copy_argv);
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, argv);
 }
 
 pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
@@ -948,11 +954,11 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     ctx.runtime.assertExecutionAllowed();
     if (func.is(.function_bytecode)) {
-        return callRawFunctionBytecode(ctx, output, global, this_value, func, args, copy_argv);
+        return callRawFunctionBytecode(ctx, output, global, this_value, func, args, argv);
     }
     if (object_ops.objectFromValue(func)) |object| {
         switch (object.class_id) {
@@ -961,7 +967,7 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
             core.class.ids.async_function,
             core.class.ids.async_generator_function,
             => {
-                return callFunctionObjectBytecode(ctx, output, global, this_value, func, object, args, copy_argv);
+                return callFunctionObjectBytecode(ctx, output, global, this_value, func, object, args, argv);
             },
             core.class.ids.proxy => {
                 if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
@@ -1339,24 +1345,8 @@ pub fn constructArrayNativeRecordVm(
     }) orelse error.TypeError;
 }
 
-/// Route VM-coerced construct args + resolved prototype through the builtin
-/// record table. Returns null only when the id is somehow not construct-capable
-/// (never for the ids passed here), so callers can keep a defensive fallback.
-fn constructBuiltinNativeRecordVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    function_object: ?*core.Object,
-    native_ref: core.function.NativeBuiltinRef,
-    prototype: ?*core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!?core.JSValue {
-    return builtin_dispatch.callConstructRecord(ctx, output, global, function_object, native_ref, prototype, args, caller_function, caller_frame);
-}
-
-pub fn constructStringBuiltinNativeVm(
+pub inline fn constructNativeInScope(
+    comptime body: anytype,
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1371,14 +1361,13 @@ pub fn constructStringBuiltinNativeVm(
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
     native_scope.push();
     defer native_scope.deinit();
-
-    return constructStringBuiltinNativeInScope(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame) catch |err| {
+    return body(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame) catch |err| {
         try builtin_dispatch.materializeRuntimeError(ctx, global, err);
         return err;
     };
 }
 
-fn constructStringBuiltinNativeInScope(
+pub fn constructStringBuiltinNativeInScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1401,29 +1390,7 @@ fn constructStringBuiltinNativeInScope(
     return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, function_object, native_ref, prototype, &.{string_value}, caller_function, caller_frame);
 }
 
-pub fn constructDateBuiltinNativeVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    function_object: *core.Object,
-    native_ref: core.function.NativeBuiltinRef,
-    new_target: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!?core.JSValue {
-    try builtin_dispatch.preflightInternalRecordCFunction(ctx, global, function_object, native_ref);
-    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
-    native_scope.push();
-    defer native_scope.deinit();
-
-    return constructDateBuiltinNativeInScope(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame) catch |err| {
-        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
-        return err;
-    };
-}
-
-fn constructDateBuiltinNativeInScope(
+pub fn constructDateBuiltinNativeInScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1469,7 +1436,7 @@ fn constructDateBuiltinNativeInScope(
     } else if (args.len >= 2) {
         var coerced_len: usize = 0;
         while (coerced_len < args.len and coerced_len < coerced_storage.len) : (coerced_len += 1) {
-            coerced_storage[coerced_len] = try value_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len]);
+            coerced_storage[coerced_len] = try value_ops.toNumberRejectingBigInt(ctx, output, global, args[coerced_len]);
             coerced = coerced_storage[0 .. coerced_len + 1];
         }
         date_args = coerced;
@@ -1503,7 +1470,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         caller_function,
         caller_frame,
         new_target,
-        true,
+        .copy,
     );
 }
 
@@ -1529,7 +1496,7 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
         caller_function,
         caller_frame,
         new_target,
-        false,
+        .borrow,
     );
 }
 
@@ -1629,42 +1596,64 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    const instance = instance: {
-        if (target.new_target_is_func) {
-            // Direct route: resolution proved new_target == func, so skip
-            // createBytecodeConstructorInstance's per-call sameValue re-check
-            // and take the materialized-`.prototype` data read (the first
-            // construct materializes the lazy auto_init slot; see
-            // createBytecodeConstructorInstance). A prototype miss — e.g.
-            // `F.prototype = 42` — keeps the authoritative
-            // createConstructorInstance fallback, mirroring qjs
-            // js_create_from_ctor's non-object-prototype arm.
-            if (ownConstructorPrototypeData(target.function_object) orelse
-                try target.function_object.getOwnConstructorPrototypeObject(ctx.runtime)) |prototype|
-            {
-                break :instance try createProfiledConstructorInstance(ctx.runtime, prototype, target.resolved.fb);
-            }
-            break :instance try createConstructorInstance(
-                ctx,
-                output,
-                global,
-                new_target,
-                caller_function,
-                caller_frame,
-            );
+    if (target.new_target_is_func) {
+        // Direct route: resolution proved new_target == func, so skip
+        // createBytecodeConstructorInstance's per-call sameValue re-check
+        // and take the materialized-`.prototype` data read (the first
+        // construct materializes the lazy auto_init slot; see
+        // createBytecodeConstructorInstance). A prototype miss — e.g.
+        // `F.prototype = 42` — keeps the authoritative
+        // createConstructorInstance fallback, mirroring qjs
+        // js_create_from_ctor's non-object-prototype arm.
+        if (ownConstructorPrototypeData(target.function_object) orelse
+            try target.function_object.getOwnConstructorPrototypeObject(ctx.runtime)) |prototype|
+        {
+            return try createProfiledConstructorInstance(ctx.runtime, prototype, target.resolved.fb);
         }
-        break :instance try createBytecodeConstructorInstance(
+        return try createConstructorInstance(
             ctx,
             output,
             global,
-            func,
-            target.function_object,
             new_target,
             caller_function,
             caller_frame,
         );
-    };
+    }
+    return try createBytecodeConstructorInstance(
+        ctx,
+        output,
+        global,
+        func,
+        target.function_object,
+        new_target,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// Object result replaces the allocated instance; a non-object result returns it.
+inline fn constructorResult(result: core.JSValue, instance: core.JSValue) core.JSValue {
+    if (result.is(.object)) return result;
     return instance;
+}
+
+/// Run a bytecode constructor body and apply `constructorResult`.
+/// `noteConstructorAllocation` stays with the function-object caller: the raw
+/// function-bytecode arm and host constructors do not record that allocation.
+inline fn constructBytecodeBody(
+    ctx: *core.JSContext,
+    func: core.JSValue,
+    current_function_value: core.JSValue,
+    instance: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const *core.VarRef,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    new_target_value: core.JSValue,
+    argv: ArgvMode,
+) HostError!core.JSValue {
+    const result = try callFunctionBytecodeConstruct(ctx, func, current_function_value, instance, args, var_refs, output, global, new_target_value, argv);
+    return constructorResult(result, instance);
 }
 
 /// Construct an ordinary (non-native) bytecode function object. qjs
@@ -1686,19 +1675,15 @@ fn constructOrdinaryBytecodeFunctionObject(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (fb.isDerivedClassConstructor()) {
-        return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
+        return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, argv);
     }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     defer noteConstructorAllocation(fb, instance);
-    const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
-    if (result.is(.object)) {
-        return result;
-    }
-    return instance;
+    return constructBytecodeBody(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, argv);
 }
 
 fn constructValueOrBytecodeWithNewTargetMode(
@@ -1710,14 +1695,14 @@ fn constructValueOrBytecodeWithNewTargetMode(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     // QuickJS JS_CallConstructorInternal polls before proxy/bound dispatch and
     // before testing constructibility. Recursive proxy/bound forwarding enters
     // this wrapper again, so every semantic constructor entry charges the
     // caller Realm exactly once.
     try exception_ops.pollInterrupt(ctx, global);
-    return constructValueOrBytecodeWithNewTargetAfterInterruptPoll(ctx, output, global, func, args, caller_function, caller_frame, new_target, copy_argv);
+    return constructValueOrBytecodeWithNewTargetAfterInterruptPoll(ctx, output, global, func, args, caller_function, caller_frame, new_target, argv);
 }
 
 fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
@@ -1729,7 +1714,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     if (object_ops.callableObjectFromValue(func)) |function_object| {
         if (function_object.class_id == core.class.ids.c_function and isConstructorLike(func)) {
@@ -1739,13 +1724,13 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             // Argument expressions have already been evaluated by the caller.
             // Bound functions and proxies forward before selecting this view.
             const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
-            return constructValueOrBytecodeInEnvironment(view.realm, output, view.global, func, args, caller_function, caller_frame, new_target, copy_argv) catch |err| {
+            return constructValueOrBytecodeInEnvironment(view.realm, output, view.global, func, args, caller_function, caller_frame, new_target, argv) catch |err| {
                 try builtin_dispatch.materializeRuntimeError(view.realm, view.global, err);
                 return err;
             };
         }
     }
-    return constructValueOrBytecodeInEnvironment(ctx, output, global, func, args, caller_function, caller_frame, new_target, copy_argv);
+    return constructValueOrBytecodeInEnvironment(ctx, output, global, func, args, caller_function, caller_frame, new_target, argv);
 }
 
 fn constructValueOrBytecodeInEnvironment(
@@ -1757,7 +1742,7 @@ fn constructValueOrBytecodeInEnvironment(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) HostError!core.JSValue {
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null) {
@@ -1786,7 +1771,7 @@ fn constructValueOrBytecodeInEnvironment(
         if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
             if (native_ref.domain == .object and native_ref.id == object_construct_id and new_target.sameValue(func)) {
                 const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
-                return (try constructBuiltinNativeRecordVm(ctx, output, constructor_global, function_object, native_ref, null, args, caller_function, caller_frame)) orelse error.TypeError;
+                return (try builtin_dispatch.callConstructRecord(ctx, output, constructor_global, function_object, native_ref, null, args, caller_function, caller_frame)) orelse error.TypeError;
             }
         }
         if (try function_ops.constructBuiltin(ctx, output, global, function_object, function_object.nativeConstructorKind(), args, caller_function, caller_frame, new_target)) |constructed| {
@@ -1808,14 +1793,10 @@ fn constructValueOrBytecodeInEnvironment(
         // binds it. Only base/ordinary ctors get the eager js_create_from_ctor
         // instance.
         if (fb.isDerivedClassConstructor()) {
-            return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target, copy_argv);
+            return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target, argv);
         }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
-        const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, new_target, copy_argv);
-        if (result.is(.object)) {
-            return result;
-        }
-        return instance;
+        return constructBytecodeBody(ctx, func, func, instance, args, &.{}, output, global, new_target, argv);
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
         // Ordinary user bytecode constructor (`new Vec(x, y, z)`, classes):
@@ -1825,7 +1806,7 @@ fn constructValueOrBytecodeInEnvironment(
         // functionBytecode() returns JSValue.functionBytecode of a live header.
         const fb = functionBytecodeFromValue(function_value) orelse unreachable;
         if (!isConstructibleBytecodeFunctionObject(function_object, fb)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
-        return constructOrdinaryBytecodeFunctionObject(ctx, output, global, func, function_object, function_value, fb, args, caller_function, caller_frame, new_target, copy_argv);
+        return constructOrdinaryBytecodeFunctionObject(ctx, output, global, func, function_object, function_value, fb, args, caller_function, caller_frame, new_target, argv);
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.class_id == core.class.ids.object and object.proxyTarget() == null) {
@@ -1857,35 +1838,7 @@ fn constructExternalHostFunction(
         const target = object_ops.objectFromValue(new_target) orelse return error.TypeError;
         break :blk try builtin_dispatch.constructInternalRecordDirect(ctx, output, global, function_object, instance, entry, args, caller_function, caller_frame, target);
     } else try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, instance, entry, args, caller_function, caller_frame);
-    if (result.is(.object)) {
-        return result;
-    }
-    return instance;
-}
-
-test "constructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-weak-ref-symbol");
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const symbol_value = try rt.symbolValue(symbol_atom);
-    const weak_ref_value = try object_ops.constructWeakRefWithPrototype(rt, symbol_value, null);
-    const weak_ref = object_ops.objectFromValue(weak_ref_value) orelse return error.TypeError;
-
-    {
-        const live = try weak_ref.weakRefDeref(rt);
-        try std.testing.expect(live.same(symbol_value));
-    }
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.microtasks.clearKeptObjects(rt.nativeAllocator());
-
-    _ = try rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-    try std.testing.expect((try weak_ref.weakRefDeref(rt)).is(.undefined_value));
+    return constructorResult(result, instance);
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
@@ -2704,7 +2657,7 @@ pub fn callFunctionBytecodeConstruct(
     output: ?*std.Io.Writer,
     global: *core.Object,
     new_target_value: core.JSValue,
-    copy_argv: bool,
+    argv: ArgvMode,
 ) !core.JSValue {
     // A bytecode constructor takes the JS_CallConstructorInternal poll above
     // and then a second JS_CallInternal poll, both in the caller Realm. Only
@@ -2720,7 +2673,7 @@ pub fn callFunctionBytecodeConstruct(
         var_refs,
         output,
         interrupt_global,
-        .{ .new_target_value = new_target_value, .copy_argv = copy_argv },
+        .{ .new_target_value = new_target_value, .copy_argv = argv == .copy },
     ) catch |err| {
         if (err == error.DerivedThisUninitialized) {
             // `global` is already the final bytecode callee's realm, while
@@ -2734,6 +2687,17 @@ pub fn callFunctionBytecodeConstruct(
     };
 }
 
+/// Tail of an ordinary bytecode call: defer generators, no resume, undefined new.target.
+/// Passed by value. Defaults are the direct-call path.
+pub const BytecodeCallMode = struct {
+    defer_generators: bool = true,
+    generator_state: ?*core.Object = null,
+    resume_value: ?core.JSValue = null,
+    new_target_value: core.JSValue = core.JSValue.undefinedValue(),
+    copy_argv: bool = false,
+    call_depth_precharged: bool = false,
+};
+
 pub fn callFunctionBytecodeModeState(
     ctx: *core.JSContext,
     func: core.JSValue,
@@ -2743,38 +2707,20 @@ pub fn callFunctionBytecodeModeState(
     var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    defer_generators: bool,
-    generator_state: ?*core.Object,
-    resume_value: ?core.JSValue,
-    new_target_value: core.JSValue,
+    mode: BytecodeCallMode,
 ) HostError!core.JSValue {
     const caller_global = ctx.global orelse global;
-    if (generator_state != null) {
-        // QuickJS async_func_resume checks native SP with alloca_size=0
-        // before entering the inner JS_CallInternal interrupt poll.
-        const call_depth_guard = try vm_opcodes.enterCallDepth(ctx, caller_global, 0);
-        defer call_depth_guard.deinit();
+    var effective = mode;
+    // QuickJS async_func_resume checks native SP with alloca_size=0
+    // before entering the inner JS_CallInternal interrupt poll.
+    const resident_guard = if (effective.generator_state != null)
+        try zjs_vm.preflightResidentEntry(ctx, caller_global, false)
+    else blk: {
         try exception_ops.pollInterrupt(ctx, caller_global);
-        return callFunctionBytecodeModeStateAfterInterruptPoll(
-            ctx,
-            func,
-            current_function_value,
-            this_value,
-            args,
-            var_refs,
-            output,
-            caller_global,
-            .{
-                .defer_generators = defer_generators,
-                .generator_state = generator_state,
-                .resume_value = resume_value,
-                .new_target_value = new_target_value,
-                .call_depth_precharged = true,
-            },
-        );
-    }
-
-    try exception_ops.pollInterrupt(ctx, caller_global);
+        break :blk null;
+    };
+    defer if (resident_guard) |guard| guard.deinit();
+    if (effective.generator_state != null) effective.call_depth_precharged = true;
     return callFunctionBytecodeModeStateAfterInterruptPoll(
         ctx,
         func,
@@ -2784,25 +2730,9 @@ pub fn callFunctionBytecodeModeState(
         var_refs,
         output,
         caller_global,
-        .{
-            .defer_generators = defer_generators,
-            .generator_state = generator_state,
-            .resume_value = resume_value,
-            .new_target_value = new_target_value,
-        },
+        effective,
     );
 }
-
-/// Tail of an ordinary bytecode call: defer generators, no resume, undefined new.target.
-/// Passed by value. Defaults are the direct-call path.
-const BytecodeCallMode = struct {
-    defer_generators: bool = true,
-    generator_state: ?*core.Object = null,
-    resume_value: ?core.JSValue = null,
-    new_target_value: core.JSValue = core.JSValue.undefinedValue(),
-    copy_argv: bool = false,
-    call_depth_precharged: bool = false,
-};
 
 fn callFunctionBytecodeModeStateAfterInterruptPoll(
     ctx: *core.JSContext,
@@ -2827,14 +2757,12 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
         0
     else
         vm_opcodes.bytecodeFrameAllocaSize(fb, args.len, mode.copy_argv);
-    var call_depth_guard: ?vm_opcodes.CallDepthGuard = null;
-    if (!mode.call_depth_precharged and !deferred_heap_entry) {
-        call_depth_guard = try vm_opcodes.enterCallDepth(
-            ctx,
-            global,
-            planned_stack_bytes,
-        );
-    }
+    const call_depth_guard = try zjs_vm.enterCallDepthUnlessPrecharged(
+        ctx,
+        global,
+        planned_stack_bytes,
+        mode.call_depth_precharged or deferred_heap_entry,
+    );
     defer if (call_depth_guard) |guard| guard.deinit();
 
     const function_ctx = fb.realmContext() orelse return error.InvalidBuiltinRegistry;
@@ -2967,16 +2895,12 @@ pub fn runGeneratorParameterInit(
     if (fb.functionKind() == .async) {
         return runWithCallEnvAfterInterruptPoll(env);
     }
-    var call_depth_guard: ?vm_opcodes.CallDepthGuard = null;
-    if (!call_depth_precharged) {
-        call_depth_guard = try vm_opcodes.enterCallDepth(
-            call_entry_ctx,
-            call_entry_global,
-            0,
-        );
-    }
+    const call_depth_guard = try zjs_vm.preflightResidentEntry(
+        call_entry_ctx,
+        call_entry_global,
+        call_depth_precharged,
+    );
     defer if (call_depth_guard) |guard| guard.deinit();
-    try exception_ops.pollInterrupt(call_entry_ctx, call_entry_global);
     return runWithCallEnvAfterInterruptPoll(env);
 }
 
@@ -3016,10 +2940,11 @@ fn resumeSyncGeneratorFrame(
         execution.suspended.storage.frame.var_refs,
         output,
         generator_global,
-        false,
-        object,
-        resume_value,
-        core.JSValue.undefinedValue(),
+        .{
+            .defer_generators = false,
+            .generator_state = object,
+            .resume_value = resume_value,
+        },
     ) catch |err| {
         object.completeGeneratorExecution(ctx.runtime);
         return err;

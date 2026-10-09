@@ -248,20 +248,20 @@ pub const Lexer = struct {
         return self.lexTemplateBody(out, .middle_or_tail, false);
     }
 
-    /// Re-lex the most recently emitted `/`/`/=` punctuator as a regex
-    /// literal. Mirrors the QuickJS pattern of letting the parser ask
-    /// for a regexp once it knows it's in a regexp-allowed context
-    /// (`js_parse_regexp`, `quickjs.c`). The caller passes the
-    /// `mark_pos` recorded before the slash so we restart from there.
-    pub fn rescanRegexp(self: *Lexer, slash_offset: usize) Error!t.Token {
+    /// Re-lex the most recently emitted `/` or `/=` as a regexp literal.
+    /// `mark_pos` is that slash; `mark_line` and `mark_col` were recorded
+    /// with it.
+    pub fn rescanRegexp(self: *Lexer) Error!t.Token {
         var result: t.Token = undefined;
-        try self.rescanRegexpInto(&result, slash_offset);
+        try self.rescanLastSlashAsRegexpInto(&result);
         return result;
     }
 
-    pub fn rescanRegexpInto(self: *Lexer, out: *t.Token, slash_offset: usize) Error!void {
-        // Reset position back to the slash. The caller is responsible
-        // for having recorded `mark_line`/`mark_col` before the slash.
+    pub fn rescanLastSlashAsRegexpInto(self: *Lexer, out: *t.Token) Error!void {
+        const slash_offset = self.mark_pos;
+        std.debug.assert(slash_offset < self.source.len and self.source[slash_offset] == '/');
+        const next_byte = if (slash_offset + 1 < self.source.len) self.source[slash_offset + 1] else 0;
+        std.debug.assert(next_byte == '=' or (next_byte != '/' and next_byte != '*'));
         self.pos = slash_offset;
         self.line = self.mark_line;
         self.col = self.mark_col;
@@ -413,7 +413,7 @@ pub const Lexer = struct {
         while (self.pos < self.source.len) {
             const c = self.peek();
             if (c == '\n' or c == '\r') return;
-            if (isUtf8LineSeparator(self)) return;
+            if (nonAsciiLineTerminator(self.source[self.pos..]) != null) return;
             self.bump();
         }
     }
@@ -430,11 +430,6 @@ pub const Lexer = struct {
         return space.line_terminator;
     }
 
-    fn isUtf8LineSeparator(self: *Lexer) bool {
-        return self.remaining() >= 3 and self.peek() == 0xE2 and self.peekAt(1) == 0x80 and
-            (self.peekAt(2) == 0xA8 or self.peekAt(2) == 0xA9);
-    }
-
     fn skipBlockComment(self: *Lexer) Error!bool {
         self.bump(); // /
         self.bump(); // *
@@ -445,9 +440,9 @@ pub const Lexer = struct {
                 self.bump();
                 return saw_newline;
             }
-            if (self.isUtf8LineSeparator()) {
+            if (nonAsciiLineTerminator(self.source[self.pos..])) |len| {
                 saw_newline = true;
-                self.pos += 3;
+                self.pos += len;
                 self.line += 1;
                 self.col = 1;
                 continue;
@@ -504,7 +499,7 @@ pub const Lexer = struct {
                 self.bump();
                 continue;
             }
-            if (isNonAsciiTriviaStart(self)) break;
+            if (nonAsciiWhiteSpace(self.source[self.pos..]) != null) break;
             if (c >= 0x80) {
                 try self.consumeIdentCodePoint(&decoded, false);
                 continue;
@@ -557,20 +552,6 @@ pub const Lexer = struct {
         self.emitInto(out, .ident, .{ .ident = .{ .atom = a, .has_escape = has_escape } });
     }
 
-    fn isNonAsciiTriviaStart(self: *Lexer) bool {
-        const c = self.peek();
-        if (c == 0xC2 and self.remaining() >= 2 and self.source[self.pos + 1] == 0xA0) return true;
-        if (c == 0xE2 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x80) {
-            const b3 = self.source[self.pos + 2];
-            return (b3 >= 0x80 and b3 <= 0x8A) or b3 == 0xA8 or b3 == 0xA9 or b3 == 0xAF;
-        }
-        if (c == 0xE1 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x9A and self.source[self.pos + 2] == 0x80) return true;
-        if (c == 0xE2 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x81 and self.source[self.pos + 2] == 0x9F) return true;
-        if (c == 0xE3 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x80 and self.source[self.pos + 2] == 0x80) return true;
-        if (c == 0xEF and self.remaining() >= 3 and self.source[self.pos + 1] == 0xBB and self.source[self.pos + 2] == 0xBF) return true;
-        return false;
-    }
-
     fn consumeIdentCodePoint(self: *Lexer, out: *std.ArrayList(u8), is_start: bool) Error!void {
         const start = self.pos;
         const c0 = self.peek();
@@ -620,7 +601,7 @@ pub const Lexer = struct {
                 self.bump();
                 continue;
             }
-            if (isNonAsciiTriviaStart(self)) break;
+            if (nonAsciiWhiteSpace(self.source[self.pos..]) != null) break;
             if (c >= 0x80) {
                 try self.consumeIdentCodePoint(&decoded, false);
                 continue;
@@ -710,7 +691,7 @@ pub const Lexer = struct {
         // (e.g. `123abc` is a single error per spec, not two tokens).
         if (self.pos < self.source.len) {
             const nc = self.peek();
-            if (isAsciiIdentContinue(nc) or (nc >= 0x80 and !self.startsUtf8Trivia())) {
+            if (isAsciiIdentContinue(nc) or (nc >= 0x80 and nonAsciiWhiteSpace(self.source[self.pos..]) == null)) {
                 return error.InvalidNumber;
             }
         }
@@ -1094,7 +1075,7 @@ pub const Lexer = struct {
         while (self.pos < self.source.len) {
             const c = self.peek();
             if (c == '\n' or c == '\r') return error.UnterminatedRegExp;
-            if (self.startsUtf8LineTerminator()) return error.UnterminatedRegExp;
+            if (nonAsciiLineTerminator(self.source[self.pos..]) != null) return error.UnterminatedRegExp;
             if (escaped) {
                 escaped = false;
                 self.bump();
@@ -1124,7 +1105,7 @@ pub const Lexer = struct {
         const flags_start = self.pos;
         while (self.pos < self.source.len) {
             const c = self.peek();
-            if (isAsciiIdentContinue(c) or (c >= 0x80 and !self.startsUtf8Trivia())) {
+            if (isAsciiIdentContinue(c) or (c >= 0x80 and nonAsciiWhiteSpace(self.source[self.pos..]) == null)) {
                 self.bump();
             } else break;
         }
@@ -1407,29 +1388,6 @@ pub const Lexer = struct {
         self.col += 1;
         return cp;
     }
-
-    fn startsUtf8Trivia(self: *const Lexer) bool {
-        if (self.remaining() >= 2 and self.source[self.pos] == 0xC2 and self.source[self.pos + 1] == 0xA0) return true;
-        if (self.remaining() >= 3) {
-            const b1 = self.source[self.pos];
-            const b2 = self.source[self.pos + 1];
-            const b3 = self.source[self.pos + 2];
-            if (b1 == 0xE1 and b2 == 0x9A and b3 == 0x80) return true;
-            if (b1 == 0xE2 and b2 == 0x80 and ((b3 >= 0x80 and b3 <= 0x8A) or b3 == 0xAF)) return true;
-            if (b1 == 0xE2 and b2 == 0x81 and b3 == 0x9F) return true;
-            if (b1 == 0xE3 and b2 == 0x80 and b3 == 0x80) return true;
-            if (b1 == 0xEF and b2 == 0xBB and b3 == 0xBF) return true;
-        }
-        return self.startsUtf8LineTerminator();
-    }
-
-    fn startsUtf8LineTerminator(self: *const Lexer) bool {
-        if (self.remaining() >= 3 and self.source[self.pos] == 0xE2 and self.source[self.pos + 1] == 0x80) {
-            const b3 = self.source[self.pos + 2];
-            return b3 == 0xA8 or b3 == 0xA9;
-        }
-        return false;
-    }
 };
 
 fn isAsciiIdentStart(c: u8) bool {
@@ -1588,6 +1546,12 @@ fn parseNumberLiteral(lexeme: []const u8) ?f64 {
 }
 
 pub const NonAsciiWhiteSpace = struct { len: u8, line_terminator: bool };
+
+/// Byte length of a leading U+2028/U+2029, taken from `nonAsciiWhiteSpace`.
+fn nonAsciiLineTerminator(bytes: []const u8) ?u8 {
+    const space = nonAsciiWhiteSpace(bytes) orelse return null;
+    return if (space.line_terminator) space.len else null;
+}
 
 /// The non-ASCII WhiteSpace or LineTerminator (U+2028/U+2029) starting
 /// `bytes`: NBSP, U+1680, U+2000-200A, U+202F, U+205F, U+3000 and ZWNBSP.

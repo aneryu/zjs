@@ -431,15 +431,15 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
     var flag_bytes = try core.JSValue.String.Utf8.fromValue(rt.nativeAllocator(), flags);
     defer flag_bytes.deinit();
     // js_compile_regexp validates flags before converting the source, then
-    // passes `cesu8 = !unicode` to JS_ToCStringLen2. Besides preserving its
-    // exception/allocation order, this keeps non-Unicode patterns expressed
-    // in UTF-16 code units rather than merging surrogate pairs prematurely.
+    // passes CESU-8 unless `u` selects WTF-8 (QuickJS `cesu8 = !unicode`).
+    // That preserves exception/allocation order and keeps non-Unicode
+    // patterns in UTF-16 code units rather than merging surrogate pairs.
     const re_flags = regexp_lib.Flags.parse(flag_bytes.slice()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => |e| try throwRegExpSyntaxError(rt, global, regexpCompileErrorMessage(e, .flags)),
     };
-    const cesu8 = !re_flags.fullUnicode();
-    var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.nativeAllocator(), source, cesu8);
+    const encoding: core.JSValue.String.Encoding = if (re_flags.fullUnicode()) .wtf8 else .cesu8;
+    var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.nativeAllocator(), source, encoding);
     defer source_bytes.deinit();
 
     return regexp_lib.compilePatternWithFlagsAndOptions(rt.nativeAllocator(), source_bytes.slice(), re_flags, regexpCompileOptions(rt)) catch |err| switch (err) {
@@ -842,7 +842,7 @@ pub fn captureSlotValue(value: usize) ?usize {
 }
 
 pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
-    return regexp_bytecode.groupName(bytecode, one_based_capture_index);
+    return regexp_bytecode.groupNameFromBytecode(bytecode, one_based_capture_index);
 }
 
 fn flatRegExpInput(rt: *core.JSRuntime, input: core.JSValue) error{OutOfMemory}!core.JSValue {

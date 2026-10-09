@@ -195,7 +195,7 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
             if (owner.class_id != class.ids.object) return error.InvalidTrailingPropertyClass;
             const definition = rt.classes.recordPtr(owner.class_id) orelse
                 return error.InvalidTrailingPropertyClass;
-            if (definition.inline_payload_size != 0)
+            if (definition.def.inline_payload_size != 0)
                 return error.InvalidTrailingPropertyLayout;
             if (owner.propertyStorageIsInline() and
                 (owner.shape_ref.prop_size == 0 or

@@ -158,6 +158,7 @@ pub fn invalidateStandardArrayPrototype(rt: *JSRuntime, object_prototype: *Objec
 }
 
 fn invalidateOneStandardArrayPrototype(ctx: *JSContext, object_prototype: *Object) void {
+    // Cached realm prototypes are objects; a non-object is a broken cache.
     const object_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.object_prototype)] orelse return;
     const realm_object_prototype = Object.expect(object_value) catch unreachable;
     if (realm_object_prototype != object_prototype) return;

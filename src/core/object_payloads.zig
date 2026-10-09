@@ -1118,9 +1118,6 @@ pub const FunctionPayload = struct {
 
     pub fn traceNativeRealm(self: *FunctionPayload, visitor: anytype) !void {
         try gc_visit.realm(visitor, &self.native.realm.ptr);
-        // TGC S3 §2.2 edge F: the dispatch name is an atom id this payload
-        // names (`destroyNative` only writes the field back to
-        // `atom.null_atom`; there is no atom release any more).
         try gc_visit.atom(visitor, self.native.native_dispatch_name);
     }
 

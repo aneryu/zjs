@@ -82,7 +82,7 @@ fn setValuePropertyOrThrow(
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = value_ops.toLengthIndex;
-const toNumberForDateMethod = value_ops.toNumberForDateMethod;
+const toNumberRejectingBigInt = value_ops.toNumberRejectingBigInt;
 const toPrimitiveForNumber = value_ops.toPrimitiveForNumber;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 const valueTruthy = value_ops.valueTruthy;
@@ -4230,13 +4230,13 @@ pub fn arraySortCompare(
     // qjs js_array_cmp_generic: a JS_TAG_INT result is
     // compared as an integer, no float conversion; everything else goes
     // through JS_ToFloat64Free, whose ToPrimitive(number) + bigint TypeError
-    // shape is `toNumberForDateMethod`. The float64 tag is read inline too so
+    // shape is `toNumberRejectingBigInt`. The float64 tag is read inline too so
     // `a - b` style comparators past int32 stay off the generic ToNumber call.
     const cmp: i32 = if (result.as(.int)) |int_value|
         @as(i32, @intFromBool(int_value > 0)) - @as(i32, @intFromBool(int_value < 0))
     else blk: {
         const number = result.as(.float64) orelse inner: {
-            const number_value = try toNumberForDateMethod(ctx, output, global, result.*);
+            const number_value = try toNumberRejectingBigInt(ctx, output, global, result.*);
             break :inner value_ops.numberValue(number_value) orelse std.math.nan(f64);
         };
         // `(val > 0) - (val < 0)`: NaN and both zeros give 0, the stable tie.

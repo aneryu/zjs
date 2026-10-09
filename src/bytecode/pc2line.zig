@@ -187,6 +187,51 @@ pub fn decodeHeader(bytes: []const u8) !Header {
     };
 }
 
+/// One forward walk of a pc2line buffer. `current` starts at the header,
+/// which is the location before the first transition.
+pub const Pc2LineIterator = struct {
+    bytes: []const u8,
+    index: usize,
+    current: SourceLocSlot,
+
+    pub fn init(bytes: []const u8) !Pc2LineIterator {
+        const header = try decodeHeader(bytes);
+        return .{
+            .bytes = bytes,
+            .index = header.payload_offset,
+            .current = .{
+                .pc = 0,
+                .line_num = header.line_num,
+                .col_num = header.col_num,
+            },
+        };
+    }
+
+    pub fn next(self: *Pc2LineIterator) !?SourceLocSlot {
+        if (self.index >= self.bytes.len) return null;
+        const marker = self.bytes[self.index];
+        self.index += 1;
+        var pc = self.current.pc;
+        var line_num = self.current.line_num;
+        if (marker == 0) {
+            const diff_pc = try readLeb128(self.bytes, &self.index);
+            const diff_line = try readSleb128(self.bytes, &self.index);
+            pc = std.math.add(u32, pc, diff_pc) catch return error.Pc2LineOverflow;
+            line_num = std.math.add(i32, line_num, diff_line) catch return error.Pc2LineOverflow;
+        } else {
+            const adjusted: i32 = @as(i32, marker) - PC2LINE_OP_FIRST;
+            const diff_pc: u32 = @intCast(@divFloor(adjusted, PC2LINE_RANGE));
+            const diff_line: i32 = @mod(adjusted, PC2LINE_RANGE) + PC2LINE_BASE;
+            pc = std.math.add(u32, pc, diff_pc) catch return error.Pc2LineOverflow;
+            line_num = std.math.add(i32, line_num, diff_line) catch return error.Pc2LineOverflow;
+        }
+        const diff_col = try readSleb128(self.bytes, &self.index);
+        const col_num = std.math.add(i32, self.current.col_num, diff_col) catch return error.Pc2LineOverflow;
+        self.current = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
+        return self.current;
+    }
+};
+
 /// Decode the pc2line buffer back into a sequence of (pc, line, col).
 /// Inverse of `encode`. Used by tests and by the runtime when reporting
 /// source positions for stack traces.
@@ -196,36 +241,8 @@ pub fn decode(
 ) ![]SourceLocSlot {
     var slots: std.ArrayList(SourceLocSlot) = .empty;
     defer slots.deinit(allocator);
-
-    const header = try decodeHeader(encoded.bytes);
-    var pc: u32 = 0;
-    var line_num: i32 = header.line_num;
-    var col_num: i32 = header.col_num;
-    var i: usize = header.payload_offset;
-    while (i < encoded.bytes.len) {
-        const op = encoded.bytes[i];
-        i += 1;
-        if (op == 0) {
-            const diff_pc = try readLeb128(encoded.bytes, &i);
-            const diff_line = try readSleb128(encoded.bytes, &i);
-            pc = std.math.add(u32, pc, diff_pc) catch return error.Pc2LineOverflow;
-            line_num = std.math.add(i32, line_num, diff_line) catch return error.Pc2LineOverflow;
-        } else {
-            const adjusted: i32 = @as(i32, op) - PC2LINE_OP_FIRST;
-            const diff_pc: i32 = @divFloor(adjusted, PC2LINE_RANGE);
-            const diff_line: i32 = @mod(adjusted, PC2LINE_RANGE) + PC2LINE_BASE;
-            pc = std.math.add(u32, pc, @intCast(diff_pc)) catch return error.Pc2LineOverflow;
-            line_num = std.math.add(i32, line_num, diff_line) catch return error.Pc2LineOverflow;
-        }
-        const diff_col = try readSleb128(encoded.bytes, &i);
-        col_num = std.math.add(i32, col_num, diff_col) catch return error.Pc2LineOverflow;
-
-        try slots.append(allocator, .{
-            .pc = pc,
-            .line_num = line_num,
-            .col_num = col_num,
-        });
-    }
+    var iter = try Pc2LineIterator.init(encoded.bytes);
+    while (try iter.next()) |slot| try slots.append(allocator, slot);
     return slots.toOwnedSlice(allocator);
 }
 
@@ -234,40 +251,11 @@ pub fn decode(
 /// location before the first transition, so a target before the first slot
 /// (and a buffer with no slots) resolves to the function definition.
 pub fn findSourceLocation(bytes: []const u8, target_pc: u32) !SourceLocSlot {
-    const header = try decodeHeader(bytes);
-    var current = SourceLocSlot{
-        .pc = 0,
-        .line_num = header.line_num,
-        .col_num = header.col_num,
-    };
-    var i = header.payload_offset;
-    while (i < bytes.len) {
-        const marker = bytes[i];
-        i += 1;
-
-        var next_pc = current.pc;
-        var next_line = current.line_num;
-        if (marker == 0) {
-            const diff_pc = try readLeb128(bytes, &i);
-            const diff_line = try readSleb128(bytes, &i);
-            next_pc = std.math.add(u32, next_pc, diff_pc) catch return error.Pc2LineOverflow;
-            next_line = std.math.add(i32, next_line, diff_line) catch return error.Pc2LineOverflow;
-        } else {
-            const adjusted: i32 = @as(i32, marker) - PC2LINE_OP_FIRST;
-            const diff_pc: u32 = @intCast(@divFloor(adjusted, PC2LINE_RANGE));
-            const diff_line: i32 = @mod(adjusted, PC2LINE_RANGE) + PC2LINE_BASE;
-            next_pc = std.math.add(u32, next_pc, diff_pc) catch return error.Pc2LineOverflow;
-            next_line = std.math.add(i32, next_line, diff_line) catch return error.Pc2LineOverflow;
-        }
-        const diff_col = try readSleb128(bytes, &i);
-        const next_col = std.math.add(i32, current.col_num, diff_col) catch return error.Pc2LineOverflow;
-
-        if (target_pc < next_pc) return current;
-        current = .{
-            .pc = next_pc,
-            .line_num = next_line,
-            .col_num = next_col,
-        };
+    var iter = try Pc2LineIterator.init(bytes);
+    var current = iter.current;
+    while (try iter.next()) |slot| {
+        if (target_pc < slot.pc) return current;
+        current = slot;
     }
     return current;
 }

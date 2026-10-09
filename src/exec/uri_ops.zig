@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");
 const string_ops = @import("string_ops.zig");
+const value_ops = @import("value_ops.zig");
 
 const HostError = exception_ops.HostError;
 
@@ -46,10 +47,10 @@ fn throwUriErrorMessage(ctx: *core.JSContext, global: ?*core.Object, message: []
 /// present and falls back to the primitive-only bodies (`call`/`escape`/
 /// `unescape`) on bare runtimes.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    uriEntry("encodeURI", 1),
-    uriEntry("encodeURIComponent", 2),
-    uriEntry("decodeURI", 3),
-    uriEntry("decodeURIComponent", 4),
+    uriEntry("encodeURI", @intFromEnum(core.uri.UriMethod.encode_uri)),
+    uriEntry("encodeURIComponent", @intFromEnum(core.uri.UriMethod.encode_uri_component)),
+    uriEntry("decodeURI", @intFromEnum(core.uri.UriMethod.decode_uri)),
+    uriEntry("decodeURIComponent", @intFromEnum(core.uri.UriMethod.decode_uri_component)),
     uriNamedEntry("escape", escape_id),
     uriNamedEntry("unescape", unescape_id),
 };
@@ -106,7 +107,7 @@ fn uriCallRooted(
         break :blk realm.global;
     } else host_call.global;
     const mode: u32 = host_call.magic;
-    const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
+    const input = value_ops.argOrUndefined(host_call.args, 0);
     if (call_global) |global| {
         // Realm path: coerce the argument through the user-visible ToString
         // (Annex B) before the body, except an already-string input which the
@@ -280,7 +281,10 @@ noinline fn decodeUriUnits(
 /// `error.URIError` sentinel is surfaced instead.
 pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.JSValue) HostError!core.JSValue {
     const rt = ctx.runtime;
-    if (mode == 3 or mode == 4) {
+    const method = std.enums.fromInt(core.uri.UriMethod, mode);
+    const decode = if (method) |decoded| decoded.isDecode() else false;
+    const component = if (method) |decoded| decoded.isComponent() else false;
+    if (decode) {
         // Fast path: string inputs (the common case in real-world callers
         // and in tight 4-byte-UTF-8 URI sweeps) avoid the
         // `appendValueString` round-trip. We decode straight from the
@@ -298,16 +302,16 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
                     // (previously non-ASCII was mangled byte-wise).
                     .latin1 => |bytes| {
                         for (bytes) |byte| {
-                            if (byte >= 0x80) return decodeUriUnits(ctx, global, bytes, 1, mode == 4);
+                            if (byte >= 0x80) return decodeUriUnits(ctx, global, bytes, 1, component);
                         }
                     },
                     .utf16 => |units| {
                         for (units) |unit| {
-                            if (unit >= 0x80) return decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, mode == 4);
+                            if (unit >= 0x80) return decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, component);
                         }
                     },
                 }
-                if (try decodeStringDataFast(ctx, global, string_data, mode == 4)) |result| {
+                if (try decodeStringDataFast(ctx, global, string_data, component)) |result| {
                     return result;
                 }
             } else {
@@ -316,14 +320,14 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
                 var units = std.ArrayList(u16).empty;
                 defer units.deinit(rt.nativeAllocator());
                 try appendStringCodeUnits(rt, &units, string_value);
-                return decodeUriUnits(ctx, global, uriUtf16Bytes(units.items), 2, mode == 4);
+                return decodeUriUnits(ctx, global, uriUtf16Bytes(units.items), 2, component);
             }
         }
-    } else if (mode == 1 or mode == 2) {
+    } else if (method != null) {
         if (try stringInputValue(input)) |string_value| {
             var out = std.ArrayList(u8).empty;
             defer out.deinit(rt.nativeAllocator());
-            try encodeStringValue(ctx, global, &out, string_value, mode == 2);
+            try encodeStringValue(ctx, global, &out, string_value, component);
             const str = try core.string.String.createUtf8(rt, out.items);
             return str.value();
         }
@@ -333,22 +337,22 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
     defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, input);
 
-    if (mode == 3 or mode == 4) {
+    if (decode) {
         // Coerced (non-string) inputs decode through the same faithful
         // unit-level walk over the real string content.
         const coerced = try core.string.String.createUtf8(rt, bytes.items);
         return switch (coerced.resolveData()) {
-            .latin1 => |latin1| decodeUriUnits(ctx, global, latin1, 1, mode == 4),
-            .utf16 => |units| decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, mode == 4),
+            .latin1 => |latin1| decodeUriUnits(ctx, global, latin1, 1, component),
+            .utf16 => |units| decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, component),
         };
     }
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.nativeAllocator());
-    switch (mode) {
-        1 => try encodeBytes(rt, &out, bytes.items, false),
-        2 => try encodeBytes(rt, &out, bytes.items, true),
-        else => return error.TypeError,
+    switch (method orelse return error.TypeError) {
+        .encode_uri => try encodeBytes(rt, &out, bytes.items, false),
+        .encode_uri_component => try encodeBytes(rt, &out, bytes.items, true),
+        .decode_uri, .decode_uri_component => return error.TypeError,
     }
 
     const str = try core.string.String.createUtf8(rt, out.items);
@@ -781,7 +785,7 @@ fn isUnescaped(ch: u8) bool {
 }
 
 fn isReserved(ch: u8) bool {
-    return ch == ';' or ch == ',' or ch == '/' or ch == '?' or ch == ':' or ch == '@' or ch == '&' or ch == '=' or ch == '+' or ch == '$' or ch == '#';
+    return isUriReservedChar(ch);
 }
 
 /// This file's policy for the shared bare-runtime ToString owner.

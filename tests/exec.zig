@@ -2205,7 +2205,7 @@ test "root tracing rejects JavaScript callback entry" {
                         &.{},
                         null,
                         null,
-                        true,
+                        .copy,
                     ) catch return error.PayloadMarkFailed;
                 }
             }

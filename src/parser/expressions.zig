@@ -2194,9 +2194,8 @@ fn parseCallArgs(s: *State) Error!CallArgsShape {
 }
 
 fn parseRegExpLiteral(s: *State) Error!void {
-    const slash_offset = s.lex.mark_pos;
     s.lex.freeToken(&s.token);
-    try s.lex.rescanRegexpInto(&s.token, slash_offset);
+    try s.lex.rescanLastSlashAsRegexpInto(&s.token);
     const pattern = s.token.payload.regexp.pattern;
     const flags = s.token.payload.regexp.flags;
 

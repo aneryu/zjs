@@ -318,7 +318,7 @@ pub const JSValue = extern struct {
     /// (short_big_int) and heap (big_int) representations. Returns null for
     /// non-BigInt values and for BigInts whose magnitude exceeds the i64 range
     /// (the i64::MIN edge, magnitude == 1<<63, is handled correctly). Stays in
-    /// core: reuses the file-local `bigIntParts`, so it carries no builtins
+    /// core: reuses `BigInt.partsFromValue`, so it carries no builtins
     /// dependency.
     pub fn asInt64(self: JSValue) ?i64 {
         if (!self.isBigInt()) return null;
@@ -569,31 +569,8 @@ pub fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {
     return bignum.compareParts(lhs.negative, lhs.limbs, rhs.negative, rhs.limbs);
 }
 
-const BigIntParts = struct {
-    negative: bool,
-    limbs: []const bignum.Limb,
-};
-
-fn bigIntParts(value: JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
-    if (value.as(.short_big_int)) |short| {
-        const signed: i128 = short;
-        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
-        var len: usize = 0;
-        while (magnitude != 0) {
-            scratch[len] = @truncate(magnitude);
-            magnitude >>= @bitSizeOf(bignum.Limb);
-            len += 1;
-        }
-        return .{
-            .negative = short < 0,
-            .limbs = scratch[0..len],
-        };
-    }
-    if (value.isBigInt() and value.refHeader() != null) {
-        const big = heap_layout.bigIntBody(value.heapReference().?);
-        return .{ .negative = big.negative(), .limbs = big.limbs() };
-    }
-    return null;
+fn bigIntParts(value: JSValue, scratch: *[2]bignum.Limb) ?@import("bigint.zig").BigInt.Parts {
+    return @import("bigint.zig").BigInt.partsFromValue(value, scratch);
 }
 
 test "QuickJS value tag constants are locked" {

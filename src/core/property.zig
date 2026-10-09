@@ -188,7 +188,7 @@ pub const RealmAndAutoInitId = extern struct {
 
     const id_mask: usize = 0b11;
 
-    pub fn retain(realm_header: *gc.Header, init_id: AutoInitId) RealmAndAutoInitId {
+    pub fn init(realm_header: *gc.Header, init_id: AutoInitId) RealmAndAutoInitId {
         std.debug.assert(realm_header.metaConst().flags.kind == .realm_context);
         const address = @intFromPtr(realm_header);
         std.debug.assert(address & id_mask == 0);
@@ -221,23 +221,23 @@ pub const AutoInitSlot = extern struct {
     realm_and_id: RealmAndAutoInitId,
     opaque_ptr: ?*const anyopaque,
 
-    fn retainOpaque(realm_header: *gc.Header, init_id: AutoInitId, opaque_ptr: ?*const anyopaque) AutoInitSlot {
+    fn initOpaque(realm_header: *gc.Header, init_id: AutoInitId, opaque_ptr: ?*const anyopaque) AutoInitSlot {
         return .{
-            .realm_and_id = RealmAndAutoInitId.retain(realm_header, init_id),
+            .realm_and_id = RealmAndAutoInitId.init(realm_header, init_id),
             .opaque_ptr = opaque_ptr,
         };
     }
 
-    pub fn retainPrototype(realm_header: *gc.Header) AutoInitSlot {
-        return retainOpaque(realm_header, .prototype, null);
+    pub fn initPrototype(realm_header: *gc.Header) AutoInitSlot {
+        return initOpaque(realm_header, .prototype, null);
     }
 
-    pub fn retainProp(realm_header: *gc.Header, stored_descriptor: *const AutoInit) AutoInitSlot {
-        return retainOpaque(realm_header, .prop, @ptrCast(stored_descriptor));
+    pub fn initProp(realm_header: *gc.Header, stored_descriptor: *const AutoInit) AutoInitSlot {
+        return initOpaque(realm_header, .prop, @ptrCast(stored_descriptor));
     }
 
-    pub fn retainModule(realm_header: *gc.Header, owner: *const AutoInitModuleOwner) AutoInitSlot {
-        return retainOpaque(realm_header, .module_ns, @ptrCast(owner));
+    pub fn initModule(realm_header: *gc.Header, owner: *const AutoInitModuleOwner) AutoInitSlot {
+        return initOpaque(realm_header, .module_ns, @ptrCast(owner));
     }
 
     pub fn descriptor(self: AutoInitSlot) ?*const AutoInit {

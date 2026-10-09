@@ -473,35 +473,14 @@ fn printNameBytes(s: *State, bytes: []const u8) Error!void {
     try s.putc('"');
 }
 
-/// `rt->class_array[class_id].class_name` through `js_print_atom`. The zjs
-/// class table names only the classes of `standard_classes`; the rest carry
-/// the qjs `js_async_class_def` / WeakRef / FinalizationRegistry names here,
-/// Proxy is registered under `Object` in qjs (quickjs.c JS_CLASS_PROXY), and
-/// the zjs-only classes take the obvious name (not verified against qjs).
+/// `rt->class_array[class_id].class_name` through `js_print_atom`.
+/// Names live on `standard_meta`; a missing name prints `<null>`.
 fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
     if (s.rt.classes.className(class_id)) |name_atom| {
         if (name_atom != core.atom.null_atom) return printAtom(s, name_atom);
     }
-    const fallback: []const u8 = switch (class_id) {
-        core.class.ids.proxy, core.class.ids.global_object, core.class.ids.module_ns => "Object",
-        core.class.ids.promise => "Promise",
-        core.class.ids.promise_resolve_function => "PromiseResolveFunction",
-        core.class.ids.promise_reject_function => "PromiseRejectFunction",
-        core.class.ids.async_function => "AsyncFunction",
-        core.class.ids.async_function_resolve => "AsyncFunctionResolve",
-        core.class.ids.async_function_reject => "AsyncFunctionReject",
-        core.class.ids.async_from_sync_iterator => "",
-        core.class.ids.async_generator_function => "AsyncGeneratorFunction",
-        core.class.ids.async_generator => "AsyncGenerator",
-        core.class.ids.weak_ref => "WeakRef",
-        core.class.ids.finalization_registry => "FinalizationRegistry",
-        core.class.ids.call_site => "CallSite",
-        core.class.ids.raw_json => "RawJSON",
-        core.class.ids.disposable_stack => "DisposableStack",
-        core.class.ids.async_disposable_stack => "AsyncDisposableStack",
-        else => return s.puts("<null>"),
-    };
-    try printNameBytes(s, fallback);
+    if (core.class.standardLiteralName(class_id)) |bytes| return printNameBytes(s, bytes);
+    return s.puts("<null>");
 }
 
 /// `.first` emits nothing, `.separator` emits `, `, `.open_brace` emits

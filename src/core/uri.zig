@@ -18,6 +18,33 @@ const string = @import("string.zig");
 pub const escape_id: u32 = 5;
 pub const unescape_id: u32 = 6;
 
+/// `.uri` ids 1–4. `escape` / `unescape` continue at `escape_id`.
+pub const UriMethod = enum(u32) {
+    encode_uri = 1,
+    encode_uri_component = 2,
+    decode_uri = 3,
+    decode_uri_component = 4,
+
+    pub fn isDecode(self: UriMethod) bool {
+        return switch (self) {
+            .decode_uri, .decode_uri_component => true,
+            else => false,
+        };
+    }
+
+    pub fn isComponent(self: UriMethod) bool {
+        return switch (self) {
+            .encode_uri_component, .decode_uri_component => true,
+            else => false,
+        };
+    }
+};
+
+comptime {
+    std.debug.assert(@intFromEnum(UriMethod.decode_uri_component) + 1 == escape_id);
+    std.debug.assert(unescape_id == escape_id + 1);
+}
+
 /// The two UTF-16 code units a single four-byte `%XX%XX%XX%XX` URI escape
 /// decodes to (a surrogate pair for astral code points).
 pub const FourByteEscapeUnits = struct {

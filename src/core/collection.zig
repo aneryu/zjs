@@ -23,10 +23,8 @@ const core = @import("root.zig");
 const bignum = @import("../libs/bigint.zig");
 const dtoa = @import("../libs/number_format.zig");
 
-pub const strong_no_entry = core.object.collection_no_entry;
-pub const weak_no_entry = core.object.collection_no_entry;
-const strong_index_threshold: usize = 8;
-const weak_index_threshold: usize = 8;
+const collection_no_entry = core.object.collection_no_entry;
+const index_threshold: usize = 8;
 
 // === Strong-entry lookup ===
 
@@ -37,7 +35,7 @@ pub fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
         const entries = object.collectionEntriesSlot().items;
-        while (cursor != strong_no_entry) {
+        while (cursor != collection_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
             if (entry.active and entry.hash == hash and entry.key.sameValueZero(key)) return cursor;
@@ -59,7 +57,7 @@ pub fn findStrongEntryLatin1Concat(object: *core.Object, prefix: []const u8, dig
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
         const entries = object.collectionEntriesSlot().items;
-        while (cursor != strong_no_entry) {
+        while (cursor != collection_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
             if (entry.active and entry.hash == hash and stringValueEqlLatin1Concat(entry.key, prefix, digits)) return cursor;
@@ -150,31 +148,9 @@ fn utf16EqlLatin1Concat(units: []const u16, prefix: []const u8, digits: []const 
     return true;
 }
 
-const BigIntHashParts = struct {
-    negative: bool,
-    limbs: []const bignum.Limb,
-};
-
-fn bigIntHashParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntHashParts {
-    if (value.as(.short_big_int)) |short| {
-        const signed: i128 = short;
-        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
-        var len: usize = 0;
-        while (magnitude != 0) {
-            scratch[len] = @truncate(magnitude);
-            magnitude >>= @bitSizeOf(bignum.Limb);
-            len += 1;
-        }
-        return .{ .negative = short < 0, .limbs = scratch[0..len] };
-    }
-    const header = value.refHeader() orelse return null;
-    const bigint: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-    return .{ .negative = bigint.negative(), .limbs = bigint.limbs() };
-}
-
 fn hashBigIntValue(value: core.JSValue) u64 {
     var scratch: [2]bignum.Limb = undefined;
-    const parts = bigIntHashParts(value, &scratch) orelse return hashRefPointer(value);
+    const parts = core.bigint.BigInt.partsFromValue(value, &scratch) orelse return hashRefPointer(value);
     var hash: u64 = if (parts.negative) 0x9d77_4424_2d81_353f else 0x4f1b_bcdc_baa7_2b39;
     hash ^= @as(u64, parts.limbs.len) *% 0x9e37_79b9_7f4a_7c15;
     for (parts.limbs) |limb| hash = mix64(hash ^ limb);
@@ -214,7 +190,7 @@ pub fn findWeakEntry(object: *core.Object, key_identity: usize) ?usize {
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
         const entries = object.weakCollectionEntriesSlot().items;
-        while (cursor != weak_no_entry) {
+        while (cursor != collection_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
             if (entry.hash == hash and entry.key_identity == key_identity) return cursor;
@@ -238,7 +214,7 @@ fn weakEntryHash(key_identity: usize) u64 {
 fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
     var stored = entry;
     stored.hash = hash;
-    stored.hash_next = strong_no_entry;
+    stored.hash_next = collection_no_entry;
     const next_active_count = object.collectionActiveCount() + 1;
     try ensureStrongIndexForInsert(rt, object, next_active_count);
     const index = try object.appendCollectionEntryUnindexed(rt, stored);
@@ -256,7 +232,7 @@ pub fn ensureStrongIndexForInsert(rt: *core.JSRuntime, object: *core.Object, nex
     // a live iterator blocks compaction: a small queue churned under
     // `for...of` would otherwise scan its whole history on every lookup.
     const next_slot_count = object.collectionEntriesSlot().items.len + 1;
-    if (@max(next_active_count, next_slot_count) < strong_index_threshold) return;
+    if (@max(next_active_count, next_slot_count) < index_threshold) return;
     const heads = object.collectionBucketHeads();
     if (heads.len == 0) {
         try rebuildStrongIndex(rt, object, bucketCountForActiveCount(next_active_count));
@@ -276,10 +252,10 @@ fn bucketCountForActiveCount(active_count: usize) usize {
 fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
     const next = try rt.allocNative(usize, bucket_count);
     errdefer rt.freeNative(usize, next);
-    @memset(next, strong_no_entry);
+    @memset(next, collection_no_entry);
 
     for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
-        entry.hash_next = strong_no_entry;
+        entry.hash_next = collection_no_entry;
         if (!entry.active) continue;
         entry.hash = strongEntryHash(entry.key);
         const bucket = bucketIndex(entry.hash, next.len);
@@ -300,9 +276,9 @@ fn refreshStrongIndex(object: *core.Object) void {
     stale.* = false;
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    @memset(heads.*, strong_no_entry);
+    @memset(heads.*, collection_no_entry);
     for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
-        entry.hash_next = strong_no_entry;
+        entry.hash_next = collection_no_entry;
         if (!entry.active) continue;
         entry.hash = strongEntryHash(entry.key);
         const bucket = bucketIndex(entry.hash, heads.*.len);
@@ -334,10 +310,10 @@ fn unlinkBucketEntry(heads: []usize, entries: anytype, index: usize) void {
     if (heads.len == 0) return;
     if (index >= entries.len) return;
     var link = &heads[bucketIndex(entries[index].hash, heads.len)];
-    while (link.* != core.object.collection_no_entry) {
+    while (link.* != collection_no_entry) {
         const current = link.*;
         if (current >= entries.len) {
-            link.* = core.object.collection_no_entry;
+            link.* = collection_no_entry;
             return;
         }
         if (current == index) {
@@ -353,7 +329,7 @@ fn unlinkBucketEntry(heads: []usize, entries: anytype, index: usize) void {
 pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.WeakCollectionEntry) !void {
     var stored = entry;
     stored.hash = weakEntryHash(stored.key_identity);
-    stored.hash_next = weak_no_entry;
+    stored.hash_next = collection_no_entry;
     gc_weak.retain(rt, stored.key_identity);
     errdefer gc_weak.release(rt, stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
@@ -374,7 +350,7 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
 }
 
 fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
-    if (next_count < weak_index_threshold) return;
+    if (next_count < index_threshold) return;
     const heads = object.collectionBucketHeads();
     if (heads.len == 0) {
         try rebuildWeakIndex(rt, object, bucketCountForActiveCount(next_count));
@@ -388,7 +364,7 @@ fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_coun
 fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
     const next = try rt.allocNative(usize, bucket_count);
     errdefer rt.freeNative(usize, next);
-    @memset(next, weak_no_entry);
+    @memset(next, collection_no_entry);
 
     for (object.weakCollectionEntriesSlot().items, 0..) |*entry, index| {
         entry.hash = weakEntryHash(entry.key_identity);
@@ -457,7 +433,7 @@ fn compactStrongEntries(object: *core.Object) void {
             .key = core.JSValue.undefinedValue(),
             .value = core.JSValue.undefinedValue(),
             .active = false,
-            .hash_next = strong_no_entry,
+            .hash_next = collection_no_entry,
         };
     }
     entries_slot.items = entries_slot.items.ptr[0..write];
@@ -493,7 +469,7 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
     const next_count = bucketCountForActiveCount(live);
     if (next_count >= heads.*.len) return;
     const next = rt.allocNative(usize, next_count) catch return;
-    @memset(next, strong_no_entry);
+    @memset(next, collection_no_entry);
     for (entries.items, 0..) |*entry, index| {
         const bucket = bucketIndex(entry.hash, next.len);
         entry.hash_next = next[bucket];
@@ -554,9 +530,9 @@ fn trimLeadingStrongTombstones(object: *core.Object) void {
 fn relinkStrongIndex(object: *core.Object) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    @memset(heads.*, strong_no_entry);
+    @memset(heads.*, collection_no_entry);
     for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
-        entry.hash_next = strong_no_entry;
+        entry.hash_next = collection_no_entry;
         if (!entry.active) continue;
         const bucket = bucketIndex(entry.hash, heads.*.len);
         entry.hash_next = heads.*[bucket];
@@ -619,7 +595,7 @@ pub fn clearStrongEntries(object: *core.Object) void {
     }
 
     const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) @memset(heads.*, strong_no_entry);
+    if (heads.*.len != 0) @memset(heads.*, collection_no_entry);
     object.collectionActiveCountSlot().* = 0;
     if (drop_slots) entries_slot.items = entries_slot.items.ptr[0..0];
 
@@ -629,7 +605,7 @@ pub fn clearStrongEntries(object: *core.Object) void {
             .key = core.JSValue.undefinedValue(),
             .value = core.JSValue.undefinedValue(),
             .active = false,
-            .hash_next = strong_no_entry,
+            .hash_next = collection_no_entry,
         };
     }
     // Deliberately not calling `shrinkStrongStorage` here: qjs's clear frees
@@ -644,7 +620,7 @@ fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEn
     if (index >= entries_slot.items.len or !entries_slot.items[index].active) return null;
     unlinkStrongEntry(object, index);
     const entry = entries_slot.items[index];
-    entries_slot.items[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
+    entries_slot.items[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = collection_no_entry };
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
     if (object.collectionPayload()) |payload| {
@@ -666,7 +642,7 @@ pub fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
         entry.destroy(rt);
     }
     const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) @memset(heads.*, weak_no_entry);
+    if (heads.*.len != 0) @memset(heads.*, collection_no_entry);
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 

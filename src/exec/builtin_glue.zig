@@ -62,7 +62,7 @@ pub fn bigIntFunctionCall(
 ) !core.JSValue {
     // qjs js_bigint_constructor passes argv[0] — undefined
     // when absent — into JS_ToBigIntCtorFree; ToBigInt(undefined) throws.
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const input = value_ops.argOrUndefined(args, 0);
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
     if (primitive.as(.int)) |int_value| return value_ops.createBigIntI128(ctx.runtime, int_value);
     if (primitive.as(.float64)) |float_value| {
@@ -91,13 +91,13 @@ pub fn bigIntAsN(
     // coercions below open their own native environment, so neither is read.
     _ = caller_function;
     _ = caller_frame;
-    const bits_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const bits_input = value_ops.argOrUndefined(args, 0);
     const bits_primitive = try toPrimitiveForNumber(ctx, output, global, bits_input);
     if (bits_primitive.isBigInt()) return error.BigIntToNumber;
     if (bits_primitive.is(.symbol)) return error.SymbolToNumber;
     const bits = try value_ops.toIndexUsize(ctx.runtime, bits_primitive);
 
-    const bigint_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const bigint_input = value_ops.argOrUndefined(args, 1);
     const bigint_primitive = try toPrimitiveForNumber(ctx, output, global, bigint_input);
     const bigint_value = try toBigIntFromPrimitive(ctx.runtime, bigint_primitive);
     return value_ops.asN(ctx.runtime, core.JSValue.float64(@floatFromInt(bits)), bigint_value, unsigned);
@@ -121,25 +121,13 @@ pub fn globalIsNaNOrFinite(
     args: []const core.JSValue,
     is_nan: bool,
 ) !core.JSValue {
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const input = value_ops.argOrUndefined(args, 0);
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
     if (primitive.is(.symbol)) return error.SymbolToNumber;
     if (primitive.isBigInt()) return error.BigIntToNumber;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
-}
-
-pub fn toNumberLikeArgument(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isBigInt()) return error.BigIntToNumber;
-    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    return value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
 }
 
 pub fn globalParseInt(
@@ -152,8 +140,8 @@ pub fn globalParseInt(
 ) !core.JSValue {
     var values = [_]core.JSValue{
         global.value(),
-        if (args.len >= 1) args[0] else core.JSValue.undefinedValue(),
-        if (args.len >= 2) args[1] else core.JSValue.undefinedValue(),
+        value_ops.argOrUndefined(args, 0),
+        value_ops.argOrUndefined(args, 1),
     };
     const live: []core.JSValue = &values;
     const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
@@ -181,7 +169,7 @@ pub fn globalParseFloat(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const input = value_ops.argOrUndefined(args, 0);
     const string_value = if (input.isString())
         input
     else
@@ -314,7 +302,7 @@ pub fn dataViewGetCall(
     args: []const core.JSValue,
 ) !core.JSValue {
     try core.typed_array.dataViewRequire(receiver);
-    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const index_arg = value_ops.argOrUndefined(args, 0);
     const index = try typedArrayConstructToIndex(ctx, output, global, index_arg);
     const little_endian = args.len >= 2 and value_ops.isTruthy(args[1]);
     const call_args = [_]core.JSValue{ lengthIndexValue(index), core.JSValue.boolean(little_endian) };
@@ -330,9 +318,9 @@ pub fn dataViewSetCall(
     args: []const core.JSValue,
 ) !core.JSValue {
     try core.typed_array.dataViewRequire(receiver);
-    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const index_arg = value_ops.argOrUndefined(args, 0);
     const index = try typedArrayConstructToIndex(ctx, output, global, index_arg);
-    const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const value_arg = value_ops.argOrUndefined(args, 1);
     const coerced_value = try dataViewSetCoerceValue(ctx, output, global, method_id, value_arg);
     const little_endian = args.len >= 3 and value_ops.isTruthy(args[2]);
     const call_args = [_]core.JSValue{ lengthIndexValue(index), coerced_value, core.JSValue.boolean(little_endian) };
@@ -372,21 +360,12 @@ const WeakRefPrototypeMethod = method_ids.weak_ref.PrototypeMethod;
 /// switches on the per-record `magic` (== domain-local id), mirroring the
 /// other domain tables.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    weakRefEntry("deref", 0, @intFromEnum(WeakRefPrototypeMethod.deref)),
-    weakRefEntry("register", 2, @intFromEnum(WeakRefPrototypeMethod.finrec_register)),
-    weakRefEntry("unregister", 1, @intFromEnum(WeakRefPrototypeMethod.finrec_unregister)),
+    weakRefEntry("deref", 0, @intFromEnum(WeakRefPrototypeMethod.deref), &weakRefCall),
+    weakRefEntry("register", 2, @intFromEnum(WeakRefPrototypeMethod.finrec_register), &weakRefCall),
+    weakRefEntry("unregister", 1, @intFromEnum(WeakRefPrototypeMethod.finrec_unregister), &weakRefCall),
 };
 
-fn weakRefEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&weakRefCall),
-    };
-}
+const weakRefEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the `.weak_ref` domain. The bodies below keep
 /// their receiver-class checks, so a stolen method applied to a foreign
@@ -418,9 +397,9 @@ pub fn weakRefDerefCall(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSVal
 pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
     if (object.class_id != core.class.ids.finalization_registry) return error.IncompatibleReceiver;
-    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const target = value_ops.argOrUndefined(args, 0);
+    const held_value = value_ops.argOrUndefined(args, 1);
+    const unregister_token = value_ops.argOrUndefined(args, 2);
     if (!core.symbol.canBeHeldWeakly(ctx.runtime, target)) return error.InvalidWeakTarget;
     if (target.sameValue(held_value)) return error.HeldValueIsTarget;
     if (!unregister_token.is(.undefined_value) and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.InvalidUnregisterToken;
@@ -434,7 +413,7 @@ pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue
 pub fn finalizationRegistryUnregister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.IncompatibleReceiver;
     if (object.class_id != core.class.ids.finalization_registry) return error.IncompatibleReceiver;
-    const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const token = value_ops.argOrUndefined(args, 0);
     if (!core.symbol.canBeHeldWeakly(ctx.runtime, token)) return error.InvalidUnregisterToken;
     return core.JSValue.boolean(object.unregisterFinalizationRegistryCells(ctx.runtime, token));
 }
@@ -467,7 +446,7 @@ pub fn symbolFor(
 }
 
 pub fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     const atom_id = value.asSymbolAtom() orelse return error.NotASymbol;
     const key = core.symbol.registryKey(rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, key);

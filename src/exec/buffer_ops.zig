@@ -107,66 +107,66 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 pub const internal_entries = bufferEntries: {
     const Entry = core.host_function.InternalEntry;
     break :bufferEntries [_]Entry{
-        bufferEntry("isView", 1, @intFromEnum(StaticMethod.is_view)),
+        bufferEntry("isView", 1, @intFromEnum(StaticMethod.is_view), &bufferCall),
         // ArrayBuffer.prototype methods.
-        bufferEntry("slice", 2, @intFromEnum(ArrayBufferPrototypeMethod.slice)),
-        bufferEntry("resize", 1, @intFromEnum(ArrayBufferPrototypeMethod.resize)),
-        bufferEntry("transfer", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer)),
-        bufferEntry("transferToFixedLength", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_fixed_length)),
+        bufferEntry("slice", 2, @intFromEnum(ArrayBufferPrototypeMethod.slice), &bufferCall),
+        bufferEntry("resize", 1, @intFromEnum(ArrayBufferPrototypeMethod.resize), &bufferCall),
+        bufferEntry("transfer", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer), &bufferCall),
+        bufferEntry("transferToFixedLength", 0, @intFromEnum(ArrayBufferPrototypeMethod.transfer_to_fixed_length), &bufferCall),
         // SharedArrayBuffer.prototype methods.
-        bufferEntry("slice", 2, @intFromEnum(SharedArrayBufferPrototypeMethod.slice)),
-        bufferEntry("grow", 1, @intFromEnum(SharedArrayBufferPrototypeMethod.grow)),
+        bufferEntry("slice", 2, @intFromEnum(SharedArrayBufferPrototypeMethod.slice), &bufferCall),
+        bufferEntry("grow", 1, @intFromEnum(SharedArrayBufferPrototypeMethod.grow), &bufferCall),
         // DataView.prototype get methods.
-        bufferEntry("getInt8", 1, @intFromEnum(DataViewGetMethod.int8)),
-        bufferEntry("getUint8", 1, @intFromEnum(DataViewGetMethod.uint8)),
-        bufferEntry("getInt16", 1, @intFromEnum(DataViewGetMethod.int16)),
-        bufferEntry("getUint16", 1, @intFromEnum(DataViewGetMethod.uint16)),
-        bufferEntry("getInt32", 1, @intFromEnum(DataViewGetMethod.int32)),
-        bufferEntry("getUint32", 1, @intFromEnum(DataViewGetMethod.uint32)),
-        bufferEntry("getFloat16", 1, @intFromEnum(DataViewGetMethod.float16)),
-        bufferEntry("getFloat32", 1, @intFromEnum(DataViewGetMethod.float32)),
-        bufferEntry("getFloat64", 1, @intFromEnum(DataViewGetMethod.float64)),
-        bufferEntry("getBigInt64", 1, @intFromEnum(DataViewGetMethod.big_int64)),
-        bufferEntry("getBigUint64", 1, @intFromEnum(DataViewGetMethod.big_uint64)),
+        bufferEntry("getInt8", 1, @intFromEnum(DataViewGetMethod.int8), &bufferCall),
+        bufferEntry("getUint8", 1, @intFromEnum(DataViewGetMethod.uint8), &bufferCall),
+        bufferEntry("getInt16", 1, @intFromEnum(DataViewGetMethod.int16), &bufferCall),
+        bufferEntry("getUint16", 1, @intFromEnum(DataViewGetMethod.uint16), &bufferCall),
+        bufferEntry("getInt32", 1, @intFromEnum(DataViewGetMethod.int32), &bufferCall),
+        bufferEntry("getUint32", 1, @intFromEnum(DataViewGetMethod.uint32), &bufferCall),
+        bufferEntry("getFloat16", 1, @intFromEnum(DataViewGetMethod.float16), &bufferCall),
+        bufferEntry("getFloat32", 1, @intFromEnum(DataViewGetMethod.float32), &bufferCall),
+        bufferEntry("getFloat64", 1, @intFromEnum(DataViewGetMethod.float64), &bufferCall),
+        bufferEntry("getBigInt64", 1, @intFromEnum(DataViewGetMethod.big_int64), &bufferCall),
+        bufferEntry("getBigUint64", 1, @intFromEnum(DataViewGetMethod.big_uint64), &bufferCall),
         // DataView.prototype set methods.
-        bufferEntry("setInt8", 2, @intFromEnum(DataViewSetMethod.int8)),
-        bufferEntry("setUint8", 2, @intFromEnum(DataViewSetMethod.uint8)),
-        bufferEntry("setInt16", 2, @intFromEnum(DataViewSetMethod.int16)),
-        bufferEntry("setUint16", 2, @intFromEnum(DataViewSetMethod.uint16)),
-        bufferEntry("setInt32", 2, @intFromEnum(DataViewSetMethod.int32)),
-        bufferEntry("setUint32", 2, @intFromEnum(DataViewSetMethod.uint32)),
-        bufferEntry("setFloat16", 2, @intFromEnum(DataViewSetMethod.float16)),
-        bufferEntry("setFloat32", 2, @intFromEnum(DataViewSetMethod.float32)),
-        bufferEntry("setFloat64", 2, @intFromEnum(DataViewSetMethod.float64)),
-        bufferEntry("setBigInt64", 2, @intFromEnum(DataViewSetMethod.big_int64)),
-        bufferEntry("setBigUint64", 2, @intFromEnum(DataViewSetMethod.big_uint64)),
+        bufferEntry("setInt8", 2, @intFromEnum(DataViewSetMethod.int8), &bufferCall),
+        bufferEntry("setUint8", 2, @intFromEnum(DataViewSetMethod.uint8), &bufferCall),
+        bufferEntry("setInt16", 2, @intFromEnum(DataViewSetMethod.int16), &bufferCall),
+        bufferEntry("setUint16", 2, @intFromEnum(DataViewSetMethod.uint16), &bufferCall),
+        bufferEntry("setInt32", 2, @intFromEnum(DataViewSetMethod.int32), &bufferCall),
+        bufferEntry("setUint32", 2, @intFromEnum(DataViewSetMethod.uint32), &bufferCall),
+        bufferEntry("setFloat16", 2, @intFromEnum(DataViewSetMethod.float16), &bufferCall),
+        bufferEntry("setFloat32", 2, @intFromEnum(DataViewSetMethod.float32), &bufferCall),
+        bufferEntry("setFloat64", 2, @intFromEnum(DataViewSetMethod.float64), &bufferCall),
+        bufferEntry("setBigInt64", 2, @intFromEnum(DataViewSetMethod.big_int64), &bufferCall),
+        bufferEntry("setBigUint64", 2, @intFromEnum(DataViewSetMethod.big_uint64), &bufferCall),
         // ArrayBuffer.prototype accessors (lazy native getters).
-        bufferEntry("get byteLength", 0, @intFromEnum(ArrayBufferAccessorMethod.byte_length)),
-        bufferEntry("get detached", 0, @intFromEnum(ArrayBufferAccessorMethod.detached)),
-        bufferEntry("get maxByteLength", 0, @intFromEnum(ArrayBufferAccessorMethod.max_byte_length)),
-        bufferEntry("get resizable", 0, @intFromEnum(ArrayBufferAccessorMethod.resizable)),
+        bufferEntry("get byteLength", 0, @intFromEnum(ArrayBufferAccessorMethod.byte_length), &bufferCall),
+        bufferEntry("get detached", 0, @intFromEnum(ArrayBufferAccessorMethod.detached), &bufferCall),
+        bufferEntry("get maxByteLength", 0, @intFromEnum(ArrayBufferAccessorMethod.max_byte_length), &bufferCall),
+        bufferEntry("get resizable", 0, @intFromEnum(ArrayBufferAccessorMethod.resizable), &bufferCall),
         // SharedArrayBuffer.prototype accessors.
-        bufferEntry("get byteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.byte_length)),
-        bufferEntry("get maxByteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.max_byte_length)),
-        bufferEntry("get growable", 0, @intFromEnum(SharedArrayBufferAccessorMethod.growable)),
+        bufferEntry("get byteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.byte_length), &bufferCall),
+        bufferEntry("get maxByteLength", 0, @intFromEnum(SharedArrayBufferAccessorMethod.max_byte_length), &bufferCall),
+        bufferEntry("get growable", 0, @intFromEnum(SharedArrayBufferAccessorMethod.growable), &bufferCall),
         // DataView.prototype accessors.
-        bufferEntry("get buffer", 0, @intFromEnum(DataViewAccessorMethod.buffer)),
-        bufferEntry("get byteLength", 0, @intFromEnum(DataViewAccessorMethod.byte_length)),
-        bufferEntry("get byteOffset", 0, @intFromEnum(DataViewAccessorMethod.byte_offset)),
+        bufferEntry("get buffer", 0, @intFromEnum(DataViewAccessorMethod.buffer), &bufferCall),
+        bufferEntry("get byteLength", 0, @intFromEnum(DataViewAccessorMethod.byte_length), &bufferCall),
+        bufferEntry("get byteOffset", 0, @intFromEnum(DataViewAccessorMethod.byte_offset), &bufferCall),
         // %TypedArray%.prototype accessors.
-        bufferEntry("get buffer", 0, @intFromEnum(TypedArrayAccessorMethod.buffer)),
-        bufferEntry("get byteLength", 0, @intFromEnum(TypedArrayAccessorMethod.byte_length)),
-        bufferEntry("get byteOffset", 0, @intFromEnum(TypedArrayAccessorMethod.byte_offset)),
-        bufferEntry("get length", 0, @intFromEnum(TypedArrayAccessorMethod.length)),
-        bufferEntry("get [Symbol.toStringTag]", 0, @intFromEnum(TypedArrayAccessorMethod.to_string_tag)),
+        bufferEntry("get buffer", 0, @intFromEnum(TypedArrayAccessorMethod.buffer), &bufferCall),
+        bufferEntry("get byteLength", 0, @intFromEnum(TypedArrayAccessorMethod.byte_length), &bufferCall),
+        bufferEntry("get byteOffset", 0, @intFromEnum(TypedArrayAccessorMethod.byte_offset), &bufferCall),
+        bufferEntry("get length", 0, @intFromEnum(TypedArrayAccessorMethod.length), &bufferCall),
+        bufferEntry("get [Symbol.toStringTag]", 0, @intFromEnum(TypedArrayAccessorMethod.to_string_tag), &bufferCall),
         // Uint8Array base64/hex codecs: qjs js_uint8array_funcs
         // and js_uint8array_proto_funcs.
-        codecEntry("fromBase64", 1, @intFromEnum(Uint8ArrayStaticMethod.from_base64)),
-        codecEntry("fromHex", 1, @intFromEnum(Uint8ArrayStaticMethod.from_hex)),
-        codecEntry("toBase64", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_base64)),
-        codecEntry("toHex", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_hex)),
-        codecEntry("setFromBase64", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64)),
-        codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex)),
+        codecEntry("fromBase64", 1, @intFromEnum(Uint8ArrayStaticMethod.from_base64), &uint8ArrayCodecCall),
+        codecEntry("fromHex", 1, @intFromEnum(Uint8ArrayStaticMethod.from_hex), &uint8ArrayCodecCall),
+        codecEntry("toBase64", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_base64), &uint8ArrayCodecCall),
+        codecEntry("toHex", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_hex), &uint8ArrayCodecCall),
+        codecEntry("setFromBase64", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64), &uint8ArrayCodecCall),
+        codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex), &uint8ArrayCodecCall),
         // The two buffer constructor ids. `installStandardConstructor` stamps these
         // ids onto the live `ArrayBuffer` / `SharedArrayBuffer` objects
         // (standard_globals.zig), so they must resolve to a record; without
@@ -182,21 +182,12 @@ pub const internal_entries = bufferEntries: {
         // rather than a constructor cproto: a constructor cproto would also
         // make `callConstructRecordImpl` claim the construct path and route it
         // into the same TypeError.
-        bufferEntry("ArrayBuffer", 1, @intFromEnum(ConstructorMethod.array_buffer)),
-        bufferEntry("SharedArrayBuffer", 1, @intFromEnum(ConstructorMethod.shared_array_buffer)),
+        bufferEntry("ArrayBuffer", 1, @intFromEnum(ConstructorMethod.array_buffer), &bufferCall),
+        bufferEntry("SharedArrayBuffer", 1, @intFromEnum(ConstructorMethod.shared_array_buffer), &bufferCall),
     };
 };
 
-fn bufferEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&bufferCall),
-    };
-}
+const bufferEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the `.buffer` domain: forward the record id to
 /// the exec dispatch glue, and surface the corrupt-id case (e.g. an
@@ -221,16 +212,7 @@ fn bufferCall(
     return error.TypeError;
 }
 
-fn codecEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&uint8ArrayCodecCall),
-    };
-}
+const codecEntry = builtin_dispatch.entryWithHandler;
 
 /// Record handler for the Uint8Array base64/hex codecs. Unlike the rest of the
 /// `.buffer` domain these need the writer/caller-frame context, because

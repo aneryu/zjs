@@ -184,9 +184,6 @@ fn moduleHasExportName(record: *const bytecode_module.Record, export_name: Atom)
     for (record.indirect_exports) |entry| {
         if (entry.export_name == export_name) return true;
     }
-    for (record.star_exports) |entry| {
-        if (entry.export_name != atom_star and entry.export_name == export_name) return true;
-    }
     return false;
 }
 
@@ -300,10 +297,8 @@ fn addModuleIndirectExport(
     try record.addIndirectExport(request_index, export_name, import_name, kind == .namespace);
 }
 
-fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
-    const record = s.ensureModule();
-    if (export_name != atom_star) try rejectDuplicateExport(s, record, export_name);
-    try record.addStarExport(request_index, export_name);
+fn addModuleStarExport(s: *State, request_index: u32) Error!void {
+    try s.ensureModule().addStarExport(request_index);
 }
 
 fn addModuleRequestFromCurrentString(s: *State) Error!u32 {
@@ -568,7 +563,7 @@ fn parseExportStar(s: *State) Error!void {
     if (is_namespace) {
         try addModuleIndirectExport(s, request_index, export_name, atom_star, .namespace);
     } else {
-        try addModuleStarExport(s, request_index, export_name);
+        try addModuleStarExport(s, request_index);
     }
     _ = try s.expectSemicolon();
     return;

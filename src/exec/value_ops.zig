@@ -1345,7 +1345,7 @@ pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
 
 /// ToNumber through ToPrimitive(number); like JS_ToNumber, a BigInt throws
 /// "cannot convert bigint to number". Always returns an int32 or float64.
-fn toNumberRejectingBigInt(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
+pub fn toNumberRejectingBigInt(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
     if (primitive.isBigInt()) return throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
     return toNumberValue(ctx.runtime, primitive);
@@ -1411,16 +1411,6 @@ pub fn primitiveWrapperStoredValue(value: core.JSValue) ?core.JSValue {
     }
 }
 
-/// Date argument coercion: qjs never accepts BigInts here either.
-pub fn toNumberForDateMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    return toNumberRejectingBigInt(ctx, output, global, value);
-}
-
 // ----- Primitive-wrapper and Symbol records -----
 // Native record tables and dispatch for primitive wrappers and Symbol helpers.
 //
@@ -1433,24 +1423,9 @@ const builtin_glue = @import("builtin_glue.zig");
 const HostError = exception_ops.HostError;
 pub const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
 
-/// `.primitive` native-builtin ids encode `class_tag * 10 + method` (class
-/// tags: 1 number, 2 boolean, 3 bigint, 4 symbol, 5 string; see
-/// `exec/object_ops.primitivePrototypeMethod`). Method 1 is toString, 2
-/// valueOf, 3 the constructor-called-as-function path; the Symbol-only getter
-/// (4 description) and method (5 [Symbol.toPrimitive]) also live here because
-/// they share the same QuickJS primitive wrapper dispatch domain. Methods 6+
-/// are the wrapper *constructor* statics (qjs's separate `js_<class>_funcs`
-/// lists), which do not route through `primitivePrototypeMethod`.
-const Tag = enum(u32) {
-    number = 1,
-    boolean = 2,
-    bigint = 3,
-    symbol = 4,
-    string = 5,
-};
-fn primitiveId(comptime tag: Tag, comptime method: u32) u32 {
-    return @intFromEnum(tag) * 10 + method;
-}
+/// `.primitive` ids are `object_ops.primitiveBuiltinId`. Methods 6 and 7 are
+/// constructor statics and do not route through `primitivePrototypeMethod`.
+const primitiveBuiltinId = object_ops.primitiveBuiltinId;
 
 /// Boolean's slice of the `.primitive` native-builtin domain: the
 /// `Boolean.prototype` toString/valueOf and `Boolean(...)` called as a
@@ -1458,48 +1433,39 @@ fn primitiveId(comptime tag: Tag, comptime method: u32) u32 {
 /// toString/valueOf entries below because their dispatch is the same shared exec
 /// op.
 pub const boolean_entries = [_]core.host_function.InternalEntry{
-    primitiveEntry("toString", 0, primitiveId(.boolean, 1)),
-    primitiveEntry("valueOf", 0, primitiveId(.boolean, 2)),
+    primitiveEntry("toString", 0, primitiveBuiltinId(.boolean, .to_string), &primitiveCall),
+    primitiveEntry("valueOf", 0, primitiveBuiltinId(.boolean, .value_of), &primitiveCall),
     // Boolean(...) called as a function (constructor path id, method 3).
-    primitiveEntry("Boolean", 1, primitiveId(.boolean, 3)),
+    primitiveEntry("Boolean", 1, primitiveBuiltinId(.boolean, .constructor_call), &primitiveCall),
 };
 pub const shared_entries = [_]core.host_function.InternalEntry{
-    primitiveEntry("valueOf", 0, primitiveId(.number, 2)),
-    primitiveEntry("toString", 0, primitiveId(.bigint, 1)),
-    primitiveEntry("valueOf", 0, primitiveId(.bigint, 2)),
-    primitiveEntry("toLocaleString", 0, primitiveId(.bigint, 8)),
-    primitiveEntry("toString", 0, primitiveId(.string, 1)),
-    primitiveEntry("valueOf", 0, primitiveId(.string, 2)),
+    primitiveEntry("valueOf", 0, primitiveBuiltinId(.number, .value_of), &primitiveCall),
+    primitiveEntry("toString", 0, primitiveBuiltinId(.big_int, .to_string), &primitiveCall),
+    primitiveEntry("valueOf", 0, primitiveBuiltinId(.big_int, .value_of), &primitiveCall),
+    primitiveEntry("toLocaleString", 0, primitiveBuiltinId(.big_int, .to_locale_string), &primitiveCall),
+    primitiveEntry("toString", 0, primitiveBuiltinId(.string, .to_string), &primitiveCall),
+    primitiveEntry("valueOf", 0, primitiveBuiltinId(.string, .value_of), &primitiveCall),
 };
 pub const symbol_entries = [_]core.host_function.InternalEntry{
-    primitiveEntry("toString", 0, 41),
-    primitiveEntry("valueOf", 0, 42),
-    primitiveEntry("Symbol", 0, 43),
-    primitiveEntry("get description", 0, 44),
-    primitiveEntry("[Symbol.toPrimitive]", 1, 45),
+    primitiveEntry("toString", 0, primitiveBuiltinId(.symbol, .to_string), &primitiveCall),
+    primitiveEntry("valueOf", 0, primitiveBuiltinId(.symbol, .value_of), &primitiveCall),
+    primitiveEntry("Symbol", 0, primitiveBuiltinId(.symbol, .constructor_call), &primitiveCall),
+    primitiveEntry("get description", 0, primitiveBuiltinId(.symbol, .description_get), &primitiveCall),
+    primitiveEntry("[Symbol.toPrimitive]", 1, primitiveBuiltinId(.symbol, .to_primitive), &primitiveCall),
 };
-pub const bigint_asintn_id: u32 = primitiveId(.bigint, 6);
-pub const bigint_asuintn_id: u32 = primitiveId(.bigint, 7);
+pub const bigint_asintn_id: u32 = primitiveBuiltinId(.big_int, .static_a);
+pub const bigint_asuintn_id: u32 = primitiveBuiltinId(.big_int, .static_b);
 pub const bigint_static_entries = [_]core.host_function.InternalEntry{
-    primitiveStaticEntry("asIntN", 2, bigint_asintn_id),
-    primitiveStaticEntry("asUintN", 2, bigint_asuintn_id),
+    primitiveStaticEntry("asIntN", 2, bigint_asintn_id, &primitiveStaticCall),
+    primitiveStaticEntry("asUintN", 2, bigint_asuintn_id, &primitiveStaticCall),
 };
-pub const symbol_for_id: u32 = primitiveId(.symbol, 6);
-pub const symbol_key_for_id: u32 = primitiveId(.symbol, 7);
+pub const symbol_for_id: u32 = primitiveBuiltinId(.symbol, .static_a);
+pub const symbol_key_for_id: u32 = primitiveBuiltinId(.symbol, .static_b);
 pub const symbol_static_entries = [_]core.host_function.InternalEntry{
-    primitiveStaticEntry("for", 1, symbol_for_id),
-    primitiveStaticEntry("keyFor", 1, symbol_key_for_id),
+    primitiveStaticEntry("for", 1, symbol_for_id, &primitiveStaticCall),
+    primitiveStaticEntry("keyFor", 1, symbol_key_for_id, &primitiveStaticCall),
 };
-fn primitiveEntry(comptime name: []const u8, comptime arity: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = arity,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&primitiveCall),
-    };
-}
+const primitiveEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the `.primitive` domain. It consumes the atomic
 /// final-call realm view and delegates to `primitivePrototypeMethod`, which stays in
@@ -1527,16 +1493,7 @@ fn primitiveCall(
     );
 }
 
-fn primitiveStaticEntry(comptime name: []const u8, comptime arity: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = arity,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&primitiveStaticCall),
-    };
-}
+const primitiveStaticEntry = builtin_dispatch.entryWithHandler;
 
 /// Shared record handler for the wrapper-primitive *constructor* statics
 /// (method ids 6+). These are ordinary `JS_CFUNC_*_DEF` entries in qjs, so

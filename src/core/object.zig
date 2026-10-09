@@ -2093,7 +2093,7 @@ pub const Object = extern struct {
 
     fn inlineClassPayloadLayout(maybe_record: ?*const class.Record) ?InlineClassPayloadLayout {
         const definition_view = maybe_record orelse return null;
-        return inlineClassPayloadLayoutFromScalars(definition_view.inline_payload_size, definition_view.inline_payload_align);
+        return inlineClassPayloadLayoutFromScalars(definition_view.def.inline_payload_size, definition_view.def.inline_payload_align);
     }
 
     fn inlineClassPayloadLayoutForDefinition(definition: class.Table.DefinitionPlan) ?InlineClassPayloadLayout {
@@ -3021,7 +3021,7 @@ pub const Object = extern struct {
         if (!self.flags.has_exotic_methods) return null;
         return exoticMethodsForClassId(self.class_id) orelse blk: {
             const record = rt.classes.record(self.class_id) orelse return null;
-            const raw = record.exotic_methods orelse return null;
+            const raw = record.def.exotic_methods orelse return null;
             break :blk @ptrCast(@alignCast(raw));
         };
     }
@@ -7016,7 +7016,7 @@ pub const Object = extern struct {
     ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.extensible);
-        const slot = property.AutoInitSlot.retainPrototype(&realm.header);
+        const slot = property.AutoInitSlot.initPrototype(&realm.header);
         try self.appendPreparedPropertyEntryImpl(
             true,
             true,
@@ -7374,7 +7374,7 @@ pub const Object = extern struct {
     ) !property.AutoInitSlot {
         const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
         const stored = try property_state.internAutoInit(rt, info);
-        return property.AutoInitSlot.retainProp(&realm.header, stored);
+        return property.AutoInitSlot.initProp(&realm.header, stored);
     }
 
     /// Installs a PROP placeholder backed directly by an immutable descriptor
@@ -7406,7 +7406,7 @@ pub const Object = extern struct {
         self.assertPlainAppendTarget();
         std.debug.assert(resolved_realm.runtime == rt);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
-            .auto_init = property.AutoInitSlot.retainProp(&resolved_realm.header, info),
+            .auto_init = property.AutoInitSlot.initProp(&resolved_realm.header, info),
         });
     }
 
@@ -7467,7 +7467,7 @@ pub const Object = extern struct {
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
-            .auto_init = property.AutoInitSlot.retainModule(&realm.header, owner),
+            .auto_init = property.AutoInitSlot.initModule(&realm.header, owner),
         });
     }
 
@@ -10031,7 +10031,7 @@ test "root adapter AUTOINIT Realm preserves visitor repairs on failure" {
     const replacement = try context_mod.RealmContext.create(rt, .{});
     defer replacement.destroy();
     for ([_]bool{ false, true }) |fail| {
-        var entry = property.Entry{ .slot = .{ .auto_init = property.AutoInitSlot.retainPrototype(&original.header) } };
+        var entry = property.Entry{ .slot = .{ .auto_init = property.AutoInitSlot.initPrototype(&original.header) } };
         const Probe = struct {
             pub const gc_visit_policy: gc_visit.Policy = .partial;
             replacement: *context_mod.RealmContext,

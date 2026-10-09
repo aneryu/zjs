@@ -4490,10 +4490,11 @@ fn resumeBodyValue(
         gen.generatorCaptures(),
         output,
         global,
-        false,
-        gen,
-        resume_value,
-        core.JSValue.undefinedValue(),
+        .{
+            .defer_generators = false,
+            .generator_state = gen,
+            .resume_value = resume_value,
+        },
     );
 }
 

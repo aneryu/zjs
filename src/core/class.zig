@@ -132,9 +132,6 @@ pub const PayloadKind = enum(u5) {
 
 pub const Payload = ?*anyopaque;
 
-/// Function classes whose `.function` payload uses the bytecode arm. Mirrors
-/// QuickJS's `JSObject.u.func` discriminator: every other `.function` payload
-/// class uses the mutually-exclusive native/c-function arm.
 /// Numeric TypedArray classes whose `[i]` read is allocation-free
 /// (qjs JS_GetPropertyValue INT8..FLOAT64 arms). BigInt64/BigUint64
 /// and DataView stay off this predicate so they keep the allocating path.
@@ -155,6 +152,9 @@ pub inline fn isNumericTypedArrayClass(id: ClassId) bool {
     };
 }
 
+/// Function classes whose `.function` payload uses the bytecode arm. Mirrors
+/// QuickJS's `JSObject.u.func` discriminator: every other `.function` payload
+/// class uses the mutually-exclusive native/c-function arm.
 pub inline fn isBytecodeFunctionClass(id: ClassId) bool {
     return switch (id) {
         ids.bytecode_function,
@@ -199,24 +199,19 @@ pub const PayloadVisitor = struct {
     }
 };
 
-pub const LegacyFinalizer = *const fn () void;
 pub const PayloadFinalizer = *const fn (runtime: *anyopaque, object: *anyopaque, payload: *Payload) void;
 pub const PayloadMark = *const fn (runtime: *anyopaque, object: *anyopaque, payload: *Payload, visitor: *PayloadVisitor) void;
-pub const Call = *const fn () void;
 pub const BindingDataFinalizer = *const fn (data: *anyopaque) void;
 
 pub const Definition = struct {
     class_name: []const u8,
-    binding_identity: ?[]const u8 = null,
     binding_data: ?*anyopaque = null,
     binding_data_finalizer: ?BindingDataFinalizer = null,
     payload_kind: PayloadKind = .none,
     inline_payload_size: u32 = 0,
     inline_payload_align: u16 = 1,
-    finalizer: ?LegacyFinalizer = null,
     payload_finalizer: ?PayloadFinalizer = null,
     payload_mark: ?PayloadMark = null,
-    call: ?Call = null,
     has_exotic: bool = false,
     exotic_methods: ?*const anyopaque = null,
     /// NB2 §8.1: set iff this class is a `NativeObject` family member; the
@@ -229,39 +224,30 @@ pub const Definition = struct {
 pub const Record = struct {
     id: ClassId = invalid_class_id,
     class_name: atom.Atom = atom.null_atom,
-    binding_identity: ?[]const u8 = null,
-    binding_data: ?*anyopaque = null,
-    binding_data_finalizer: ?BindingDataFinalizer = null,
-    payload_kind: PayloadKind = .none,
-    inline_payload_size: u32 = 0,
-    inline_payload_align: u16 = 1,
-    finalizer: ?LegacyFinalizer = null,
-    payload_finalizer: ?PayloadFinalizer = null,
-    payload_mark: ?PayloadMark = null,
-    call: ?Call = null,
-    has_exotic: bool = false,
-    exotic_methods: ?*const anyopaque = null,
-    native_type: ?*const anyopaque = null,
+    /// Copy of the registration definition. `has_exotic` is normalized once
+    /// in `registerAtom` (`def.has_exotic or def.exotic_methods != null`).
+    def: Definition = .{ .class_name = "" },
 
     pub fn isRegistered(self: Record) bool {
         return self.id != invalid_class_id;
     }
 
     pub fn finalizeBindingData(self: Record) void {
-        const data = self.binding_data orelse return;
-        const finalizer = self.binding_data_finalizer orelse return;
+        const data = self.def.binding_data orelse return;
+        const finalizer = self.def.binding_data_finalizer orelse return;
         finalizer(data);
     }
 };
 
-/// `Record{}` is all zeros except `inline_payload_align = 1`. Filling a
-/// `[ids.init_count]Record` from that typed default materializes a 6624-byte
-/// `.rodata` template (69 × 96). Zero the bytes, then store the align default
-/// so every field still equals `Record{}`.
+/// An unregistered record is the zero pattern plus `def.inline_payload_align
+/// = 1`. `Record{}` also points `def.class_name` at `""`; nothing reads that
+/// slice until `registerAtom` replaces `def`, and a zero pointer with length
+/// 0 is the same empty name. Filling `[ids.init_count]Record` from `Record{}`
+/// would emit a `.rodata` image of `@sizeOf(Record) * ids.init_count`.
 fn fillDefaultRecords(records: []Record) void {
     @memset(records, std.mem.zeroes(Record));
     for (records) |*rec| {
-        rec.inline_payload_align = 1;
+        rec.def.inline_payload_align = 1;
     }
 }
 
@@ -341,10 +327,9 @@ pub const Table = struct {
     /// Standard classes are runtime-lifetime, so `registerAtom` writes each entry at most once
     /// and every allocation/destruction reads one indexed struct instead of the
     /// recordPtr + per-field load chain — mirroring how qjs reads its immutable
-    /// `rt->class_array` scalars with no per-alloc bookkeeping. Standard ids
-    /// outside `standard_classes` never register; their entries stay on the
-    /// same `standardPayloadKind` fallback `definitionPlan` used for a null
-    /// record view.
+    /// `rt->class_array` scalars with no per-alloc bookkeeping. Ids below
+    /// `ids.proxy` are registered from `standard_meta`. Later standard ids stay
+    /// unregistered, so their plans remain the `standardPayloadKind` fallback.
     standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
     /// Create the owned class table, including standard definitions, without
@@ -389,10 +374,10 @@ pub const Table = struct {
     }
 
     fn registerStandardClasses(self: *Table) !void {
-        for (standard_classes) |entry| {
-            try self.registerAtom(entry.id, entry.name_atom, .{
+        for (standard_meta[1..ids.proxy], 1..) |meta, id| {
+            try self.registerAtom(@intCast(id), meta.name, .{
                 .class_name = "",
-                .payload_kind = standardPayloadKind(entry.id),
+                .payload_kind = meta.kind,
             });
         }
     }
@@ -526,11 +511,10 @@ pub const Table = struct {
     /// Release a dynamic object's definition pin only after its allocation is
     /// gone (including weak-husk and cycle pass-B lifetimes).
     pub fn releaseObjectDefinition(self: *Table, id: ClassId, generation: u64) void {
-        // Standard ids carry no pin bookkeeping, so return before the
-        // owner-thread panic guard: `assertOwnerThread` survives release
-        // builds (it is an explicit @panic, not a std.debug.assert) and its
-        // cached-gettid TLS probe was the single hottest tail cost of every
-        // object destroy. qjs free_object has no thread check.
+        // Standard ids carry no pin bookkeeping, so return before touching
+        // registration state. `assertOwnerThread` is a no-op in ReleaseFast
+        // (`!std.debug.runtime_safety`); Debug and ReleaseSafe still pay the
+        // gettid probe on this tail. qjs free_object has no thread check.
         if (id < ids.init_count) return;
         self.assertOwnerThread();
         std.debug.assert(id < self.registration_states.len);
@@ -547,8 +531,15 @@ pub const Table = struct {
 
     pub fn className(self: *Table, id: ClassId) ?atom.Atom {
         self.assertOwnerThread();
-        if (!self.isRegistered(id)) return null;
-        return self.records[id].class_name;
+        if (self.isRegistered(id)) return self.records[id].class_name;
+        // Unregistered standard ids (50-68) still have inspector names. The
+        // only caller is the host printer; it does not treat null as special
+        // beyond printing `<null>`.
+        if (id < ids.init_count) {
+            const name = standard_meta[id].name;
+            if (name != atom.null_atom) return name;
+        }
+        return null;
     }
 
     pub fn record(self: *const Table, id: ClassId) ?Record {
@@ -587,7 +578,7 @@ pub const Table = struct {
         const generation = self.pinCallback(id) orelse return false;
         defer self.releaseCallback(id, generation);
         if (id >= ids.init_count and generation != expected_generation) return false;
-        const finalizer = (self.recordPtr(id) orelse return false).payload_finalizer orelse return false;
+        const finalizer = (self.recordPtr(id) orelse return false).def.payload_finalizer orelse return false;
         finalizer(runtime, object, payload);
         return true;
     }
@@ -606,7 +597,7 @@ pub const Table = struct {
         // owner-only callback pin protocol (and before looking the record up a
         // second time). A real callback remains owner-affine and pinned across
         // invocation exactly as before.
-        const mark = (self.recordPtr(id) orelse return false).payload_mark orelse return false;
+        const mark = (self.recordPtr(id) orelse return false).def.payload_mark orelse return false;
         self.assertOwnerThread();
         const generation = self.pinCallback(id) orelse return false;
         defer self.releaseCallback(id, generation);
@@ -628,22 +619,12 @@ pub const Table = struct {
         std.debug.assert(!state.isPinned());
         state.generation +%= 1;
         if (state.generation == 0) state.generation = 1;
+        var stored = def;
+        stored.has_exotic = def.has_exotic or def.exotic_methods != null;
         self.records[id] = .{
             .id = id,
             .class_name = self.atoms.noteHolderStore(name_atom),
-            .binding_identity = def.binding_identity,
-            .binding_data = def.binding_data,
-            .binding_data_finalizer = def.binding_data_finalizer,
-            .payload_kind = def.payload_kind,
-            .inline_payload_size = def.inline_payload_size,
-            .inline_payload_align = def.inline_payload_align,
-            .finalizer = def.finalizer,
-            .payload_finalizer = def.payload_finalizer,
-            .payload_mark = def.payload_mark,
-            .call = def.call,
-            .has_exotic = def.has_exotic or def.exotic_methods != null,
-            .exotic_methods = def.exotic_methods,
-            .native_type = def.native_type,
+            .def = stored,
         };
         if (id < ids.init_count) {
             self.standard_plans[id] = definitionPlan(&self.records[id], id, state.generation);
@@ -697,13 +678,15 @@ pub const Table = struct {
 
     fn definitionPlan(definition_view: ?*const Record, id: ClassId, generation: u64) DefinitionPlan {
         if (definition_view) |registered| {
+            const stored = registered.def;
             return .{
                 .generation = generation,
-                .payload_kind = registered.payload_kind,
-                .inline_payload_size = registered.inline_payload_size,
-                .inline_payload_align = registered.inline_payload_align,
-                .has_payload_finalizer = registered.payload_finalizer != null,
-                .has_exotic = registered.has_exotic or registered.exotic_methods != null,
+                .payload_kind = stored.payload_kind,
+                .inline_payload_size = stored.inline_payload_size,
+                .inline_payload_align = stored.inline_payload_align,
+                .has_payload_finalizer = stored.payload_finalizer != null,
+                // Already `has_exotic or exotic_methods != null` from registerAtom.
+                .has_exotic = stored.has_exotic,
             };
         }
         return .{
@@ -729,123 +712,117 @@ pub const Table = struct {
     }
 };
 
-const StandardClass = struct {
-    id: ClassId,
-    name_atom: atom.Atom,
+fn standardName(comptime bytes: []const u8) atom.Atom {
+    return atom.predefinedId(bytes, .string) orelse @compileError("no predefined class atom: " ++ bytes);
+}
+
+const StandardMeta = struct {
+    name: atom.Atom,
+    /// Inspector text for a standard id that has no predefined atom.
+    literal: ?[]const u8,
+    kind: PayloadKind,
 };
 
-pub const standard_classes = [_]StandardClass{
-    .{ .id = ids.object, .name_atom = atom.ids.Object },
-    .{ .id = ids.array, .name_atom = atom.ids.Array },
-    .{ .id = ids.error_, .name_atom = atom.ids.Error },
-    .{ .id = ids.number, .name_atom = atom.predefinedId("Number", .string).? },
-    .{ .id = ids.string, .name_atom = atom.predefinedId("String", .string).? },
-    .{ .id = ids.boolean, .name_atom = atom.predefinedId("Boolean", .string).? },
-    .{ .id = ids.symbol, .name_atom = atom.predefinedId("Symbol", .string).? },
-    .{ .id = ids.arguments, .name_atom = atom.predefinedId("Arguments", .string).? },
-    .{ .id = ids.mapped_arguments, .name_atom = atom.predefinedId("Arguments", .string).? },
-    .{ .id = ids.date, .name_atom = atom.predefinedId("Date", .string).? },
-    .{ .id = ids.module_ns, .name_atom = atom.ids.Object },
-    .{ .id = ids.c_function, .name_atom = atom.ids.Function },
-    .{ .id = ids.bytecode_function, .name_atom = atom.ids.Function },
-    .{ .id = ids.bound_function, .name_atom = atom.ids.Function },
-    .{ .id = ids.c_function_data, .name_atom = atom.ids.Function },
-    .{ .id = ids.c_closure, .name_atom = atom.ids.Function },
-    .{ .id = ids.generator_function, .name_atom = atom.predefinedId("GeneratorFunction", .string).? },
-    .{ .id = ids.for_in_iterator, .name_atom = atom.predefinedId("ForInIterator", .string).? },
-    .{ .id = ids.regexp, .name_atom = atom.predefinedId("RegExp", .string).? },
-    .{ .id = ids.array_buffer, .name_atom = atom.predefinedId("ArrayBuffer", .string).? },
-    .{ .id = ids.shared_array_buffer, .name_atom = atom.predefinedId("SharedArrayBuffer", .string).? },
-    .{ .id = ids.uint8c_array, .name_atom = atom.predefinedId("Uint8ClampedArray", .string).? },
-    .{ .id = ids.int8_array, .name_atom = atom.predefinedId("Int8Array", .string).? },
-    .{ .id = ids.uint8_array, .name_atom = atom.predefinedId("Uint8Array", .string).? },
-    .{ .id = ids.int16_array, .name_atom = atom.predefinedId("Int16Array", .string).? },
-    .{ .id = ids.uint16_array, .name_atom = atom.predefinedId("Uint16Array", .string).? },
-    .{ .id = ids.int32_array, .name_atom = atom.predefinedId("Int32Array", .string).? },
-    .{ .id = ids.uint32_array, .name_atom = atom.predefinedId("Uint32Array", .string).? },
-    .{ .id = ids.big_int64_array, .name_atom = atom.predefinedId("BigInt64Array", .string).? },
-    .{ .id = ids.big_uint64_array, .name_atom = atom.predefinedId("BigUint64Array", .string).? },
-    .{ .id = ids.float16_array, .name_atom = atom.predefinedId("Float16Array", .string).? },
-    .{ .id = ids.float32_array, .name_atom = atom.predefinedId("Float32Array", .string).? },
-    .{ .id = ids.float64_array, .name_atom = atom.predefinedId("Float64Array", .string).? },
-    .{ .id = ids.dataview, .name_atom = atom.predefinedId("DataView", .string).? },
-    .{ .id = ids.big_int, .name_atom = atom.predefinedId("BigInt", .string).? },
-    .{ .id = ids.map, .name_atom = atom.ids.Map },
-    .{ .id = ids.set, .name_atom = atom.ids.Set },
-    .{ .id = ids.weakmap, .name_atom = atom.ids.WeakMap },
-    .{ .id = ids.weakset, .name_atom = atom.ids.WeakSet },
-    .{ .id = ids.iterator, .name_atom = atom.predefinedId("Iterator", .string).? },
-    .{ .id = ids.iterator_concat, .name_atom = atom.predefinedId("Iterator Concat", .string).? },
-    .{ .id = ids.iterator_helper, .name_atom = atom.predefinedId("Iterator Helper", .string).? },
-    .{ .id = ids.iterator_wrap, .name_atom = atom.predefinedId("Iterator Wrap", .string).? },
-    .{ .id = ids.map_iterator, .name_atom = atom.predefinedId("Map Iterator", .string).? },
-    .{ .id = ids.set_iterator, .name_atom = atom.predefinedId("Set Iterator", .string).? },
-    .{ .id = ids.array_iterator, .name_atom = atom.predefinedId("Array Iterator", .string).? },
-    .{ .id = ids.string_iterator, .name_atom = atom.predefinedId("String Iterator", .string).? },
-    .{ .id = ids.regexp_string_iterator, .name_atom = atom.predefinedId("RegExp String Iterator", .string).? },
-    .{ .id = ids.generator, .name_atom = atom.predefinedId("Generator", .string).? },
+const standard_meta: [ids.init_count]StandardMeta = blk: {
+    const Item = struct {
+        id: ClassId,
+        name: atom.Atom = atom.null_atom,
+        literal: ?[]const u8 = null,
+        kind: PayloadKind,
+    };
+    const items = [_]Item{
+        .{ .id = invalid_class_id, .kind = .none },
+        .{ .id = ids.object, .name = atom.ids.Object, .kind = .ordinary },
+        .{ .id = ids.array, .name = atom.ids.Array, .kind = .none },
+        .{ .id = ids.error_, .name = atom.ids.Error, .kind = .ordinary },
+        .{ .id = ids.number, .name = standardName("Number"), .kind = .object_data },
+        .{ .id = ids.string, .name = standardName("String"), .kind = .object_data },
+        .{ .id = ids.boolean, .name = standardName("Boolean"), .kind = .object_data },
+        .{ .id = ids.symbol, .name = standardName("Symbol"), .kind = .object_data },
+        .{ .id = ids.arguments, .name = standardName("Arguments"), .kind = .ordinary },
+        .{ .id = ids.mapped_arguments, .name = standardName("Arguments"), .kind = .ordinary },
+        .{ .id = ids.date, .name = standardName("Date"), .kind = .object_data },
+        .{ .id = ids.module_ns, .name = atom.ids.Object, .kind = .none },
+        .{ .id = ids.c_function, .name = atom.ids.Function, .kind = .function },
+        .{ .id = ids.bytecode_function, .name = atom.ids.Function, .kind = .function },
+        .{ .id = ids.bound_function, .name = atom.ids.Function, .kind = .bound_function },
+        .{ .id = ids.c_function_data, .name = atom.ids.Function, .kind = .function },
+        .{ .id = ids.c_closure, .name = atom.ids.Function, .kind = .function },
+        .{ .id = ids.generator_function, .name = standardName("GeneratorFunction"), .kind = .function },
+        .{ .id = ids.for_in_iterator, .name = standardName("ForInIterator"), .kind = .iterator },
+        .{ .id = ids.regexp, .name = standardName("RegExp"), .kind = .regexp },
+        .{ .id = ids.array_buffer, .name = standardName("ArrayBuffer"), .kind = .buffer },
+        .{ .id = ids.shared_array_buffer, .name = standardName("SharedArrayBuffer"), .kind = .buffer },
+        .{ .id = ids.uint8c_array, .name = standardName("Uint8ClampedArray"), .kind = .typed_array },
+        .{ .id = ids.int8_array, .name = standardName("Int8Array"), .kind = .typed_array },
+        .{ .id = ids.uint8_array, .name = standardName("Uint8Array"), .kind = .typed_array },
+        .{ .id = ids.int16_array, .name = standardName("Int16Array"), .kind = .typed_array },
+        .{ .id = ids.uint16_array, .name = standardName("Uint16Array"), .kind = .typed_array },
+        .{ .id = ids.int32_array, .name = standardName("Int32Array"), .kind = .typed_array },
+        .{ .id = ids.uint32_array, .name = standardName("Uint32Array"), .kind = .typed_array },
+        .{ .id = ids.big_int64_array, .name = standardName("BigInt64Array"), .kind = .typed_array },
+        .{ .id = ids.big_uint64_array, .name = standardName("BigUint64Array"), .kind = .typed_array },
+        .{ .id = ids.float16_array, .name = standardName("Float16Array"), .kind = .typed_array },
+        .{ .id = ids.float32_array, .name = standardName("Float32Array"), .kind = .typed_array },
+        .{ .id = ids.float64_array, .name = standardName("Float64Array"), .kind = .typed_array },
+        .{ .id = ids.dataview, .name = standardName("DataView"), .kind = .typed_array },
+        .{ .id = ids.big_int, .name = standardName("BigInt"), .kind = .object_data },
+        .{ .id = ids.map, .name = atom.ids.Map, .kind = .collection },
+        .{ .id = ids.set, .name = atom.ids.Set, .kind = .collection },
+        .{ .id = ids.weakmap, .name = atom.ids.WeakMap, .kind = .collection },
+        .{ .id = ids.weakset, .name = atom.ids.WeakSet, .kind = .collection },
+        .{ .id = ids.iterator, .name = standardName("Iterator"), .kind = .iterator },
+        .{ .id = ids.iterator_concat, .name = standardName("Iterator Concat"), .kind = .iterator },
+        .{ .id = ids.iterator_helper, .name = standardName("Iterator Helper"), .kind = .iterator },
+        .{ .id = ids.iterator_wrap, .name = standardName("Iterator Wrap"), .kind = .iterator },
+        .{ .id = ids.map_iterator, .name = standardName("Map Iterator"), .kind = .iterator },
+        .{ .id = ids.set_iterator, .name = standardName("Set Iterator"), .kind = .iterator },
+        .{ .id = ids.array_iterator, .name = standardName("Array Iterator"), .kind = .iterator },
+        .{ .id = ids.string_iterator, .name = standardName("String Iterator"), .kind = .iterator },
+        .{ .id = ids.regexp_string_iterator, .name = standardName("RegExp String Iterator"), .kind = .iterator },
+        .{ .id = ids.generator, .name = standardName("Generator"), .kind = .generator },
+        .{ .id = ids.proxy, .name = atom.ids.Object, .kind = .proxy },
+        .{ .id = ids.promise, .name = standardName("Promise"), .kind = .promise },
+        .{ .id = ids.promise_resolve_function, .name = standardName("PromiseResolveFunction"), .kind = .promise },
+        .{ .id = ids.promise_reject_function, .name = standardName("PromiseRejectFunction"), .kind = .promise },
+        .{ .id = ids.async_function, .name = standardName("AsyncFunction"), .kind = .function },
+        .{ .id = ids.async_function_resolve, .name = standardName("AsyncFunctionResolve"), .kind = .none },
+        .{ .id = ids.async_function_reject, .name = standardName("AsyncFunctionReject"), .kind = .none },
+        .{ .id = ids.async_from_sync_iterator, .name = standardName(""), .kind = .iterator },
+        .{ .id = ids.async_generator_function, .name = standardName("AsyncGeneratorFunction"), .kind = .function },
+        .{ .id = ids.async_generator, .name = standardName("AsyncGenerator"), .kind = .generator },
+        .{ .id = ids.weak_ref, .name = standardName("WeakRef"), .kind = .weak_ref },
+        .{ .id = ids.finalization_registry, .name = standardName("FinalizationRegistry"), .kind = .finalization_registry },
+        .{ .id = ids.reserved_62, .kind = .none },
+        .{ .id = ids.call_site, .name = standardName("CallSite"), .kind = .ordinary },
+        .{ .id = ids.raw_json, .literal = "RawJSON", .kind = .ordinary },
+        .{ .id = ids.reserved_65, .kind = .none },
+        .{ .id = ids.disposable_stack, .name = standardName("DisposableStack"), .kind = .disposable_stack },
+        .{ .id = ids.async_disposable_stack, .name = standardName("AsyncDisposableStack"), .kind = .disposable_stack },
+        .{ .id = ids.global_object, .name = atom.ids.Object, .kind = .global },
+    };
+    var table: [ids.init_count]StandardMeta = undefined;
+    var seen = [_]bool{false} ** ids.init_count;
+    for (items) |item| {
+        if (seen[item.id]) @compileError(std.fmt.comptimePrint("duplicate standard class id {d}", .{item.id}));
+        seen[item.id] = true;
+        table[item.id] = .{ .name = item.name, .literal = item.literal, .kind = item.kind };
+    }
+    for (seen, 0..) |present, index| {
+        if (!present) @compileError(std.fmt.comptimePrint("missing standard class id {d}", .{index}));
+    }
+    for (table[1..ids.proxy]) |meta| {
+        if (meta.name == atom.null_atom) @compileError("ids below proxy require a class name");
+    }
+    break :blk table;
 };
 
 pub fn standardPayloadKind(id: ClassId) PayloadKind {
-    return switch (id) {
-        ids.object,
-        ids.error_,
-        ids.call_site,
-        ids.raw_json,
-        => .ordinary,
-        ids.global_object => .global,
-        ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
+    if (id >= ids.init_count) return .none;
+    return standard_meta[id].kind;
+}
 
-        ids.array => .none,
-        ids.arguments, ids.mapped_arguments => .ordinary,
-        ids.number, ids.string, ids.boolean, ids.symbol, ids.date, ids.big_int => .object_data,
-        ids.module_ns => .none,
-        ids.c_function,
-        ids.bytecode_function,
-        ids.c_function_data,
-        ids.c_closure,
-        ids.generator_function,
-        ids.async_function,
-        ids.async_generator_function,
-        => .function,
-        // qjs u.async_function_data: the object word is the continuation,
-        // not an out-of-line native-function payload.
-        ids.async_function_resolve, ids.async_function_reject => .none,
-        ids.bound_function => .bound_function,
-        ids.for_in_iterator,
-        ids.iterator,
-        ids.iterator_concat,
-        ids.iterator_helper,
-        ids.iterator_wrap,
-        ids.map_iterator,
-        ids.set_iterator,
-        ids.array_iterator,
-        ids.string_iterator,
-        ids.regexp_string_iterator,
-        ids.async_from_sync_iterator,
-        => .iterator,
-        ids.regexp => .regexp,
-        ids.array_buffer, ids.shared_array_buffer => .buffer,
-        ids.uint8c_array,
-        ids.int8_array,
-        ids.uint8_array,
-        ids.int16_array,
-        ids.uint16_array,
-        ids.int32_array,
-        ids.uint32_array,
-        ids.big_int64_array,
-        ids.big_uint64_array,
-        ids.float16_array,
-        ids.float32_array,
-        ids.float64_array,
-        ids.dataview,
-        => .typed_array,
-        ids.map, ids.set, ids.weakmap, ids.weakset => .collection,
-        ids.generator, ids.async_generator => .generator,
-        ids.proxy => .proxy,
-        ids.promise, ids.promise_resolve_function, ids.promise_reject_function => .promise,
-        ids.weak_ref => .weak_ref,
-        ids.finalization_registry => .finalization_registry,
-        else => .none,
-    };
+pub fn standardLiteralName(id: ClassId) ?[]const u8 {
+    if (id >= ids.init_count) return null;
+    return standard_meta[id].literal;
 }

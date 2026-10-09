@@ -31,13 +31,8 @@ pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {
 /// name and forwards here, because `core` cannot import `exec`.
 pub fn cloneBigIntValue(allocator: std.mem.Allocator, value: JSValue) !bignum.BigInt {
     if (value.as(.short_big_int)) |short| return bignum.BigInt.fromIntAlloc(allocator, short);
-    if (value.isBigInt()) {
-        if (value.refHeader()) |header| {
-            const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
-            return big.borrowedValue(allocator).cloneWithAllocator(allocator);
-        }
-    }
-    return error.TypeError;
+    const big = BigIntObject.fromValue(value) orelse return error.TypeError;
+    return big.borrowedValue(allocator).cloneWithAllocator(allocator);
 }
 
 /// A read-only view of a BigInt value for comparing, formatting or
@@ -51,13 +46,8 @@ pub const BigIntView = struct {
 
     pub fn init(allocator: std.mem.Allocator, value: JSValue) !BigIntView {
         if (value.as(.short_big_int)) |short| return .{ .int = try bignum.BigInt.fromIntAlloc(allocator, short), .owned = true };
-        if (value.isBigInt()) {
-            if (value.refHeader()) |header| {
-                const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
-                return .{ .int = big.borrowedValue(allocator), .owned = false };
-            }
-        }
-        return error.TypeError;
+        const big = BigIntObject.fromValue(value) orelse return error.TypeError;
+        return .{ .int = big.borrowedValue(allocator), .owned = false };
     }
 
     pub fn deinit(self: *BigIntView) void {
@@ -72,9 +62,7 @@ pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u
         const printed = dtoa.formatInt64(&bigint_buf, bigint_value);
         return buffer.appendSlice(allocator, printed);
     }
-    if (!value.isBigInt()) return error.TypeError;
-    const header = value.refHeader() orelse return error.TypeError;
-    const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
+    const big = BigIntObject.fromValue(value) orelse return error.TypeError;
     const printed = try big.borrowedValue(allocator).formatBase10Alloc(allocator, interrupt);
     defer allocator.free(printed);
     try buffer.appendSlice(allocator, printed);

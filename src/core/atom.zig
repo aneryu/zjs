@@ -79,930 +79,27 @@ pub fn isValueSymbolKind(kind: AtomKind) bool {
     return kind == .symbol or kind == .global_symbol or kind == .private;
 }
 
-pub const PredefinedAtom = struct {
-    id: Atom,
-    name: []const u8,
-    kind: AtomKind = .string,
-};
+const atom_predefined = @import("atom_predefined.zig");
+const atom_list = @import("atom_list.zig");
 
-/// One row per predefined atom. Ids are 1-based indices into this table;
-/// `ids` and `predefined_atoms` are both generated from it. Order is the
-/// engine contract (keyword token arithmetic, well-known symbol ids, group
-/// markers): append new entries at the end and do not reorder.
-const PredefinedSpec = struct {
-    name: []const u8,
-    kind: AtomKind = .string,
-};
+pub const PredefinedAtom = atom_predefined.PredefinedAtom;
+pub const predefined_atoms = atom_predefined.predefined_atoms;
+pub const ids = atom_predefined.ids;
+pub const last_keyword = atom_predefined.last_keyword;
+pub const last_strict_keyword = atom_predefined.last_strict_keyword;
+pub const predefined_count = atom_predefined.predefined_count;
+pub const first_dynamic_atom = atom_predefined.first_dynamic_atom;
+pub const predefinedName = atom_predefined.predefinedName;
+pub const predefinedById = atom_predefined.predefinedById;
+pub const predefinedId = atom_predefined.predefinedId;
 
-const predefined_spec = [_]PredefinedSpec{
-    // Keywords (1..46). Parser token atoms are `ids.null_ + (tok - TOK_NULL)`.
-    .{ .name = "null" },
-    .{ .name = "false" },
-    .{ .name = "true" },
-    .{ .name = "if" },
-    .{ .name = "else" },
-    .{ .name = "return" },
-    .{ .name = "var" },
-    .{ .name = "this" },
-    .{ .name = "delete" },
-    .{ .name = "void" },
-    .{ .name = "typeof" },
-    .{ .name = "new" },
-    .{ .name = "in" },
-    .{ .name = "instanceof" },
-    .{ .name = "do" },
-    .{ .name = "while" },
-    .{ .name = "for" },
-    .{ .name = "break" },
-    .{ .name = "continue" },
-    .{ .name = "switch" },
-    .{ .name = "case" },
-    .{ .name = "default" },
-    .{ .name = "throw" },
-    .{ .name = "try" },
-    .{ .name = "catch" },
-    .{ .name = "finally" },
-    .{ .name = "function" },
-    .{ .name = "debugger" },
-    .{ .name = "with" },
-    .{ .name = "class" },
-    .{ .name = "const" },
-    .{ .name = "enum" },
-    .{ .name = "export" },
-    .{ .name = "extends" },
-    .{ .name = "import" },
-    .{ .name = "super" },
-    .{ .name = "implements" },
-    .{ .name = "interface" },
-    .{ .name = "let" },
-    .{ .name = "package" },
-    .{ .name = "private" },
-    .{ .name = "protected" },
-    .{ .name = "public" },
-    .{ .name = "static" },
-    .{ .name = "yield" },
-    .{ .name = "await" },
-    // Empty string and common property / typeof keys.
-    .{ .name = "" },
-    .{ .name = "keys" },
-    .{ .name = "size" },
-    .{ .name = "length" },
-    .{ .name = "message" },
-    .{ .name = "cause" },
-    .{ .name = "errors" },
-    .{ .name = "stack" },
-    .{ .name = "name" },
-    .{ .name = "toString" },
-    .{ .name = "toLocaleString" },
-    .{ .name = "valueOf" },
-    .{ .name = "eval" },
-    .{ .name = "prototype" },
-    .{ .name = "constructor" },
-    .{ .name = "configurable" },
-    .{ .name = "writable" },
-    .{ .name = "enumerable" },
-    .{ .name = "value" },
-    .{ .name = "get" },
-    .{ .name = "set" },
-    .{ .name = "of" },
-    .{ .name = "__proto__" },
-    .{ .name = "undefined" },
-    .{ .name = "number" },
-    .{ .name = "boolean" },
-    .{ .name = "string" },
-    .{ .name = "object" },
-    .{ .name = "symbol" },
-    .{ .name = "integer" },
-    .{ .name = "unknown" },
-    .{ .name = "arguments" },
-    .{ .name = "callee" },
-    .{ .name = "caller" },
-    .{ .name = "<eval>" },
-    .{ .name = "<ret>" },
-    .{ .name = "<var>" },
-    .{ .name = "<arg_var>" },
-    .{ .name = "<with>" },
-    .{ .name = "lastIndex" },
-    .{ .name = "target" },
-    .{ .name = "index" },
-    .{ .name = "input" },
-    .{ .name = "defineProperties" },
-    .{ .name = "apply" },
-    .{ .name = "join" },
-    .{ .name = "concat" },
-    .{ .name = "split" },
-    .{ .name = "construct" },
-    .{ .name = "getPrototypeOf" },
-    .{ .name = "setPrototypeOf" },
-    .{ .name = "isExtensible" },
-    .{ .name = "preventExtensions" },
-    .{ .name = "has" },
-    .{ .name = "deleteProperty" },
-    .{ .name = "defineProperty" },
-    .{ .name = "getOwnPropertyDescriptor" },
-    .{ .name = "ownKeys" },
-    .{ .name = "add" },
-    .{ .name = "done" },
-    .{ .name = "next" },
-    .{ .name = "values" },
-    .{ .name = "source" },
-    .{ .name = "flags" },
-    .{ .name = "global" },
-    .{ .name = "unicode" },
-    .{ .name = "raw" },
-    .{ .name = "rawJSON" },
-    .{ .name = "new.target" },
-    .{ .name = "this.active_func" },
-    .{ .name = "<home_object>" },
-    .{ .name = "<computed_field>" },
-    .{ .name = "<static_computed_field>" },
-    .{ .name = "<class_fields_init>" },
-    .{ .name = "<brand>" },
-    .{ .name = "#constructor" },
-    .{ .name = "as" },
-    .{ .name = "from" },
-    .{ .name = "fromAsync" },
-    .{ .name = "meta" },
-    .{ .name = "*default*" },
-    .{ .name = "*" },
-    .{ .name = "Module" },
-    .{ .name = "then" },
-    .{ .name = "resolve" },
-    .{ .name = "reject" },
-    .{ .name = "promise" },
-    .{ .name = "proxy" },
-    .{ .name = "revoke" },
-    .{ .name = "async" },
-    .{ .name = "exec" },
-    .{ .name = "groups" },
-    .{ .name = "indices" },
-    .{ .name = "status" },
-    .{ .name = "reason" },
-    .{ .name = "globalThis" },
-    .{ .name = "bigint" },
-    .{ .name = "not-equal" },
-    .{ .name = "timed-out" },
-    .{ .name = "ok" },
-    .{ .name = "toJSON" },
-    .{ .name = "maxByteLength" },
-    .{ .name = "zip" },
-    .{ .name = "zipKeyed" },
-    .{ .name = "Object" },
-    .{ .name = "Array" },
-    .{ .name = "Error" },
-    .{ .name = "Number" },
-    .{ .name = "String" },
-    .{ .name = "Boolean" },
-    .{ .name = "Symbol" },
-    .{ .name = "Arguments" },
-    .{ .name = "Math" },
-    .{ .name = "JSON" },
-    .{ .name = "Date" },
-    .{ .name = "Function" },
-    .{ .name = "GeneratorFunction" },
-    .{ .name = "ForInIterator" },
-    .{ .name = "RegExp" },
-    .{ .name = "ArrayBuffer" },
-    .{ .name = "SharedArrayBuffer" },
-    .{ .name = "Uint8ClampedArray" },
-    .{ .name = "Int8Array" },
-    .{ .name = "Uint8Array" },
-    .{ .name = "Int16Array" },
-    .{ .name = "Uint16Array" },
-    .{ .name = "Int32Array" },
-    .{ .name = "Uint32Array" },
-    .{ .name = "BigInt64Array" },
-    .{ .name = "BigUint64Array" },
-    .{ .name = "Float16Array" },
-    .{ .name = "Float32Array" },
-    .{ .name = "Float64Array" },
-    .{ .name = "DataView" },
-    .{ .name = "BigInt" },
-    .{ .name = "WeakRef" },
-    .{ .name = "FinalizationRegistry" },
-    .{ .name = "Map" },
-    .{ .name = "Set" },
-    .{ .name = "WeakMap" },
-    .{ .name = "WeakSet" },
-    .{ .name = "Iterator" },
-    .{ .name = "Iterator Concat" },
-    .{ .name = "Iterator Helper" },
-    .{ .name = "Iterator Wrap" },
-    .{ .name = "Map Iterator" },
-    .{ .name = "Set Iterator" },
-    .{ .name = "Array Iterator" },
-    .{ .name = "String Iterator" },
-    .{ .name = "RegExp String Iterator" },
-    .{ .name = "Generator" },
-    .{ .name = "Proxy" },
-    .{ .name = "Promise" },
-    .{ .name = "PromiseResolveFunction" },
-    .{ .name = "PromiseRejectFunction" },
-    .{ .name = "AsyncFunction" },
-    .{ .name = "AsyncFunctionResolve" },
-    .{ .name = "AsyncFunctionReject" },
-    .{ .name = "AsyncGeneratorFunction" },
-    .{ .name = "AsyncGenerator" },
-    .{ .name = "EvalError" },
-    .{ .name = "RangeError" },
-    .{ .name = "ReferenceError" },
-    .{ .name = "SyntaxError" },
-    .{ .name = "TypeError" },
-    .{ .name = "URIError" },
-    .{ .name = "InternalError" },
-    .{ .name = "DOMException" },
-    .{ .name = "CallSite" },
-    // Private brand and well-known symbols.
-    .{ .name = "<brand>", .kind = .private },
-    .{ .name = "Symbol.toPrimitive", .kind = .symbol },
-    .{ .name = "Symbol.iterator", .kind = .symbol },
-    .{ .name = "Symbol.match", .kind = .symbol },
-    .{ .name = "Symbol.matchAll", .kind = .symbol },
-    .{ .name = "Symbol.replace", .kind = .symbol },
-    .{ .name = "Symbol.search", .kind = .symbol },
-    .{ .name = "Symbol.split", .kind = .symbol },
-    .{ .name = "Symbol.toStringTag", .kind = .symbol },
-    .{ .name = "Symbol.isConcatSpreadable", .kind = .symbol },
-    .{ .name = "Symbol.hasInstance", .kind = .symbol },
-    .{ .name = "Symbol.species", .kind = .symbol },
-    .{ .name = "Symbol.unscopables", .kind = .symbol },
-    .{ .name = "Symbol.asyncIterator", .kind = .symbol },
-    .{ .name = "Symbol.asyncDispose", .kind = .symbol },
-    .{ .name = "Symbol.dispose", .kind = .symbol },
-    // Host-internal markers; `zjs_last_internal_marker` aliases the last one.
-    .{ .name = "__zjs_proto_keepalive" },
-    .{ .name = "__zjs_BigInt_proto" },
-    .{ .name = "__zjs_Boolean_proto" },
-    .{ .name = "__zjs_Number_proto" },
-    .{ .name = "__zjs_String_proto" },
-    .{ .name = "__zjs_Symbol_proto" },
-    .{ .name = "__zjs_array_concat" },
-    .{ .name = "__zjs_array_constructor" },
-    .{ .name = "__zjs_array_iterator_kind" },
-    .{ .name = "__zjs_array_species_getter" },
-    .{ .name = "__zjs_array_to_locale_string" },
-    .{ .name = "__zjs_array_to_string" },
-    .{ .name = "__zjs_arraybuffer_proto" },
-    .{ .name = "__zjs_atomics_static" },
-    .{ .name = "__zjs_buffer_method_kind" },
-    .{ .name = "__zjs_define_property_kind" },
-    .{ .name = "__zjs_error_to_string" },
-    .{ .name = "__zjs_function_to_string" },
-    .{ .name = "__zjs_immutable_prototype" },
-    .{ .name = "__zjs_iterator_accessor" },
-    .{ .name = "__zjs_iterator_method" },
-    .{ .name = "__zjs_iterator_static" },
-    .{ .name = "__zjs_json_static" },
-    .{ .name = "__zjs_number_method" },
-    .{ .name = "__zjs_object_method" },
-    .{ .name = "__zjs_object_static" },
-    .{ .name = "__zjs_primitive_method" },
-    .{ .name = "__zjs_reflect_set_prototype_of" },
-    .{ .name = "__zjs_reflect_static" },
-    .{ .name = "__zjs_regexp_method" },
-    .{ .name = "__zjs_string_method" },
-    .{ .name = "__zjs_typedarray_method" },
-    .{ .name = "__zjs_typedarray_static" },
-    // Builtin and registry names.
-    .{ .name = "assign" },
-    .{ .name = "create" },
-    .{ .name = "getOwnPropertyDescriptors" },
-    .{ .name = "getOwnPropertyNames" },
-    .{ .name = "getOwnPropertySymbols" },
-    .{ .name = "hasOwn" },
-    .{ .name = "seal" },
-    .{ .name = "isSealed" },
-    .{ .name = "isFrozen" },
-    .{ .name = "freeze" },
-    .{ .name = "fromEntries" },
-    .{ .name = "groupBy" },
-    .{ .name = "hasOwnProperty" },
-    .{ .name = "isPrototypeOf" },
-    .{ .name = "propertyIsEnumerable" },
-    .{ .name = "__defineGetter__" },
-    .{ .name = "__defineSetter__" },
-    .{ .name = "__lookupGetter__" },
-    .{ .name = "__lookupSetter__" },
-    .{ .name = "bind" },
-    .{ .name = "isArray" },
-    .{ .name = "map" },
-    .{ .name = "filter" },
-    .{ .name = "reduce" },
-    .{ .name = "reduceRight" },
-    .{ .name = "forEach" },
-    .{ .name = "push" },
-    .{ .name = "pop" },
-    .{ .name = "shift" },
-    .{ .name = "unshift" },
-    .{ .name = "some" },
-    .{ .name = "every" },
-    .{ .name = "find" },
-    .{ .name = "findIndex" },
-    .{ .name = "findLast" },
-    .{ .name = "findLastIndex" },
-    .{ .name = "includes" },
-    .{ .name = "indexOf" },
-    .{ .name = "lastIndexOf" },
-    .{ .name = "at" },
-    .{ .name = "copyWithin" },
-    .{ .name = "fill" },
-    .{ .name = "slice" },
-    .{ .name = "splice" },
-    .{ .name = "reverse" },
-    .{ .name = "sort" },
-    .{ .name = "flat" },
-    .{ .name = "flatMap" },
-    .{ .name = "toReversed" },
-    .{ .name = "toSorted" },
-    .{ .name = "toSpliced" },
-    .{ .name = "fromCharCode" },
-    .{ .name = "fromCodePoint" },
-    .{ .name = "charAt" },
-    .{ .name = "charCodeAt" },
-    .{ .name = "codePointAt" },
-    .{ .name = "substring" },
-    .{ .name = "toUpperCase" },
-    .{ .name = "toLowerCase" },
-    .{ .name = "toLocaleUpperCase" },
-    .{ .name = "toLocaleLowerCase" },
-    .{ .name = "startsWith" },
-    .{ .name = "endsWith" },
-    .{ .name = "localeCompare" },
-    .{ .name = "repeat" },
-    .{ .name = "padStart" },
-    .{ .name = "padEnd" },
-    .{ .name = "normalize" },
-    .{ .name = "isWellFormed" },
-    .{ .name = "toWellFormed" },
-    .{ .name = "trim" },
-    .{ .name = "trimStart" },
-    .{ .name = "trimEnd" },
-    .{ .name = "anchor" },
-    .{ .name = "big" },
-    .{ .name = "blink" },
-    .{ .name = "bold" },
-    .{ .name = "fixed" },
-    .{ .name = "fontcolor" },
-    .{ .name = "fontsize" },
-    .{ .name = "italics" },
-    .{ .name = "link" },
-    .{ .name = "small" },
-    .{ .name = "strike" },
-    .{ .name = "substr" },
-    .{ .name = "replace" },
-    .{ .name = "replaceAll" },
-    .{ .name = "sup" },
-    .{ .name = "isInteger" },
-    .{ .name = "isSafeInteger" },
-    .{ .name = "toFixed" },
-    .{ .name = "toExponential" },
-    .{ .name = "toPrecision" },
-    .{ .name = "asIntN" },
-    .{ .name = "asUintN" },
-    .{ .name = "revocable" },
-    .{ .name = "getTime" },
-    .{ .name = "getTimezoneOffset" },
-    .{ .name = "setTime" },
-    .{ .name = "toISOString" },
-    .{ .name = "Reflect" },
-    .{ .name = "Atomics" },
-    .{ .name = "performance" },
-    .{ .name = "print" },
-    .{ .name = "console" },
-    .{ .name = "now" },
-    .{ .name = "timeOrigin" },
-    .{ .name = "decodeURI" },
-    .{ .name = "decodeURIComponent" },
-    .{ .name = "encodeURI" },
-    .{ .name = "encodeURIComponent" },
-    .{ .name = "escape" },
-    .{ .name = "unescape" },
-    .{ .name = "isNaN" },
-    .{ .name = "isFinite" },
-    .{ .name = "parseInt" },
-    .{ .name = "parseFloat" },
-    .{ .name = "btoa" },
-    .{ .name = "atob" },
-    .{ .name = "queueMicrotask" },
-    .{ .name = "gc" },
-    .{ .name = "navigator" },
-    .{ .name = "NaN" },
-    .{ .name = "POSITIVE_INFINITY" },
-    .{ .name = "NEGATIVE_INFINITY" },
-    .{ .name = "MAX_VALUE" },
-    .{ .name = "MIN_VALUE" },
-    .{ .name = "MAX_SAFE_INTEGER" },
-    .{ .name = "MIN_SAFE_INTEGER" },
-    .{ .name = "EPSILON" },
-    .{ .name = "description" },
-    .{ .name = "sub" },
-    .{ .name = "match" },
-    .{ .name = "matchAll" },
-    .{ .name = "search" },
-    .{ .name = "UTC" },
-    .{ .name = "parse" },
-    .{ .name = "getFullYear" },
-    .{ .name = "getMonth" },
-    .{ .name = "getDate" },
-    .{ .name = "getDay" },
-    .{ .name = "getHours" },
-    .{ .name = "getMinutes" },
-    .{ .name = "and" },
-    .{ .name = "compareExchange" },
-    .{ .name = "exchange" },
-    .{ .name = "isLockFree" },
-    .{ .name = "load" },
-    .{ .name = "notify" },
-    .{ .name = "or" },
-    .{ .name = "pause" },
-    .{ .name = "store" },
-    .{ .name = "wait" },
-    .{ .name = "waitAsync" },
-    .{ .name = "xor" },
-    .{ .name = "ABORT_ERR" },
-    .{ .name = "AggregateError" },
-    .{ .name = "DATA_CLONE_ERR" },
-    .{ .name = "DOMSTRING_SIZE_ERR" },
-    .{ .name = "HIERARCHY_REQUEST_ERR" },
-    .{ .name = "INDEX_SIZE_ERR" },
-    .{ .name = "INUSE_ATTRIBUTE_ERR" },
-    .{ .name = "INVALID_ACCESS_ERR" },
-    .{ .name = "INVALID_CHARACTER_ERR" },
-    .{ .name = "INVALID_MODIFICATION_ERR" },
-    .{ .name = "INVALID_NODE_TYPE_ERR" },
-    .{ .name = "INVALID_STATE_ERR" },
-    .{ .name = "NAMESPACE_ERR" },
-    .{ .name = "NETWORK_ERR" },
-    .{ .name = "NOT_FOUND_ERR" },
-    .{ .name = "NOT_SUPPORTED_ERR" },
-    .{ .name = "NO_DATA_ALLOWED_ERR" },
-    .{ .name = "NO_MODIFICATION_ALLOWED_ERR" },
-    .{ .name = "QUOTA_EXCEEDED_ERR" },
-    .{ .name = "SECURITY_ERR" },
-    .{ .name = "SYNTAX_ERR" },
-    .{ .name = "TIMEOUT_ERR" },
-    .{ .name = "TYPE_MISMATCH_ERR" },
-    .{ .name = "TypedArray" },
-    .{ .name = "URL_MISMATCH_ERR" },
-    .{ .name = "VALIDATION_ERR" },
-    .{ .name = "WRONG_DOCUMENT_ERR" },
-    .{ .name = "[Symbol.matchAll]" },
-    .{ .name = "[Symbol.match]" },
-    .{ .name = "[Symbol.replace]" },
-    .{ .name = "[Symbol.search]" },
-    .{ .name = "[Symbol.split]" },
-    .{ .name = "abs" },
-    .{ .name = "acos" },
-    .{ .name = "acosh" },
-    .{ .name = "all" },
-    .{ .name = "allSettled" },
-    .{ .name = "any" },
-    .{ .name = "asin" },
-    .{ .name = "asinh" },
-    .{ .name = "atan" },
-    .{ .name = "atan2" },
-    .{ .name = "atanh" },
-    .{ .name = "call" },
-    .{ .name = "captureStackTrace" },
-    .{ .name = "cbrt" },
-    .{ .name = "ceil" },
-    .{ .name = "clear" },
-    .{ .name = "clz32" },
-    .{ .name = "compile" },
-    .{ .name = "cos" },
-    .{ .name = "cosh" },
-    .{ .name = "deref" },
-    .{ .name = "difference" },
-    .{ .name = "drop" },
-    .{ .name = "entries" },
-    .{ .name = "exp" },
-    .{ .name = "expm1" },
-    .{ .name = "f16round" },
-    .{ .name = "floor" },
-    .{ .name = "fromBase64" },
-    .{ .name = "fromHex" },
-    .{ .name = "fround" },
-    .{ .name = "getBigInt64" },
-    .{ .name = "getBigUint64" },
-    .{ .name = "getFloat16" },
-    .{ .name = "getFloat32" },
-    .{ .name = "getFloat64" },
-    .{ .name = "getInt16" },
-    .{ .name = "getInt32" },
-    .{ .name = "getInt8" },
-    .{ .name = "getMilliseconds" },
-    .{ .name = "getOrInsert" },
-    .{ .name = "getOrInsertComputed" },
-    .{ .name = "getSeconds" },
-    .{ .name = "getUTCDate" },
-    .{ .name = "getUTCDay" },
-    .{ .name = "getUTCFullYear" },
-    .{ .name = "getUTCHours" },
-    .{ .name = "getUTCMilliseconds" },
-    .{ .name = "getUTCMinutes" },
-    .{ .name = "getUTCMonth" },
-    .{ .name = "getUTCSeconds" },
-    .{ .name = "getUint16" },
-    .{ .name = "getUint32" },
-    .{ .name = "getUint8" },
-    .{ .name = "getYear" },
-    .{ .name = "grow" },
-    .{ .name = "hypot" },
-    .{ .name = "imul" },
-    .{ .name = "intersection" },
-    .{ .name = "is" },
-    .{ .name = "isDisjointFrom" },
-    .{ .name = "isError" },
-    .{ .name = "isRawJSON" },
-    .{ .name = "isSubsetOf" },
-    .{ .name = "isSupersetOf" },
-    .{ .name = "isView" },
-    .{ .name = "keyFor" },
-    .{ .name = "log" },
-    .{ .name = "log10" },
-    .{ .name = "log1p" },
-    .{ .name = "log2" },
-    .{ .name = "max" },
-    .{ .name = "min" },
-    .{ .name = "pow" },
-    .{ .name = "race" },
-    .{ .name = "random" },
-    .{ .name = "register" },
-    .{ .name = "resize" },
-    .{ .name = "round" },
-    .{ .name = "setBigInt64" },
-    .{ .name = "setBigUint64" },
-    .{ .name = "setDate" },
-    .{ .name = "setFloat16" },
-    .{ .name = "setFloat32" },
-    .{ .name = "setFloat64" },
-    .{ .name = "setFromBase64" },
-    .{ .name = "setFromHex" },
-    .{ .name = "setFullYear" },
-    .{ .name = "setHours" },
-    .{ .name = "setInt16" },
-    .{ .name = "setInt32" },
-    .{ .name = "setInt8" },
-    .{ .name = "setMilliseconds" },
-    .{ .name = "setMinutes" },
-    .{ .name = "setMonth" },
-    .{ .name = "setSeconds" },
-    .{ .name = "setUTCDate" },
-    .{ .name = "setUTCFullYear" },
-    .{ .name = "setUTCHours" },
-    .{ .name = "setUTCMilliseconds" },
-    .{ .name = "setUTCMinutes" },
-    .{ .name = "setUTCMonth" },
-    .{ .name = "setUTCSeconds" },
-    .{ .name = "setUint16" },
-    .{ .name = "setUint32" },
-    .{ .name = "setUint8" },
-    .{ .name = "setYear" },
-    .{ .name = "sign" },
-    .{ .name = "sin" },
-    .{ .name = "sinh" },
-    .{ .name = "sliceToImmutable" },
-    .{ .name = "sqrt" },
-    .{ .name = "stringify" },
-    .{ .name = "subarray" },
-    .{ .name = "sumPrecise" },
-    .{ .name = "symmetricDifference" },
-    .{ .name = "take" },
-    .{ .name = "tan" },
-    .{ .name = "tanh" },
-    .{ .name = "test" },
-    .{ .name = "toArray" },
-    .{ .name = "toBase64" },
-    .{ .name = "toDateString" },
-    .{ .name = "toHex" },
-    .{ .name = "toLocaleDateString" },
-    .{ .name = "toLocaleTimeString" },
-    .{ .name = "toTimeString" },
-    .{ .name = "toUTCString" },
-    .{ .name = "transfer" },
-    .{ .name = "transferToFixedLength" },
-    .{ .name = "transferToImmutable" },
-    .{ .name = "trunc" },
-    .{ .name = "union" },
-    .{ .name = "unregister" },
-    .{ .name = "withResolvers" },
-    .{ .name = "__zjs_native_name" },
-    .{ .name = "__zjs_dstr_get" },
-    .{ .name = "__zjs_dstr_elide" },
-    .{ .name = "__zjs_dstr_rest" },
-    .{ .name = "__zjs_dstr_obj_rest" },
-    .{ .name = "__zjs_dstr_close" },
-    .{ .name = "__zjs_dstr_require_iterator" },
-    .{ .name = "trimLeft" },
-    .{ .name = "trimRight" },
-    .{ .name = "__primitive" },
-    .{ .name = "toPrimitive" },
-    .{ .name = "species" },
-    .{ .name = "iterator" },
-    .{ .name = "toStringTag" },
-    .{ .name = "isConcatSpreadable" },
-    .{ .name = "hasInstance" },
-    .{ .name = "unscopables" },
-    .{ .name = "asyncIterator" },
-    .{ .name = "asyncDispose" },
-    .{ .name = "dispose" },
-    .{ .name = "toGMTString" },
-    .{ .name = "ignoreCase" },
-    .{ .name = "multiline" },
-    .{ .name = "dotAll" },
-    .{ .name = "sticky" },
-    .{ .name = "hasIndices" },
-    .{ .name = "unicodeSets" },
-    .{ .name = "stackTraceLimit" },
-    .{ .name = "__zjs_collection_method_owner" },
-    .{ .name = "byteLength" },
-    .{ .name = "detached" },
-    .{ .name = "resizable" },
-    .{ .name = "growable" },
-    .{ .name = "BYTES_PER_ELEMENT" },
-    .{ .name = "buffer" },
-    .{ .name = "byteOffset" },
-    .{ .name = "Infinity" },
-    .{ .name = "__zjs_throw_type_error_function_proto" },
-    .{ .name = "__zjs_throw_type_error_intrinsic" },
-    .{ .name = "scriptArgs" },
-    .{ .name = "$_" },
-    .{ .name = "lastMatch" },
-    .{ .name = "$&" },
-    .{ .name = "lastParen" },
-    .{ .name = "$+" },
-    .{ .name = "leftContext" },
-    .{ .name = "$`" },
-    .{ .name = "rightContext" },
-    .{ .name = "$'" },
-    .{ .name = "$1" },
-    .{ .name = "$2" },
-    .{ .name = "$3" },
-    .{ .name = "$4" },
-    .{ .name = "$5" },
-    .{ .name = "$6" },
-    .{ .name = "$7" },
-    .{ .name = "$8" },
-    .{ .name = "$9" },
-    .{ .name = "SuppressedError" },
-    .{ .name = "DisposableStack" },
-    .{ .name = "use" },
-    .{ .name = "adopt" },
-    .{ .name = "defer" },
-    .{ .name = "move" },
-    .{ .name = "disposed" },
-    .{ .name = "AsyncDisposableStack" },
-    .{ .name = "disposeAsync" },
-    .{ .name = "allKeyed" },
-    .{ .name = "allSettledKeyed" },
-    .{ .name = "immutable" },
-    // S3 predefined property keys (append-only).
-    .{ .name = "alphabet" },
-    .{ .name = "lastChunkHandling" },
-    .{ .name = "omitPadding" },
-    .{ .name = "padding" },
-    .{ .name = "mode" },
-    .{ .name = "prepareStackTrace" },
-    .{ .name = "type" },
-    .{ .name = "userAgent" },
-    .{ .name = "E" },
-    .{ .name = "LN10" },
-    .{ .name = "LN2" },
-    .{ .name = "LOG2E" },
-    .{ .name = "LOG10E" },
-    .{ .name = "PI" },
-    .{ .name = "SQRT1_2" },
-    .{ .name = "SQRT2" },
-    .{ .name = "k" },
-    .{ .name = "mapfn" },
-    .{ .name = "this_arg" },
-    .{ .name = "iter" },
-    .{ .name = "items" },
-    .{ .name = "len" },
-    .{ .name = "phase" },
-    .{ .name = "state" },
-    .{ .name = "pending" },
-    .{ .name = "rejected" },
-    .{ .name = "fileName" },
-    .{ .name = "lineNumber" },
-    .{ .name = "columnNumber" },
-    .{ .name = "code" },
-    .{ .name = "error" },
-    .{ .name = "suppressed" },
-    .{ .name = "url" },
-    .{ .name = "main" },
-    .{ .name = "read" },
-    .{ .name = "written" },
-};
+pub const CompileAtomScope = @import("atom_compile_scope.zig").CompileAtomScope;
 
-pub const predefined_atoms = blk: {
-    @setEvalBranchQuota(100000);
-    var out: [predefined_spec.len]PredefinedAtom = undefined;
-    for (predefined_spec, 0..) |item, i| {
-        out[i] = .{
-            .id = Atom.fromRaw(@intCast(i + 1)),
-            .name = item.name,
-            .kind = item.kind,
-        };
-    }
-    break :blk out;
-};
-
-/// Call-site spellings that differ from the spec name: Zig keywords,
-/// typeof-result aliases, pseudo-bindings, well-known symbols, and the
-/// `zjs_last_*` group markers. `caller` / `arguments` keep their table
-/// names; the comptime asserts below pin the spellings.
-const PredefinedIdAlias = struct {
-    field: []const u8,
-    name: []const u8,
-    kind: AtomKind = .string,
-};
-
-const predefined_id_aliases = [_]PredefinedIdAlias{
-    .{ .field = "null_", .name = "null" },
-    .{ .field = "false_", .name = "false" },
-    .{ .field = "true_", .name = "true" },
-    .{ .field = "if_", .name = "if" },
-    .{ .field = "this_", .name = "this" },
-    .{ .field = "eval_", .name = "eval" },
-    .{ .field = "undefined_", .name = "undefined" },
-    // typeof result strings: interned atoms, not a fresh alloc per `OP_typeof`.
-    .{ .field = "type_function", .name = "function" },
-    .{ .field = "type_number", .name = "number" },
-    .{ .field = "type_boolean", .name = "boolean" },
-    .{ .field = "type_string", .name = "string" },
-    .{ .field = "type_object", .name = "object" },
-    .{ .field = "type_symbol", .name = "symbol" },
-    .{ .field = "type_bigint", .name = "bigint" },
-    .{ .field = "ret", .name = "<ret>" },
-    .{ .field = "var_object", .name = "<var>" },
-    .{ .field = "arg_var_object", .name = "<arg_var>" },
-    .{ .field = "with_object", .name = "<with>" },
-    .{ .field = "new_target", .name = "new.target" },
-    .{ .field = "this_active_func", .name = "this.active_func" },
-    .{ .field = "home_object", .name = "<home_object>" },
-    .{ .field = "class_fields_init", .name = "<class_fields_init>" },
-    .{ .field = "async_", .name = "async" },
-    .{ .field = "Private_brand", .name = "<brand>", .kind = .private },
-    .{ .field = "Symbol_iterator", .name = "Symbol.iterator", .kind = .symbol },
-    .{ .field = "Symbol_asyncIterator", .name = "Symbol.asyncIterator", .kind = .symbol },
-    .{ .field = "Symbol_asyncDispose", .name = "Symbol.asyncDispose", .kind = .symbol },
-    .{ .field = "Symbol_dispose", .name = "Symbol.dispose", .kind = .symbol },
-    .{ .field = "zjs_proto_keepalive", .name = "__zjs_proto_keepalive" },
-    .{ .field = "zjs_last_internal_marker", .name = "__zjs_typedarray_static" },
-    .{ .field = "zjs_last_registry_name", .name = "toISOString" },
-    .{ .field = "zjs_last_global_setup_name", .name = "parseFloat" },
-    .{ .field = "zjs_last_global_extra_name", .name = "xor" },
-    .{ .field = "zjs_last_registry_extra_name", .name = "withResolvers" },
-    .{ .field = "zjs_last_startup_name", .name = "immutable" },
-    .{ .field = "return_", .name = "return" },
-    .{ .field = "type_", .name = "type" },
-    .{ .field = "error_", .name = "error" },
-    .{ .field = "zjs_last_predefined_key_name", .name = "written" },
-};
-
-fn predefinedSpecId(comptime name: []const u8, comptime kind: AtomKind) Atom {
-    @setEvalBranchQuota(10000);
-    for (predefined_spec, 0..) |item, i| {
-        if (item.kind == kind and std.mem.eql(u8, item.name, name)) {
-            return Atom.fromRaw(@intCast(i + 1));
-        }
-    }
-    @compileError("predefined atom not in spec: " ++ name);
-}
-
-fn predefinedFieldName(comptime index: usize) []const u8 {
-    const item = predefined_spec[index];
-    if (item.name.len == 0) return "empty_string";
-    // The only duplicate spelling: string `<brand>` (computed field) vs private.
-    if (std.mem.eql(u8, item.name, "<brand>")) {
-        return "<brand>__" ++ @tagName(item.kind);
-    }
-    return item.name;
-}
-
-const PredefinedIds = blk: {
-    @setEvalBranchQuota(200000);
-    const n = predefined_spec.len + predefined_id_aliases.len;
-    var field_names: [n][]const u8 = undefined;
-    var field_types: [n]type = @splat(Atom);
-    var field_attrs: [n]std.builtin.Type.StructField.Attributes = undefined;
-    for (predefined_spec, 0..) |_, i| {
-        field_names[i] = predefinedFieldName(i);
-        field_attrs[i] = .{
-            .@"comptime" = true,
-            .default_value_ptr = &predefined_atoms[i].id,
-        };
-    }
-    for (predefined_id_aliases, 0..) |alias, j| {
-        const i = predefined_spec.len + j;
-        field_names[i] = alias.field;
-        const id = predefinedSpecId(alias.name, alias.kind);
-        field_attrs[i] = .{
-            .@"comptime" = true,
-            .default_value_ptr = &predefined_atoms[id.raw() - 1].id,
-        };
-    }
-    break :blk @Struct(.auto, null, &field_names, &field_types, &field_attrs);
-};
-
-/// Predefined atom ids generated from `predefined_spec` (1-based index).
-/// Historical spellings (`if_`, `type_function`, `zjs_last_*`, …) are
-/// aliases so existing call sites keep compiling.
-pub const ids: PredefinedIds = .{};
-
-pub const last_keyword = ids.await;
-pub const last_strict_keyword = ids.yield;
-pub const predefined_count = predefined_atoms.len;
-pub const first_dynamic_atom = predefined_count + 1;
-
-comptime {
-    std.debug.assert(@sizeOf(Atom) == 4);
-    std.debug.assert(@bitSizeOf(Atom) == 32);
-    std.debug.assert(@sizeOf(PredefinedIds) == 0);
-    std.debug.assert(null_atom == .empty);
-    std.debug.assert(null_atom.raw() == 0);
-    std.debug.assert(tagged_int_bit == @as(u32, 1) << 31);
-    std.debug.assert(max_int_atom == tagged_int_bit - 1);
-    std.debug.assert(predefined_count == 692);
-    std.debug.assert(ids.null_.raw() == 1);
-    std.debug.assert(ids.await.raw() == 46);
-    std.debug.assert(ids.yield.raw() == 45);
-    std.debug.assert(ids.zjs_last_startup_name.raw() == 656);
-    std.debug.assert(ids.zjs_last_predefined_key_name.raw() == predefined_count);
-    // Legacy-function gates compare `caller`/`arguments` by id, the way qjs
-    // compares against JS_ATOM_caller. Pin both to the table so a renumbering
-    // fails the build instead of silently turning those gates into no-ops.
-    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.caller.raw() - 1].name, "caller"));
-    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.arguments.raw() - 1].name, "arguments"));
-    std.debug.assert(first_dynamic_atom == predefined_count + 1);
-}
-
-const PredefinedMapEntry = struct { []const u8, Atom };
-
-fn predefinedKindCount(comptime kind: AtomKind) comptime_int {
-    var count: comptime_int = 0;
-    for (predefined_atoms) |entry| {
-        if (entry.kind == kind) count += 1;
-    }
-    return count;
-}
-
-fn makePredefinedMapEntries(comptime kind: AtomKind) [predefinedKindCount(kind)]PredefinedMapEntry {
-    var entries: [predefinedKindCount(kind)]PredefinedMapEntry = undefined;
-    var index: usize = 0;
-    for (predefined_atoms) |entry| {
-        if (entry.kind == kind) {
-            entries[index] = .{ entry.name, entry.id };
-            index += 1;
-        }
-    }
-    return entries;
-}
-
-const predefined_symbol_map = blk: {
-    @setEvalBranchQuota(10000);
-    break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.symbol));
-};
-const predefined_private_map = blk: {
-    @setEvalBranchQuota(10000);
-    break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.private));
-};
-
-// QuickJS puts its predefined and dynamically-created atoms behind the same
-// hash lookup. Keep the immutable predefined half in static storage, but use
-// the same hash as `string_index`: a miss must not linearly compare every
-// predefined spelling of the same length before probing the dynamic table.
-// 676 string atoms in 2048 buckets leave the table at 33.0% load.
-const predefined_string_hash_capacity = 2048;
-const predefined_string_hash_mask = predefined_string_hash_capacity - 1;
-const predefined_string_hash_table = blk: {
-    @setEvalBranchQuota(100000);
-    var slots = [_]Atom{null_atom} ** predefined_string_hash_capacity;
-    for (predefined_atoms) |entry| {
-        if (entry.kind != .string) continue;
-        std.debug.assert(parseArrayIndex(entry.name) == null);
-        const hash = std.hash.Wyhash.hash(0, entry.name);
-        var index: usize = @intCast(hash & predefined_string_hash_mask);
-        while (slots[index] != null_atom) {
-            index = (index + 1) & predefined_string_hash_mask;
-        }
-        slots[index] = entry.id;
-    }
-    break :blk slots;
-};
-
-inline fn predefinedStringIdHashed(bytes: []const u8, hash: u64) ?Atom {
-    var index: usize = @intCast(hash & predefined_string_hash_mask);
-    var remaining: usize = predefined_string_hash_capacity;
-    while (remaining != 0) : (remaining -= 1) {
-        const id = predefined_string_hash_table[index];
-        if (id == null_atom) return null;
-        if (std.mem.eql(u8, predefined_atoms[id.raw() - 1].name, bytes)) return id;
-        index = (index + 1) & predefined_string_hash_mask;
-    }
-    unreachable;
-}
+const parseArrayIndex = atom_list.parseArrayIndex;
+pub const max_array_index = atom_list.max_array_index;
+pub const parseHighArrayIndex = atom_list.parseHighArrayIndex;
+pub const AtomListBuilder = atom_list.AtomListBuilder;
+pub const freeAtomList = atom_list.freeAtomList;
 
 pub const DynamicAtom = struct {
     id: Atom,
@@ -1024,9 +121,7 @@ pub const DynamicAtom = struct {
     /// this atom's bucket, `null_atom` at the end of the chain.
     hash_next: Atom = null_atom,
     kind: AtomKind,
-    /// TGC S3 §2.1. `ref_count` is gone: an entry is either IN USE (a spelling
-    /// is bound to this id) or free-listed. Liveness is decided once per major
-    /// by `sweepDead`, never by a store or a drop.
+    /// In use, or free-listed. `sweepDead` decides liveness.
     occupied: bool,
     /// TGC S3. Last major mark epoch that
     /// reached this entry through a `visitAtom` edge, a root, the insertion
@@ -1690,30 +785,25 @@ pub const AtomTable = struct {
         const hash = spellingHash(bytes, .string);
         const found = self.findAtom(bytes, .string, hash);
         if (found != null_atom) {
-            // qjs:3207 / 3370: `__JS_AtomIsConst` atoms carry no ref count.
             if (found.isConst()) return found;
-            const entry = &self.entries[found.raw() - first_dynamic_atom];
+            const entry = self.findDynamic(found).?;
             std.debug.assert(entry.occupied and entry.kind == .string);
             return found;
         }
-        return self.internDynamic(bytes, .string, true, false, hash);
+        return self.internDynamic(bytes, .string, .{ .lookup = hash });
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false, 0);
+        return self.internDynamic(description, atom_kind, .{});
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, false, 0);
+        return self.internDynamic(description, .symbol, .{});
     }
 
     pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
-        return self.internDynamic("", .symbol, false, true, 0);
-    }
-
-    pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internGlobalSymbol(description);
+        return self.internDynamic("", .symbol, .{ .no_description = true });
     }
 
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1731,7 +821,7 @@ pub const AtomTable = struct {
             std.debug.assert(entry.occupied and entry.kind == .global_symbol);
             return found;
         }
-        return self.internDynamic(description, .global_symbol, true, false, hash);
+        return self.internDynamic(description, .global_symbol, .{ .lookup = hash });
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1751,7 +841,7 @@ pub const AtomTable = struct {
             self.noteRootedSymbol(dynamicEntryIndex(found).?);
             return found;
         }
-        const id = try self.internDynamic(description, .global_symbol, true, false, hash);
+        const id = try self.internDynamic(description, .global_symbol, .{ .lookup = hash });
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         self.noteRootedSymbol(dynamicEntryIndex(id).?);
@@ -2138,12 +1228,8 @@ pub const AtomTable = struct {
         const text = entry.name();
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = try rt.singleByteString(text[0]);
-            // QJS `__JS_AtomToValue` is a single
-            // `atom_array[atom]` load + refcount bump because the atom entry
-            // IS the string. Bind the shared single-byte body into the
-            // entry's materialized-string slot so `toStringValueForPush`'s
-            // inline cached arm hits on every later push instead of
-            // repeating this findDynamic hash walk per OP_push_atom_value.
+            // qjs bumps a refcount in `__JS_AtomToValue`; zjs caches the body so
+            // `toStringValueForPush` hits without walking the table again.
             if (entry.kind == .string and entry.body == null) {
                 entry.body = cached.header();
                 if (cached.atom_id == string.String.no_atom_id) cached.bindAtomId(rt, atom_id);
@@ -2364,13 +1450,14 @@ pub const AtomTable = struct {
         return body;
     }
 
-    /// `lookup_hash` is the spelling hash the caller already computed while
-    /// missing in the chain; it is only read for the chained kinds. Every
-    /// `index_entry` caller has just proved the atom is absent, mirroring
-    /// `__JS_NewAtom`, where the create path is the fall-through of the same
-    /// function that did the chain walk.
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
-        const id = try self.internDynamicInner(bytes, atom_kind, index_entry, no_symbol_description, lookup_hash);
+    /// `lookup` is the hash from the miss that fell through into this create.
+    const DynamicIntern = struct {
+        lookup: ?u32 = null,
+        no_description: bool = false,
+    };
+
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, options: DynamicIntern) !Atom {
+        const id = try self.internDynamicInner(bytes, atom_kind, options);
         self.noteCompileScope(id);
         self.noteGrowth();
         return id;
@@ -2396,10 +1483,10 @@ pub const AtomTable = struct {
         registry.requestGC(.atom_growth, .soon);
     }
 
-    fn internDynamicInner(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
-        std.debug.assert(!index_entry or atom_kind == .string or atom_kind == .global_symbol);
-        std.debug.assert(!index_entry or self.atom_hash.len != 0);
-        if (index_entry) self.growHashForInsert();
+    fn internDynamicInner(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, options: DynamicIntern) !Atom {
+        std.debug.assert(options.lookup == null or atom_kind == .string or atom_kind == .global_symbol);
+        std.debug.assert(options.lookup == null or self.atom_hash.len != 0);
+        if (options.lookup != null) self.growHashForInsert();
 
         const owned: []u8 = if (bytes.len == 0) &.{} else try self.storage_allocator.alloc(u8, bytes.len);
         errdefer if (owned.len != 0) self.storage_allocator.free(owned);
@@ -2422,7 +1509,7 @@ pub const AtomTable = struct {
             entry.occupied = true;
             entry.registry_managed_symbol = false;
             entry.weakref_count = 0;
-            entry.no_symbol_description = no_symbol_description;
+            entry.no_symbol_description = options.no_description;
             self.stampBirthEpoch(entry);
             errdefer {
                 // Exact inverse of the pop above: the slot goes back on the
@@ -2436,7 +1523,7 @@ pub const AtomTable = struct {
                 entry.next_free = self.free_slot_head;
                 self.free_slot_head = idx;
             }
-            if (index_entry) self.indexEntry(idx, lookup_hash);
+            if (options.lookup) |hash| self.indexEntry(idx, hash);
             if (atom_kind == .private and entry.id.raw() < self.first_private_dynamic_atom.raw()) {
                 self.first_private_dynamic_atom = entry.id;
             }
@@ -2451,11 +1538,11 @@ pub const AtomTable = struct {
             .bytes = owned,
             .kind = atom_kind,
             .occupied = true,
-            .no_symbol_description = no_symbol_description,
+            .no_symbol_description = options.no_description,
         });
         errdefer self.entries = self.entries[0..idx];
         self.stampBirthEpoch(&self.entries[idx]);
-        if (index_entry) self.indexEntry(idx, lookup_hash);
+        if (options.lookup) |hash| self.indexEntry(idx, hash);
         if (atom_kind == .private and id.raw() < self.first_private_dynamic_atom.raw()) {
             self.first_private_dynamic_atom = id;
         }
@@ -2601,258 +1688,9 @@ pub const AtomTable = struct {
     }
 };
 
-/// TGC S3 §2.2 "编译作用域 provider" (K/L/M): a precise root for every atom id
-/// the compile front end is holding in plain `u32` fields.
-///
-/// The parser/lexer/compiler chain (lexer token -> `FunctionDef` -> builder ->
-/// `resolve_variables`/`resolve_labels` -> published `FunctionBytecode`) parks
-/// atom ids in Zig-heap structs that the conservative stack scan cannot read
-/// as roots and that carry no tracer edge until the `FunctionBytecode` is
-/// published, so a major inside a compile would retire them mid-flight. This scope is the interval root: every id the
-/// compile OBTAINS is recorded (including ids that already existed -- an atom
-/// whose only other holder dies during the compile must not be swept), and the
-/// registered provider reports the whole list on every trace.
-///
-/// Recording is ambient: `AtomTable.compile_scope` points at the innermost
-/// active scope and every intern/dup entry point notes into it, so the ~267
-/// compile-side call sites need no signature change and none can be missed.
-/// Scopes nest (direct eval, sub-parse); each one registers its own provider,
-/// so an inner scope's death cannot orphan an outer scope's ids.
-///
-/// `rt == null` (the standalone `AtomTable` the parser/compiler fixtures build,
-/// which has no collector at all) degrades to record-only: no registration, no
-/// provider, and the list is still kept so the type behaves identically.
-pub const CompileAtomScope = struct {
-    /// Power of two; `note` masks with `recent_slots - 1`.
-    const recent_slots: u32 = 64;
-
-    rt: ?*runtime_mod.JSRuntime,
-    table: *AtomTable,
-    allocator: std.mem.Allocator,
-    ids: std.ArrayListUnmanaged(Atom) = .empty,
-    /// Ambient chain: the scope that was installed on the table when this one
-    /// activated. Restored on `deinit`.
-    prev: ?*CompileAtomScope = null,
-    active: bool = false,
-    registered: bool = false,
-    /// Direct-mapped "already in `ids`" filter. A compile re-obtains the same
-    /// identifier constantly (every `get_field`, every scope-var resolution),
-    /// so without a filter a large file appends millions of entries. A hit is
-    /// exact -- the slot only ever holds an id this scope really appended --
-    /// so a miss costs a duplicate list entry, never a missing root.
-    /// Measured: the 1.2 MB `typescript-compiler.js` records 27,875 ids
-    /// (~112 KB) for one compile, roughly 2x its distinct-identifier count.
-    recent: [recent_slots]Atom = @splat(null_atom),
-
-    /// Build a detached scope. `activate` must run once the scope sits at its
-    /// final address -- the provider stores `&self`, so a scope that is still
-    /// going to be moved (e.g. a `State` returned by value) must not register
-    /// yet. Mirrors `ReplaceMatchRoots.activate` in exec/string_ops.zig.
-    pub fn init(table: *AtomTable, rt: ?*JSRuntime) CompileAtomScope {
-        if (rt) |owner| std.debug.assert(owner.atoms == table);
-        return .{
-            .rt = rt,
-            .table = table,
-            .allocator = table.native_allocator,
-        };
-    }
-
-    fn traceRootsThunk(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        const self: *CompileAtomScope = @ptrCast(@alignCast(context));
-        for (self.ids.items) |id| try visitor.atomRoot(id);
-    }
-
-    fn provider(self: *CompileAtomScope) runtime_mod.RootProvider {
-        return .{ .context = @ptrCast(self), .trace = traceRootsThunk };
-    }
-
-    /// Install as the innermost ambient scope and (when there is a runtime)
-    /// register the root provider.
-    pub fn activate(self: *CompileAtomScope) !void {
-        std.debug.assert(!self.active);
-        if (self.rt) |rt| {
-            try rt.registerRootProvider(self.provider());
-            self.registered = true;
-        }
-        self.prev = self.table.compile_scope;
-        self.table.compile_scope = self;
-        self.active = true;
-    }
-
-    pub fn deinit(self: *CompileAtomScope) void {
-        if (self.active) {
-            // Scopes are strictly stack-disciplined; anything else means a
-            // caller leaked one.
-            std.debug.assert(self.table.compile_scope == self);
-            self.table.compile_scope = self.prev;
-            self.prev = null;
-            self.active = false;
-        }
-        if (self.registered) {
-            self.rt.?.unregisterRootProvider(self.provider());
-            self.registered = false;
-        }
-        self.ids.deinit(self.allocator);
-        self.ids = .empty;
-        self.recent = @splat(null_atom);
-    }
-
-    /// Record an id the compile obtained. Predefined and tagged-int ids are
-    /// not table entries and can never be retired, so they are dropped here
-    /// rather than growing the list.
-    pub fn note(self: *CompileAtomScope, id: Atom) void {
-        if (id == null_atom or id.isConst() or id.isTaggedInt()) return;
-        const slot = id.raw() & (recent_slots - 1);
-        if (self.recent[slot] == id) return;
-        self.ids.append(self.allocator, id) catch {
-            // A root list that cannot grow must not silently drop a root.
-            // Pin the id for the rest of the runtime instead: over-retention
-            // is the only safe direction, and this is an OOM-only path.
-            self.table.pinForHost(id);
-            return;
-        };
-        self.recent[slot] = id;
-    }
-
-    /// Explicit form of the ambient recording, for a call site that wants the
-    /// scope spelled out. The symbol family (`newSymbol`/`internSymbol`, the
-    /// parser's private names) needs no wrapper: those entry points note into
-    /// the ambient scope like every other one.
-    pub fn intern(self: *CompileAtomScope, bytes: []const u8) !Atom {
-        const id = try self.table.internString(bytes);
-        self.note(id);
-        return id;
-    }
-
-    /// Explicit form for an id the scope did not intern itself (the caller
-    /// obtained it before the scope opened).
-    pub fn noteExisting(self: *CompileAtomScope, id: Atom) Atom {
-        self.note(id);
-        return id;
-    }
-};
-
 fn dynamicEntryIndex(atom_id: Atom) ?usize {
     if (atom_id.isConst() or atom_id.isTaggedInt()) return null;
     return atom_id.raw() - first_dynamic_atom;
-}
-
-/// Spelling of a predefined atom. The bytes live in comptime storage, so the
-/// slice needs no allocation, outlives every runtime, and cannot be invalidated
-/// by a collection -- the property of `ids.*` constants that lets a helper take
-/// the atom and still recover the name qjs would have passed around as a
-/// `const char *`.
-pub fn predefinedName(id: Atom) []const u8 {
-    std.debug.assert(id != null_atom and id.isConst());
-    return predefined_atoms[id.raw() - 1].name;
-}
-
-pub fn predefinedById(id: Atom) ?PredefinedAtom {
-    if (id == null_atom or !id.isConst()) return null;
-    return predefined_atoms[id.raw() - 1];
-}
-
-pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
-    @setEvalBranchQuota(100000);
-    return switch (kind) {
-        .string => predefinedStringIdHashed(bytes, std.hash.Wyhash.hash(0, bytes)),
-        .symbol => predefined_symbol_map.get(bytes),
-        .global_symbol => null,
-        .private => predefined_private_map.get(bytes),
-    };
-}
-
-fn parseArrayIndex(bytes: []const u8) ?u32 {
-    // Leading-digit gate before any scan work, mirroring qjs JS_NewAtomLen
-    // (quickjs.c `is_digit(*str)`): identifier spellings bail here.
-    if (bytes.len == 0 or bytes[0] < '0' or bytes[0] > '9') return null;
-    if (bytes.len > 1 and bytes[0] == '0') return null;
-    var n: u64 = 0;
-    for (bytes) |c| {
-        if (c < '0' or c > '9') return null;
-        n = n * 10 + (c - '0');
-        if (n > max_int_atom) return null;
-    }
-    return @intCast(n);
-}
-
-/// Upper bound of a JS array index (2^32-2). Mirrors `array.max_array_index`;
-/// duplicated here to keep the atom layer free of an `array.zig` import cycle.
-pub const max_array_index: u32 = 0xffff_fffe;
-
-/// Like `parseArrayIndex` but bounded by the full array-index range
-/// (`max_array_index`) instead of the tighter tagged-int range (`max_int_atom`).
-/// Matches `array.arrayIndexFromName`, used by `atomIsArrayIndex` for the high
-/// string-atom index window `(max_int_atom, max_array_index]` that stays a
-/// dynamic string atom (never tagged at intern time).
-/// The canonical array index (`0`..`max_array_index`, no leading zeros) a
-/// decimal property name spells, if any.
-pub fn parseHighArrayIndex(bytes: []const u8) ?u32 {
-    if (bytes.len == 0) return null;
-    if (bytes.len > 1 and bytes[0] == '0') return null;
-    var n: u64 = 0;
-    for (bytes) |c| {
-        if (c < '0' or c > '9') return null;
-        n = n * 10 + (c - '0');
-        if (n > max_array_index) return null;
-    }
-    return @intCast(n);
-}
-
-/// Builds an owned `[]Atom` in amortized O(1) appends. `items` is the
-/// filled prefix of `buffer`; root it with `rootAtomList(&builder.items)`
-/// while user code can run. `toOwnedSlice` returns an exact-length list,
-/// the shape `freeAtomList` / `Object.freeKeys` expect.
-pub const AtomListBuilder = struct {
-    buffer: []Atom = &.{},
-    items: []Atom = &.{},
-
-    pub fn initCapacity(rt: *JSRuntime, capacity: usize) !AtomListBuilder {
-        var builder: AtomListBuilder = .{};
-        try builder.ensureTotalCapacity(rt, capacity);
-        return builder;
-    }
-
-    pub fn deinit(self: *AtomListBuilder, rt: *JSRuntime) void {
-        freeAtomList(rt, self.buffer);
-        self.* = .{};
-    }
-
-    pub fn ensureTotalCapacity(self: *AtomListBuilder, rt: *JSRuntime, capacity: usize) !void {
-        if (capacity <= self.buffer.len) return;
-        const next = try rt.allocNative(Atom, capacity);
-        @memcpy(next[0..self.items.len], self.items);
-        const old = self.buffer;
-        self.buffer = next;
-        self.items = next[0..self.items.len];
-        freeAtomList(rt, old);
-    }
-
-    pub fn append(self: *AtomListBuilder, rt: *JSRuntime, atom_id: Atom) !void {
-        if (self.items.len == self.buffer.len) {
-            try self.ensureTotalCapacity(rt, @max(8, self.buffer.len * 2));
-        }
-        self.buffer[self.items.len] = atom_id;
-        self.items = self.buffer[0 .. self.items.len + 1];
-    }
-
-    /// Transfers ownership of the filled atoms; the builder is empty after.
-    pub fn toOwnedSlice(self: *AtomListBuilder, rt: *JSRuntime) ![]Atom {
-        if (self.items.len != self.buffer.len) {
-            const exact: []Atom = if (self.items.len == 0) &.{} else try rt.allocNative(Atom, self.items.len);
-            @memcpy(exact, self.items);
-            freeAtomList(rt, self.buffer);
-            self.* = .{};
-            return exact;
-        }
-        const owned = self.buffer;
-        self.* = .{};
-        return owned;
-    }
-};
-
-pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
-    if (list.len != 0) rt.freeNative(Atom, list);
 }
 
 test "atom replace handles self-assignment without releasing dynamic atom" {
@@ -2878,14 +1716,7 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(Atom.fromRaw(230), ids.Symbol_asyncDispose);
     try std.testing.expectEqual(Atom.fromRaw(231), ids.Symbol_dispose);
     try std.testing.expectEqual(Atom.fromRaw(232), ids.zjs_proto_keepalive);
-    try std.testing.expectEqual(Atom.fromRaw(264), ids.zjs_last_internal_marker);
-    try std.testing.expectEqual(Atom.fromRaw(364), ids.zjs_last_registry_name);
-    try std.testing.expectEqual(Atom.fromRaw(381), ids.zjs_last_global_setup_name);
-    try std.testing.expectEqual(Atom.fromRaw(419), ids.zjs_last_global_extra_name);
-    try std.testing.expectEqual(Atom.fromRaw(586), ids.zjs_last_registry_extra_name);
     try std.testing.expectEqual(Atom.fromRaw(626), ids.scriptArgs);
-    try std.testing.expectEqual(Atom.fromRaw(656), ids.zjs_last_startup_name);
-    try std.testing.expectEqual(Atom.fromRaw(692), ids.zjs_last_predefined_key_name);
     try std.testing.expectEqual(@as(usize, 692), predefined_count);
 
     const brand = predefinedById(ids.Private_brand).?;
@@ -2990,8 +1821,8 @@ test "registered symbol index ignores unique symbols and private names" {
     keep_roots.activate(rt);
     defer keep_roots.deactivate(rt);
 
-    var registered = try rt.atoms.internSymbol(registry_name);
-    const registered_again = try rt.atoms.internSymbol(registry_name);
+    var registered = try rt.atoms.internGlobalSymbol(registry_name);
+    const registered_again = try rt.atoms.internGlobalSymbol(registry_name);
     try std.testing.expect(unique != registered);
     try std.testing.expect(private != registered);
     try std.testing.expectEqual(registered, registered_again);
@@ -3021,7 +1852,7 @@ test "registered value symbols keep a single registry ref" {
     const registered_again = try rt.atoms.internRegisteredValueSymbol(registry_name);
     try std.testing.expectEqual(registered, registered_again);
 
-    const manual = try rt.atoms.internSymbol(registry_name);
+    const manual = try rt.atoms.internGlobalSymbol(registry_name);
     try std.testing.expectEqual(registered, manual);
 }
 

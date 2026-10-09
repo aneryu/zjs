@@ -35,10 +35,6 @@ pub const BigInt = struct {
     limbs: []Limb = &.{},
     allocator: std.mem.Allocator,
 
-    pub fn fromInt(allocator: std.mem.Allocator, value: i128) !BigInt {
-        return fromIntAlloc(allocator, value);
-    }
-
     pub fn fromIntAlloc(allocator: std.mem.Allocator, value: i128) !BigInt {
         if (value == 0) return .{ .allocator = allocator };
         var magnitude: u128 = if (value < 0) @intCast(-value) else @intCast(value);
@@ -57,10 +53,6 @@ pub const BigInt = struct {
     pub fn deinit(self: *BigInt) void {
         if (self.limbs.len != 0) self.allocator.free(self.limbs);
         self.* = .{ .allocator = self.allocator };
-    }
-
-    pub fn clone(self: BigInt) !BigInt {
-        return self.cloneWithAllocator(self.allocator);
     }
 
     pub fn cloneWithAllocator(self: BigInt, allocator: std.mem.Allocator) !BigInt {
@@ -503,10 +495,6 @@ fn divRemAllocOutput(
     quotient.negative = (lhs.negative != rhs.negative) and !quotient.isZero();
     remainder.negative = lhs.negative and !remainder.isZero();
     return .{ quotient, remainder };
-}
-
-pub fn parseBase10(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
-    return parseBase10Alloc(allocator, bytes);
 }
 
 pub fn parseBase10Alloc(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
@@ -1271,24 +1259,24 @@ fn invertOrder(order: std.math.Order) std.math.Order {
 }
 
 test "bigint functionality" {
-    var forty = try parseBase10(std.testing.allocator, "40");
+    var forty = try parseBase10Alloc(std.testing.allocator, "40");
     defer forty.deinit();
-    var two = try BigInt.fromInt(std.testing.allocator, 2);
+    var two = try BigInt.fromIntAlloc(std.testing.allocator, 2);
     defer two.deinit();
     var big = try forty.add(two);
     defer big.deinit();
     const big_text = try big.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(big_text);
     try std.testing.expectEqualStrings("42", big_text);
-    var zero = try BigInt.fromInt(std.testing.allocator, 0);
+    var zero = try BigInt.fromIntAlloc(std.testing.allocator, 0);
     defer zero.deinit();
     try std.testing.expectError(error.DivisionByZero, big.div(zero));
-    var huge = try parseBase10(std.testing.allocator, "12345678901234567890123456789012345678901234567890");
+    var huge = try parseBase10Alloc(std.testing.allocator, "12345678901234567890123456789012345678901234567890");
     defer huge.deinit();
     const huge_text = try huge.formatBase10Alloc(std.testing.allocator, null);
     defer std.testing.allocator.free(huge_text);
     try std.testing.expectEqualStrings("12345678901234567890123456789012345678901234567890", huge_text);
-    var divisor = try BigInt.fromInt(std.testing.allocator, 97);
+    var divisor = try BigInt.fromIntAlloc(std.testing.allocator, 97);
     defer divisor.deinit();
     var quotient = try huge.div(divisor);
     defer quotient.deinit();
@@ -1300,9 +1288,9 @@ test "bigint functionality" {
     defer std.testing.allocator.free(remainder_text);
     try std.testing.expectEqualStrings("127275040218913071032200585453735522462899325442", quotient_text);
     try std.testing.expectEqualStrings("16", remainder_text);
-    var neg_seven = try BigInt.fromInt(std.testing.allocator, -7);
+    var neg_seven = try BigInt.fromIntAlloc(std.testing.allocator, -7);
     defer neg_seven.deinit();
-    var three = try BigInt.fromInt(std.testing.allocator, 3);
+    var three = try BigInt.fromIntAlloc(std.testing.allocator, 3);
     defer three.deinit();
     var neg_q = try neg_seven.div(three);
     defer neg_q.deinit();
@@ -1319,50 +1307,50 @@ test "bigint functionality" {
 test "bigint toU64 and toI64 range edges" {
     const t = std.testing;
     // Zero.
-    var zero = try BigInt.fromInt(t.allocator, 0);
+    var zero = try BigInt.fromIntAlloc(t.allocator, 0);
     defer zero.deinit();
     try t.expectEqual(@as(?u64, 0), zero.toU64());
     try t.expectEqual(@as(?i64, 0), zero.toI64());
 
     // Mid positive fits both.
-    var mid = try BigInt.fromInt(t.allocator, 1234567890123);
+    var mid = try BigInt.fromIntAlloc(t.allocator, 1234567890123);
     defer mid.deinit();
     try t.expectEqual(@as(?u64, 1234567890123), mid.toU64());
     try t.expectEqual(@as(?i64, 1234567890123), mid.toI64());
 
     // i64::MAX fits both.
-    var i64_max = try BigInt.fromInt(t.allocator, std.math.maxInt(i64));
+    var i64_max = try BigInt.fromIntAlloc(t.allocator, std.math.maxInt(i64));
     defer i64_max.deinit();
     try t.expectEqual(@as(?u64, @as(u64, std.math.maxInt(i64))), i64_max.toU64());
     try t.expectEqual(@as(?i64, std.math.maxInt(i64)), i64_max.toI64());
 
     // i64::MIN: fits i64 (the edge), out of range for u64.
-    var i64_min = try BigInt.fromInt(t.allocator, std.math.minInt(i64));
+    var i64_min = try BigInt.fromIntAlloc(t.allocator, std.math.minInt(i64));
     defer i64_min.deinit();
     try t.expectEqual(@as(?i64, std.math.minInt(i64)), i64_min.toI64());
     try t.expectEqual(@as(?u64, null), i64_min.toU64());
 
     // u64::MAX: single non-negative limb with the high bit set. Fits u64,
     // out of range for i64 — the band asUint64 must accept and asInt64 reject.
-    var u64_max = try BigInt.fromInt(t.allocator, @as(i128, std.math.maxInt(u64)));
+    var u64_max = try BigInt.fromIntAlloc(t.allocator, @as(i128, std.math.maxInt(u64)));
     defer u64_max.deinit();
     try t.expectEqual(@as(?u64, std.math.maxInt(u64)), u64_max.toU64());
     try t.expectEqual(@as(?i64, null), u64_max.toI64());
 
     // 2^63 exactly: out of range for i64 (positive), in range for u64.
-    var two_63 = try BigInt.fromInt(t.allocator, @as(i128, 1) << 63);
+    var two_63 = try BigInt.fromIntAlloc(t.allocator, @as(i128, 1) << 63);
     defer two_63.deinit();
     try t.expectEqual(@as(?u64, @as(u64, 1) << 63), two_63.toU64());
     try t.expectEqual(@as(?i64, null), two_63.toI64());
 
     // Negative non-zero: out of range for u64.
-    var neg = try BigInt.fromInt(t.allocator, -5);
+    var neg = try BigInt.fromIntAlloc(t.allocator, -5);
     defer neg.deinit();
     try t.expectEqual(@as(?u64, null), neg.toU64());
     try t.expectEqual(@as(?i64, -5), neg.toI64());
 
     // Beyond u64 (2^64): out of range for both.
-    var beyond = try BigInt.fromInt(t.allocator, @as(i128, 1) << 64);
+    var beyond = try BigInt.fromIntAlloc(t.allocator, @as(i128, 1) << 64);
     defer beyond.deinit();
     try t.expectEqual(@as(?u64, null), beyond.toU64());
     try t.expectEqual(@as(?i64, null), beyond.toI64());

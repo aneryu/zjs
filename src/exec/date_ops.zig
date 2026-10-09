@@ -110,7 +110,7 @@ pub fn dateSetYear(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     const captured_ms = try captureDateValueMs(ctx, values[1]);
-    const year_value = try value_ops.toNumberForDateMethod(ctx, output, object_ops.objectFromValue(values[0]).?, values[2]);
+    const year_value = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, values[2]);
     const year_number = value_ops.numberValue(year_value) orelse std.math.nan(f64);
     return try callDateSetYearWithCapturedMs(ctx, values[1], captured_ms, year_number);
 }
@@ -131,7 +131,7 @@ pub fn dateSetTime(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    const time_value = try value_ops.toNumberForDateMethod(ctx, output, object_ops.objectFromValue(values[0]).?, values[2]);
+    const time_value = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, values[2]);
     return try callDateBody(ctx, values[1], .set_time, &.{time_value});
 }
 
@@ -152,7 +152,7 @@ pub fn dateUtcCall(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
     for (values[1..][0..count]) |*slot| {
-        slot.* = try value_ops.toNumberForDateMethod(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
+        slot.* = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
     }
     return try callDateStaticBody(ctx, .utc, values[1..][0..count]);
 }
@@ -193,7 +193,7 @@ pub fn dateCapturedSetterCall(
     defer roots.deactivate(ctx.runtime);
     const captured_ms = try captureDateValueMs(ctx, values[1]);
     for (values[2..][0..count]) |*slot| {
-        slot.* = try value_ops.toNumberForDateMethod(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
+        slot.* = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
     }
     return try callDateSetPartsWithCapturedMs(ctx, values[1], method, captured_ms, values[2..][0..count]);
 }
@@ -537,7 +537,7 @@ fn dateExtendedPrototypeCall(
         roots.activate(rt);
         defer roots.deactivate(rt);
         for (values[2..][0..coerce_count]) |*slot| {
-            slot.* = try value_ops.toNumberForDateMethod(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
+            slot.* = try value_ops.toNumberRejectingBigInt(ctx, output, object_ops.objectFromValue(values[0]).?, slot.*);
         }
         return setDateFieldBody(object_ops.objectFromValue(values[1]).?, captured_ms, values[2..][0..coerce_count], args.len, span);
     }

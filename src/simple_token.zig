@@ -3,6 +3,7 @@
 //! fall back to the full lexer when `.unsupported` is returned.
 
 const std = @import("std");
+const token = @import("token.zig");
 const unicode = @import("libs/unicode.zig");
 
 pub const Kind = enum {
@@ -29,89 +30,38 @@ const Decoded = struct {
 /// lexer is never touched.
 pub inline fn next(source: []const u8, pos: *usize, no_line_terminator: bool) Kind {
     var p = pos.*;
-    while (p < source.len) {
-        const c = source[p];
-        switch (c) {
-            '\r', '\n' => {
-                if (no_line_terminator) return finish(pos, p, .line_terminator);
-                p += 1;
-                continue;
-            },
-            ' ', '\t', 0x0b, 0x0c => {
-                p += 1;
-                continue;
-            },
-            '/' => {
-                if (p + 1 >= source.len) return finish(pos, p + 1, .other);
-                if (source[p + 1] == '/') {
-                    // QuickJS peek_token(..., TRUE) treats a line comment as a
-                    // line terminator without scanning its body.
-                    if (no_line_terminator) return finish(pos, p, .line_terminator);
-                    if (!skipLineComment(source, &p)) return finish(pos, p, .unsupported);
-                    continue;
-                }
-                if (source[p + 1] != '*') return finish(pos, p + 1, .other);
-
-                p += 2;
-                var closed = false;
-                while (p < source.len) {
-                    const comment_byte = source[p];
-                    if (comment_byte == '\r' or comment_byte == '\n') {
-                        if (no_line_terminator) return finish(pos, p, .line_terminator);
-                        p += 1;
-                        continue;
-                    }
-                    // The full lexer recognizes Unicode LS/PS inside block
-                    // comments. Keep this raw scanner conservative on every
-                    // non-ASCII byte rather than duplicating that error path.
-                    if (comment_byte >= 0x80 and no_line_terminator) {
-                        return finish(pos, p, .unsupported);
-                    }
-                    if (comment_byte == '*' and p + 1 < source.len and source[p + 1] == '/') {
-                        p += 2;
-                        closed = true;
-                        break;
-                    }
-                    p += 1;
-                }
-                if (!closed) return finish(pos, p, .unsupported);
-                continue;
-            },
-            '=' => {
-                if (p + 1 < source.len and source[p + 1] == '>') {
-                    return finish(pos, p + 2, .arrow);
-                }
-                return finish(pos, p + 1, .other);
-            },
-            '.' => return finish(pos, p + 1, .dot),
-            '(' => return finish(pos, p + 1, .left_paren),
-            'i' => return identifierOrKeyword(source, pos, p, "import", .import_keyword),
-            'e' => return identifierOrKeyword(source, pos, p, "export", .export_keyword),
-            else => {
-                if (unicode.isAsciiIdentifierStartByte(c)) {
-                    return finish(pos, p + 1, .identifier);
-                }
-                if (c >= 0x80) {
-                    const decoded = decodeAt(source, p) orelse return finish(pos, p, .unsupported);
-                    if (unicode.isEcmaLineTerminatorCodePoint(decoded.codepoint)) {
-                        if (no_line_terminator) return finish(pos, p, .line_terminator);
-                        p += decoded.width;
-                        continue;
-                    }
-                    if (unicode.isEcmaWhitespaceOrLineTerminatorCodePoint(decoded.codepoint)) {
-                        p += decoded.width;
-                        continue;
-                    }
-                    if (unicode.isIdentifierStart(decoded.codepoint)) {
-                        return finish(pos, p + decoded.width, .identifier);
-                    }
-                    return finish(pos, p + decoded.width, .other);
-                }
-                return finish(pos, p + 1, .other);
-            },
-        }
+    switch (skipTrivia(source, &p, no_line_terminator)) {
+        .line_terminator => return finish(pos, p, .line_terminator),
+        .unsupported => return finish(pos, p, .unsupported),
+        .skipped => {},
     }
-    return finish(pos, p, .eof);
+    if (p >= source.len) return finish(pos, p, .eof);
+    switch (source[p]) {
+        '=' => {
+            if (p + 1 < source.len and source[p + 1] == '>') {
+                return finish(pos, p + 2, .arrow);
+            }
+            return finish(pos, p + 1, .other);
+        },
+        '.' => return finish(pos, p + 1, .dot),
+        '(' => return finish(pos, p + 1, .left_paren),
+        'i' => return identifierOrKeyword(source, pos, p, "import", .import_keyword),
+        'e' => return identifierOrKeyword(source, pos, p, "export", .export_keyword),
+        else => {
+            const c = source[p];
+            if (unicode.isAsciiIdentifierStartByte(c)) {
+                return finish(pos, p + 1, .identifier);
+            }
+            if (c >= 0x80) {
+                const decoded = decodeAt(source, p) orelse return finish(pos, p, .unsupported);
+                if (unicode.isIdentifierStart(decoded.codepoint)) {
+                    return finish(pos, p + decoded.width, .identifier);
+                }
+                return finish(pos, p + decoded.width, .other);
+            }
+            return finish(pos, p + 1, .other);
+        },
+    }
 }
 
 pub const BalancedFollowing = enum {
@@ -126,6 +76,9 @@ pub const BalancedFollowing = enum {
     /// `(...) :` — either a conditional's colon or a TypeScript arrow return
     /// type. The borrowed scan cannot tell; callers fall back to the lexer.
     colon,
+    /// `(...) ?` — a lone `?` after a balanced group. `??` and `?.` stay
+    /// `.other` so they are not read as the optional marker.
+    question,
     identifier,
     in_keyword,
     line_terminator,
@@ -293,12 +246,7 @@ pub fn balancedAfterOpen(
                 while (p < source.len and isPunctuatorContinuation(source[p])) p += 1;
                 regexp_context = .allowed;
             },
-            else => {
-                if (source[p] >= 0x80) return null;
-                // Unknown ASCII is either invalid source or a syntax form this
-                // small scanner does not model. Let the full lexer diagnose it.
-                return null;
-            },
+            else => return null,
         }
     }
     return result;
@@ -320,88 +268,47 @@ pub fn parenArrowAfterOpen(source: []const u8, start: usize) ?bool {
 
 fn scanFollowing(source: []const u8, start: usize, no_line_terminator: bool) ?BalancedFollowing {
     var p = start;
-    while (p < source.len) {
-        const c = source[p];
-        switch (c) {
-            ' ', '\t', 0x0b, 0x0c => p += 1,
-            '\r', '\n' => {
-                if (no_line_terminator) return .line_terminator;
-                p += 1;
-            },
-            '/' => {
-                if (p + 1 >= source.len) return .other;
-                if (source[p + 1] == '/') {
-                    if (no_line_terminator) return .line_terminator;
-                    if (!skipLineComment(source, &p)) return null;
-                    continue;
-                }
-                if (source[p + 1] != '*') return .other;
-
-                p += 2;
-                var closed = false;
-                while (p < source.len) {
-                    if (source[p] == '\r' or source[p] == '\n') {
-                        if (no_line_terminator) return .line_terminator;
-                        p += 1;
-                        continue;
-                    }
-                    if (source[p] >= 0x80) {
-                        const decoded = decodeAt(source, p) orelse return null;
-                        if (unicode.isEcmaLineTerminatorCodePoint(decoded.codepoint)) {
-                            if (no_line_terminator) return .line_terminator;
-                        }
-                        p += decoded.width;
-                        continue;
-                    }
-                    if (source[p] == '*' and p + 1 < source.len and source[p + 1] == '/') {
-                        p += 2;
-                        closed = true;
-                        break;
-                    }
-                    p += 1;
-                }
-                if (!closed) return null;
-            },
-            '=' => {
-                if (p + 1 < source.len and source[p + 1] == '>') return .arrow;
-                // Pattern topology only needs the plain assignment token.
-                // `==` / `===` are equality operators and must leave an
-                // object/array literal on the expression path, exactly as the
-                // full lexer returns TOK_EQ/TOK_STRICT_EQ rather than '='.
-                if (p + 1 < source.len and source[p + 1] == '=') return .other;
-                return .assignment;
-            },
-            ',' => return .comma,
-            ':' => return .colon,
-            '{' => return .left_brace,
-            ')' => return .right_paren,
-            ']' => return .right_bracket,
-            '}' => return .right_brace,
-            else => {
-                if (unicode.isAsciiIdentifierStartByte(c)) {
-                    const word_start = p;
-                    p += 1;
-                    while (p < source.len and unicode.isAsciiIdentifierPartByte(source[p])) p += 1;
-                    return if (matches(source[word_start..p], "in")) .in_keyword else .identifier;
-                }
-                if (c == '\\') return null;
-                if (c < 0x80) return .other;
-                const decoded = decodeAt(source, p) orelse return null;
-                if (unicode.isEcmaLineTerminatorCodePoint(decoded.codepoint)) {
-                    if (no_line_terminator) return .line_terminator;
-                    p += decoded.width;
-                    continue;
-                }
-                if (unicode.isEcmaWhitespaceOrLineTerminatorCodePoint(decoded.codepoint)) {
-                    p += decoded.width;
-                    continue;
-                }
-                if (unicode.isIdentifierStart(decoded.codepoint)) return null;
-                return .other;
-            },
-        }
+    switch (skipTrivia(source, &p, no_line_terminator)) {
+        .line_terminator => return .line_terminator,
+        .unsupported => return null,
+        .skipped => {},
     }
-    return .eof;
+    if (p >= source.len) return .eof;
+    const c = source[p];
+    switch (c) {
+        '=' => {
+            if (p + 1 < source.len and source[p + 1] == '>') return .arrow;
+            // Pattern topology only needs the plain assignment token.
+            // `==` / `===` are equality operators and must leave an
+            // object/array literal on the expression path, exactly as the
+            // full lexer returns TOK_EQ/TOK_STRICT_EQ rather than '='.
+            if (p + 1 < source.len and source[p + 1] == '=') return .other;
+            return .assignment;
+        },
+        ',' => return .comma,
+        ':' => return .colon,
+        '?' => {
+            if (p + 1 < source.len and (source[p + 1] == '?' or source[p + 1] == '.')) return .other;
+            return .question;
+        },
+        '{' => return .left_brace,
+        ')' => return .right_paren,
+        ']' => return .right_bracket,
+        '}' => return .right_brace,
+        else => {
+            if (unicode.isAsciiIdentifierStartByte(c)) {
+                const word_start = p;
+                p += 1;
+                while (p < source.len and unicode.isAsciiIdentifierPartByte(source[p])) p += 1;
+                return if (matches(source[word_start..p], "in")) .in_keyword else .identifier;
+            }
+            if (c == '\\') return null;
+            if (c < 0x80) return .other;
+            const decoded = decodeAt(source, p) orelse return null;
+            if (unicode.isIdentifierStart(decoded.codepoint)) return null;
+            return .other;
+        },
+    }
 }
 
 const RegexpContext = enum {
@@ -421,80 +328,13 @@ const RegexpContext = enum {
 };
 
 noinline fn identifierRegexpContext(word: []const u8) RegexpContext {
-    if (word.len > 0 and word[0] == '#') return .disallowed;
-    if (word.len == 0) return .disallowed;
-
-    // Length and first byte reduce every identifier to at most a few fixed
-    // comparisons. In particular, minified one-byte names never enter a
-    // general keyword table or hash path.
-    return switch (word.len) {
-        2 => switch (word[0]) {
-            'i' => if (matches(word, "if") or matches(word, "in")) .allowed else .disallowed,
-            'd' => if (matches(word, "do")) .allowed else .disallowed,
-            'o' => if (matches(word, "of")) .allowed else .disallowed,
-            else => .disallowed,
-        },
-        3 => switch (word[0]) {
-            'v' => if (matches(word, "var")) .allowed else .disallowed,
-            'n' => if (matches(word, "new")) .allowed else .disallowed,
-            'f' => if (matches(word, "for")) .allowed else .disallowed,
-            't' => if (matches(word, "try")) .allowed else .disallowed,
-            'l' => if (matches(word, "let")) .mode_dependent else .disallowed,
-            else => .disallowed,
-        },
-        4 => switch (word[0]) {
-            'e' => if (matches(word, "else") or matches(word, "enum")) .allowed else .disallowed,
-            'v' => if (matches(word, "void")) .allowed else .disallowed,
-            'w' => if (matches(word, "with")) .allowed else .disallowed,
-            'c' => if (matches(word, "case")) .allowed else .disallowed,
-            // null / true / this are exact QuickJS disallowed cases and fall
-            // through with ordinary identifiers.
-            else => .disallowed,
-        },
-        5 => switch (word[0]) {
-            'w' => if (matches(word, "while")) .allowed else .disallowed,
-            'b' => if (matches(word, "break")) .allowed else .disallowed,
-            't' => if (matches(word, "throw")) .allowed else .disallowed,
-            'c' => if (matches(word, "catch") or matches(word, "class") or matches(word, "const")) .allowed else .disallowed,
-            's' => if (matches(word, "super")) .allowed else .disallowed,
-            'y' => if (matches(word, "yield")) .allowed else .disallowed,
-            'a' => if (matches(word, "await")) .mode_dependent else .disallowed,
-            // false is an exact QuickJS disallowed case.
-            else => .disallowed,
-        },
-        6 => switch (word[0]) {
-            'r' => if (matches(word, "return")) .allowed else .disallowed,
-            'd' => if (matches(word, "delete")) .allowed else .disallowed,
-            't' => if (matches(word, "typeof")) .allowed else .disallowed,
-            's' => if (matches(word, "switch")) .allowed else if (matches(word, "static")) .mode_dependent else .disallowed,
-            'e' => if (matches(word, "export")) .allowed else .disallowed,
-            'i' => if (matches(word, "import")) .allowed else .disallowed,
-            'p' => if (matches(word, "public")) .mode_dependent else .disallowed,
-            else => .disallowed,
-        },
-        7 => switch (word[0]) {
-            'd' => if (matches(word, "default")) .allowed else .disallowed,
-            'f' => if (matches(word, "finally")) .allowed else .disallowed,
-            'e' => if (matches(word, "extends")) .allowed else .disallowed,
-            'p' => if (matches(word, "package") or matches(word, "private")) .mode_dependent else .disallowed,
-            else => .disallowed,
-        },
-        8 => switch (word[0]) {
-            'c' => if (matches(word, "continue")) .allowed else .disallowed,
-            'f' => if (matches(word, "function")) .allowed else .disallowed,
-            'd' => if (matches(word, "debugger")) .allowed else .disallowed,
-            else => .disallowed,
-        },
-        9 => switch (word[0]) {
-            'i' => if (matches(word, "interface")) .mode_dependent else .disallowed,
-            'p' => if (matches(word, "protected")) .mode_dependent else .disallowed,
-            else => .disallowed,
-        },
-        10 => switch (word[0]) {
-            'i' => if (matches(word, "instanceof")) .allowed else if (matches(word, "implements")) .mode_dependent else .disallowed,
-            else => .disallowed,
-        },
-        else => .disallowed,
+    const kind = token.Kind.keyword(word) orelse {
+        return if (matches(word, "of")) .allowed else .disallowed;
+    };
+    return switch (kind) {
+        .kw_null, .kw_false, .kw_true, .kw_this => .disallowed,
+        .kw_implements, .kw_interface, .kw_let, .kw_package, .kw_private, .kw_protected, .kw_public, .kw_static, .kw_await => .mode_dependent,
+        else => .allowed,
     };
 }
 
@@ -538,7 +378,7 @@ fn skipNumberLike(source: []const u8, pos: *usize) void {
     var previous: u8 = 0;
     while (p < source.len) {
         const c = source[p];
-        if (isAsciiDigit(c) or unicode.isAsciiIdentifierPartByte(c) or c == '.' or c == '_') {
+        if (unicode.isAsciiIdentifierPartByte(c) or c == '.') {
             previous = c;
             p += 1;
             continue;
@@ -595,6 +435,98 @@ fn skipQuoted(source: []const u8, pos: *usize, quote: u8) bool {
     return false;
 }
 
+const TriviaStop = enum { skipped, line_terminator, unsupported };
+
+fn skipTrivia(source: []const u8, pos: *usize, no_line_terminator: bool) TriviaStop {
+    var p = pos.*;
+    while (p < source.len) {
+        switch (source[p]) {
+            ' ', '\t', 0x0b, 0x0c => p += 1,
+            '\r', '\n' => {
+                if (no_line_terminator) {
+                    pos.* = p;
+                    return .line_terminator;
+                }
+                p += 1;
+            },
+            '/' => {
+                if (p + 1 >= source.len) break;
+                if (source[p + 1] == '/') {
+                    // QuickJS peek_token(..., TRUE) treats a line comment as a
+                    // line terminator without scanning its body.
+                    if (no_line_terminator) {
+                        pos.* = p;
+                        return .line_terminator;
+                    }
+                    if (!skipLineComment(source, &p)) {
+                        pos.* = p;
+                        return .unsupported;
+                    }
+                    continue;
+                }
+                if (source[p + 1] != '*') break;
+                switch (skipBlockCommentBody(source, &p, no_line_terminator)) {
+                    .skipped => continue,
+                    else => |stop| {
+                        pos.* = p;
+                        return stop;
+                    },
+                }
+            },
+            else => {
+                if (source[p] < 0x80) break;
+                const decoded = decodeAt(source, p) orelse {
+                    pos.* = p;
+                    return .unsupported;
+                };
+                if (unicode.isEcmaLineTerminatorCodePoint(decoded.codepoint)) {
+                    if (no_line_terminator) {
+                        pos.* = p;
+                        return .line_terminator;
+                    }
+                    p += decoded.width;
+                    continue;
+                }
+                if (unicode.isEcmaWhitespaceOrLineTerminatorCodePoint(decoded.codepoint)) {
+                    p += decoded.width;
+                    continue;
+                }
+                break;
+            },
+        }
+    }
+    pos.* = p;
+    return .skipped;
+}
+
+/// `pos` points at the opening `/` of a block comment. Non-ASCII bytes are
+/// unsupported so the caller falls back to the full lexer.
+fn skipBlockCommentBody(source: []const u8, pos: *usize, no_line_terminator: bool) TriviaStop {
+    var p = pos.* + 2;
+    while (p < source.len) {
+        const b = source[p];
+        if (b == '\r' or b == '\n') {
+            if (no_line_terminator) {
+                pos.* = p;
+                return .line_terminator;
+            }
+            p += 1;
+            continue;
+        }
+        if (b >= 0x80) {
+            pos.* = p;
+            return .unsupported;
+        }
+        if (b == '*' and p + 1 < source.len and source[p + 1] == '/') {
+            pos.* = p + 2;
+            return .skipped;
+        }
+        p += 1;
+    }
+    pos.* = p;
+    return .unsupported;
+}
+
 fn skipLineComment(source: []const u8, pos: *usize) bool {
     var p = pos.* + 2;
     while (p < source.len) {
@@ -615,14 +547,7 @@ fn skipLineComment(source: []const u8, pos: *usize) bool {
 }
 
 fn skipBlockComment(source: []const u8, pos: *usize) bool {
-    var p = pos.* + 2;
-    while (p + 1 < source.len) : (p += 1) {
-        if (source[p] == '*' and source[p + 1] == '/') {
-            pos.* = p + 2;
-            return true;
-        }
-    }
-    return false;
+    return skipBlockCommentBody(source, pos, false) == .skipped;
 }
 
 fn startsWithAt(source: []const u8, start: usize, needle: []const u8) bool {
@@ -759,6 +684,18 @@ test "borrowed balanced scanner preserves QuickJS topology bits" {
     const strict_equality = balancedAfterOpen("[] === rhs", 1, '[', false).?;
     try std.testing.expect(strict_equality.closed);
     try std.testing.expectEqual(BalancedFollowing.other, strict_equality.following);
+
+    const optional = balancedAfterOpen("{ a }?: T = d", 1, '{', false).?;
+    try std.testing.expect(optional.closed);
+    try std.testing.expectEqual(BalancedFollowing.question, optional.following);
+
+    const nullish = balancedAfterOpen("{ a } ?? b", 1, '{', false).?;
+    try std.testing.expect(nullish.closed);
+    try std.testing.expectEqual(BalancedFollowing.other, nullish.following);
+
+    const chain = balancedAfterOpen("{ a }?.b", 1, '{', false).?;
+    try std.testing.expect(chain.closed);
+    try std.testing.expectEqual(BalancedFollowing.other, chain.following);
 }
 
 test "borrowed balanced scanner matches delimiters and falls back conservatively" {

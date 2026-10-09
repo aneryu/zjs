@@ -81,8 +81,6 @@ const MethodTableKind = enum {
     data_view_prototype,
     iterator_static,
     iterator_prototype,
-    reflect,
-    atomics,
     disposable_stack_prototype,
     async_disposable_stack_prototype,
 };
@@ -153,9 +151,9 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .string_static => setRequiredMethodNativeBuiltinId(method, .string, string_builtin.staticMethodId(name)),
             .string_prototype => {
                 if (std.mem.eql(u8, name, "toString")) {
-                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, 51);
+                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.string, .to_string));
                 } else if (std.mem.eql(u8, name, "valueOf")) {
-                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, 52);
+                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.string, .value_of));
                 } else {
                     setRequiredMethodNativeBuiltinId(method, .string, string_builtin.prototypeMethodId(name));
                 }
@@ -163,7 +161,7 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .number_static => setRequiredMethodNativeBuiltinId(method, .number, number_builtin.staticMethodId(name)),
             .number_prototype => {
                 if (std.mem.eql(u8, name, "valueOf")) {
-                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, 12);
+                    method.native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.number, .value_of));
                 } else {
                     setRequiredMethodNativeBuiltinId(method, .number, number_builtin.prototypeMethodId(name));
                 }
@@ -259,8 +257,6 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .data_view_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_ops.dataViewPrototypeMethodId(name)),
             .iterator_static => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.staticMethodId(name)),
             .iterator_prototype => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.prototypeMethodId(name)),
-            .reflect => setRequiredMethodNativeBuiltinId(method, .reflect, reflect_builtin.methodId(name)),
-            .atomics => setRequiredMethodNativeBuiltinId(method, .atomics, atomics_builtin.methodId(name)),
             .disposable_stack_prototype => setRequiredMethodNativeBuiltinId(method, .disposable, disposable_ops.prototypeMethodId(name, false)),
             .async_disposable_stack_prototype => setRequiredMethodNativeBuiltinId(method, .disposable, disposable_ops.prototypeMethodId(name, true)),
         }
@@ -510,7 +506,7 @@ const prototype_flags: Flags = .none;
 /// `PrimitiveClass * primitive_builtin_stride + PrimitiveMethod`
 /// (`object_ops.zig`).
 fn primitiveBuiltinId(class: object_builtin.PrimitiveClass, method: object_builtin.PrimitiveMethod) u32 {
-    return @as(u32, @intCast(@intFromEnum(class))) * @as(u32, @intCast(object_builtin.primitive_builtin_stride)) + @as(u32, @intCast(@intFromEnum(method)));
+    return object_builtin.primitiveBuiltinId(class, method);
 }
 const primitive_boolean_ctor_call_id: u32 = primitiveBuiltinId(.boolean, .constructor_call);
 const primitive_symbol_ctor_call_id: u32 = primitiveBuiltinId(.symbol, .constructor_call);
@@ -848,7 +844,6 @@ pub fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, ki
     };
     switch (kind) {
         .math_namespace => {
-            try bindMathNativeRecords(rt, namespace);
             try installMathConstants(rt, namespace);
             try installNamespaceToStringTag(rt, global, namespace, "Math");
         },
@@ -856,12 +851,10 @@ pub fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, ki
             try installNamespaceToStringTag(rt, global, namespace, "JSON");
         },
         .reflect_namespace => {
-            try bindReflectNativeRecords(rt, namespace);
             try installNamespaceToStringTag(rt, global, namespace, "Reflect");
         },
         .atomics_namespace => {
             try installNamespaceToStringTag(rt, global, namespace, "Atomics");
-            try bindAtomicsNativeRecords(rt, namespace);
         },
         else => unreachable,
     }
@@ -1566,25 +1559,6 @@ fn installMathConstants(rt: *core.JSRuntime, math: *core.Object) !void {
     try defineDataAtom(rt, math, core.atom.ids.SQRT2, core.JSValue.float64(math_builtin.SQRT2), flags);
 }
 
-fn bindMathNativeRecords(rt: *core.JSRuntime, math: *core.Object) !void {
-    for (math_builtin.internal_entries) |entry| {
-        try bindNativeRecordByName(rt, math, entry.name, .math, entry.id);
-    }
-}
-
-fn bindAtomicsNativeRecords(rt: *core.JSRuntime, atomics: *core.Object) !void {
-    for (atomics_builtin.internal_entries) |entry| {
-        try bindNativeRecordByName(rt, atomics, entry.name, .atomics, entry.id);
-    }
-}
-
-fn bindReflectNativeRecords(rt: *core.JSRuntime, reflect: *core.Object) !void {
-    for (reflect_methods) |method| {
-        const id = reflect_builtin.methodId(method.name) orelse continue;
-        try bindNativeRecordByName(rt, reflect, method.name, .reflect, id);
-    }
-}
-
 fn defineCollectionPrototypeMethodsAssumingNew(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object, name: []const u8) !void {
     // Only Map and Set reach here (installCollectionExtras).
     if (std.mem.eql(u8, name, "Map")) {
@@ -1617,46 +1591,6 @@ fn defineCollectionSizeAccessorAssumingNew(rt: *core.JSRuntime, global: *core.Ob
 
 fn setDateConstructorNativeRecord(ctor: *core.Object) void {
     ctor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.ConstructorMethod.construct)));
-}
-
-fn bindNativeRecordByName(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    name: []const u8,
-    domain: core.function.NativeBuiltinDomain,
-    id: u32,
-) !void {
-    const key = try temporaryStringAtom(rt, name);
-    defer freeTemporaryStringAtom(rt, key);
-    const native_id = core.function.nativeBuiltinId(domain, id);
-    if (bindAutoInitNativeRecordByAtom(rt, object, key, native_id)) return;
-    try bindMaterializedNativeRecordByAtom(object, key, native_id);
-}
-
-fn bindMaterializedNativeRecordByAtom(
-    object: *core.Object,
-    atom_id: core.Atom,
-    native_id: i32,
-) !void {
-    const value = try object.getProperty(atom_id);
-    if (!value.is(.object)) return;
-    const function_object = expectObjectAssumeBootstrap(value);
-    function_object.setNativeBuiltinIdAndRecord(native_id);
-}
-
-fn bindAutoInitNativeRecordByAtom(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
-    if (object.hasExoticMethods()) return false;
-    if (object.findProperty(atom_id)) |property_index| {
-        const entry = object.propertyEntry(property_index);
-        switch (object.propKindAt(property_index)) {
-            .auto_init => {
-                const info = core.property.autoInit(entry.slot.auto_init);
-                return info.native_builtin_id == native_id;
-            },
-            else => return false,
-        }
-    }
-    return false;
 }
 
 fn installTypedArrayElementSize(rt: *core.JSRuntime, ctor: *core.Object, size: i32, kind: core.typed_array_names.Kind) !void {
@@ -1954,19 +1888,19 @@ const number_prototype = preparedMethods([_]Method{
 }, .number_prototype);
 
 const boolean_prototype = preparedMethods([_]Method{
-    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 21) },
-    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 22) },
+    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.boolean, .to_string)) },
+    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.boolean, .value_of)) },
 }, .boolean_prototype);
 
 const bigint_prototype = preparedMethods([_]Method{
-    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 31) },
-    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 32) },
-    .{ .name = "toLocaleString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 38) },
+    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.big_int, .to_string)) },
+    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.big_int, .value_of)) },
+    .{ .name = "toLocaleString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.big_int, .to_locale_string)) },
 }, .bigint_prototype);
 
 const symbol_prototype = preparedMethods([_]Method{
-    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 41) },
-    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 42) },
+    .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.symbol, .to_string)) },
+    .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitiveBuiltinId(.symbol, .value_of)) },
 }, .symbol_prototype);
 
 const error_prototype = preparedMethods([_]Method{
@@ -2271,38 +2205,16 @@ fn countInternalEntriesWhere(
     return count;
 }
 
-const reflect_methods = preparedMethods([_]Method{
-    .{ .name = "apply", .length = 3 },
-    .{ .name = "construct", .length = 2 },
-    .{ .name = "defineProperty", .length = 3 },
-    .{ .name = "deleteProperty", .length = 2 },
-    .{ .name = "get", .length = 2 },
-    .{ .name = "getOwnPropertyDescriptor", .length = 2 },
-    .{ .name = "getPrototypeOf", .length = 1 },
-    .{ .name = "has", .length = 2 },
-    .{ .name = "isExtensible", .length = 1 },
-    .{ .name = "ownKeys", .length = 1 },
-    .{ .name = "preventExtensions", .length = 1 },
-    .{ .name = "set", .length = 3 },
-    .{ .name = "setPrototypeOf", .length = 2 },
-}, .reflect);
+fn reflectNamespaceEntry(id: u32) bool {
+    return id != @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable) and
+        id != @intFromEnum(reflect_builtin.StaticMethod.proxy_revoke);
+}
 
-const atomics_methods = preparedMethods([_]Method{
-    .{ .name = "add", .length = 3 },
-    .{ .name = "and", .length = 3 },
-    .{ .name = "compareExchange", .length = 4 },
-    .{ .name = "exchange", .length = 3 },
-    .{ .name = "isLockFree", .length = 1 },
-    .{ .name = "load", .length = 2 },
-    .{ .name = "notify", .length = 3 },
-    .{ .name = "or", .length = 3 },
-    .{ .name = "pause", .length = 0 },
-    .{ .name = "store", .length = 3 },
-    .{ .name = "sub", .length = 3 },
-    .{ .name = "wait", .length = 4 },
-    .{ .name = "waitAsync", .length = 4 },
-    .{ .name = "xor", .length = 3 },
-}, .atomics);
+/// Reflect.* install order is the internal_entries order without Proxy's
+/// revocable helper and its revoke closure.
+const reflect_methods = methodsFromInternalEntriesWhere(&reflect_builtin.internal_entries, .reflect, reflectNamespaceEntry);
+
+const atomics_methods = methodsFromInternalEntries(&atomics_builtin.internal_entries, .atomics);
 
 fn installSymbolExtras(rt: *core.JSRuntime, global: *core.Object, symbol_ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(symbol_ctor) orelse return error.InvalidBuiltinRegistry;
@@ -2917,8 +2829,12 @@ comptime {
     std.debug.assert(async_dispose.native_builtin_id ==
         core.function.nativeBuiltinId(.disposable, @intFromEnum(disposable_ops.Method.async_dispose_async)));
 
-    std.debug.assert(math_methods[0].native_builtin_id ==
-        core.function.nativeBuiltinId(.math, math_builtin.internal_entries[0].id));
+    // methodsFromInternalEntries copies each entry's id onto the descriptor.
+    // Materialization reads that field; there is no second runtime write.
+    for (math_methods, math_builtin.internal_entries) |method, entry| {
+        std.debug.assert(std.mem.eql(u8, method.name, entry.name));
+        std.debug.assert(method.native_builtin_id == core.function.nativeBuiltinId(.math, entry.id));
+    }
     std.debug.assert(json_methods[0].native_builtin_id ==
         core.function.nativeBuiltinId(.json, json_builtin.internal_entries[0].id));
 }

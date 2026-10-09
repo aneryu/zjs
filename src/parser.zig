@@ -112,16 +112,16 @@ pub const compile_entry = struct {
     const token_mod = token;
     const diagnostics_mod = diagnostics;
 
-    const ModeImpl = enum {
+    pub const ModeImpl = enum {
         script,
         module,
         eval_direct,
         eval_indirect,
     };
 
-    const FeatureImpl = parser_core.FeatureImpl;
+    pub const FeatureImpl = parser_core.FeatureImpl;
 
-    const CompilePathImpl = enum {
+    pub const CompilePathImpl = enum {
         normal,
         syntax_error_guard,
     };
@@ -129,7 +129,7 @@ pub const compile_entry = struct {
     /// Move-only module compilation product. The FunctionBytecode and module
     /// record are the two independently owned halves of one canonical module
     /// root; no parser Bytecode or arena storage escapes compilation.
-    const ModuleArtifactImpl = struct {
+    pub const ModuleArtifactImpl = struct {
         function_bytecode: *bytecode.FunctionBytecode,
         record: bytecode.module.Record,
 
@@ -141,13 +141,13 @@ pub const compile_entry = struct {
     /// Exactly one successful root artifact. Script/direct/indirect eval own a
     /// canonical FunctionBytecode directly; modules own the same canonical
     /// root together with their linking metadata.
-    const RootArtifactImpl = union(enum) {
+    pub const RootArtifactImpl = union(enum) {
         none,
         function_bytecode: *bytecode.FunctionBytecode,
         module: ModuleArtifactImpl,
     };
 
-    const ResultImpl = struct {
+    pub const ResultImpl = struct {
         artifact: RootArtifactImpl = .none,
         mode: ModeImpl,
         parse_path: CompilePathImpl = .normal,
@@ -288,7 +288,7 @@ pub const compile_entry = struct {
         }
     };
 
-    const EvalClosureSeedImpl = struct {
+    pub const EvalClosureSeedImpl = struct {
         var_name: atom.Atom,
         closure_type: bytecode.function_def.ClosureType = .ref,
         var_idx: ?u16 = null,
@@ -297,7 +297,7 @@ pub const compile_entry = struct {
         var_kind: bytecode.function_def.VarKind = .normal,
     };
 
-    const OptionsImpl = struct {
+    pub const OptionsImpl = struct {
         mode: ModeImpl = .script,
         filename: []const u8 = "<input>",
         /// Borrowed stable ScriptOrModule identity. Direct eval supplies its
@@ -743,36 +743,24 @@ pub const compile_entry = struct {
         if ((out.kind == .slash or out.kind == .div_assign) and
             token_mod.slashAfterStartsRegexp(previous_token_kind))
         {
-            const slash_offset = lex.mark_pos;
             lex.freeToken(out);
-            try lex.rescanRegexpInto(out, slash_offset);
+            try lex.rescanLastSlashAsRegexpInto(out);
         }
     }
-
-    pub const Feature = FeatureImpl;
-    pub const Mode = ModeImpl;
-    pub const CompilePath = CompilePathImpl;
-    pub const Result = ResultImpl;
-    pub const ModuleArtifact = ModuleArtifactImpl;
-    pub const RootArtifact = RootArtifactImpl;
-    pub const Options = OptionsImpl;
-    pub const EvalClosureSeed = EvalClosureSeedImpl;
-    pub const CompileContext = bytecode.CompileContext;
-    pub const CompilePolicy = bytecode.CompilePolicy;
 };
 pub const Lexer = lexer.Lexer;
-pub const ParseState = parser_core.ParseState;
+pub const ParseState = parse_state.ParseState;
 pub const Parser = parser_core;
-pub const Mode = compile_entry.Mode;
-pub const Feature = parser_core.Feature;
-pub const CompilePath = compile_entry.CompilePath;
-pub const Result = compile_entry.Result;
-pub const ModuleArtifact = compile_entry.ModuleArtifact;
-pub const RootArtifact = compile_entry.RootArtifact;
-pub const Options = compile_entry.Options;
-pub const EvalClosureSeed = compile_entry.EvalClosureSeed;
-pub const CompileContext = compile_entry.CompileContext;
-pub const CompilePolicy = compile_entry.CompilePolicy;
+pub const Mode = compile_entry.ModeImpl;
+pub const Feature = parse_state.Feature;
+pub const CompilePath = compile_entry.CompilePathImpl;
+pub const Result = compile_entry.ResultImpl;
+pub const ModuleArtifact = compile_entry.ModuleArtifactImpl;
+pub const RootArtifact = compile_entry.RootArtifactImpl;
+pub const Options = compile_entry.OptionsImpl;
+pub const EvalClosureSeed = compile_entry.EvalClosureSeedImpl;
+pub const CompileContext = @import("bytecode.zig").CompileContext;
+pub const CompilePolicy = @import("bytecode.zig").CompilePolicy;
 pub const compile = compile_entry.compile;
 
 test "pending diagnostic preserves exact fields truncation replacement and OOM bypass" {

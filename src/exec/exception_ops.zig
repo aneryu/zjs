@@ -18,6 +18,9 @@ const value_ops = @import("value_ops.zig");
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 
+pub const msg_out_of_memory = "out of memory";
+pub const msg_derived_this_uninitialized = "this is not initialized";
+
 /// Construct a named error from `global`'s constructor for `name` and
 /// capture its `.stack` call sites from the current VM backtrace. This is
 /// the single construction primitive for engine-thrown named errors; the
@@ -165,7 +168,7 @@ fn buildErrorObjectWithPrototype(rt: *core.JSRuntime, prototype: *core.Object, m
 /// allocation-free even if `InternalError.prototype.name` has not been
 /// materialized from its lazy builtin string placeholder.
 pub fn createPreallocatedOutOfMemoryError(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
-    const error_value = try createNamedErrorWithoutStack(rt, global, "InternalError", "out of memory");
+    const error_value = try createNamedErrorWithoutStack(rt, global, "InternalError", msg_out_of_memory);
     const error_object = objectFromValue(error_value) orelse return error.TypeError;
     const name_value = try value_ops.createStringValue(rt, "InternalError");
     try defineNonEnumValueProperty(rt, error_object, core.atom.ids.name, name_value);
@@ -534,7 +537,8 @@ pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.Backtrace
 pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.BacktraceLocation {
     const function: *const bytecode.FunctionBytecode = @ptrCast(@alignCast(data orelse return .{ .line_num = 1, .col_num = 1 }));
     if (function.pc2lineBuf().len == 0) {
-        return .{ .line_num = function.lineNum(), .col_num = function.colNum() };
+        const start = function.startLocation();
+        return .{ .line_num = start.line_num, .col_num = start.col_num };
     }
     // A present full-debug buffer is authoritative. QuickJS find_line_num
     // returns 0:0 for any malformed header or transition; falling back to a
@@ -549,11 +553,12 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 /// parallel backtrace node.
 pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktraceSnapshot {
     const function = frame.function;
+    const start = function.startLocation();
     return .{
         .function_name = function.funcName(),
         .filename = function.filenameAtom(),
-        .line_num = function.lineNum(),
-        .col_num = function.colNum(),
+        .line_num = start.line_num,
+        .col_num = start.col_num,
         // The published frame.pc is the resume/return address (it points past
         // the currently-executing instruction, like qjs sf->cur_pc). Back off
         // one byte so the line/col lookup lands inside that instruction —
@@ -617,11 +622,12 @@ fn stringValueEqualsAscii(value: core.JSValue, expected: []const u8) bool {
 // and the hex-digit failure is the dominant source (matching the qjs text).
 pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
     return switch (@as(anyerror, err)) {
+        // InvalidUtf8 keeps this text: tests/core.zig pins the URIError name, and lexer paths do not reach this map.
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
         // Allocation failure under a memory limit is catchable, mirroring
         // QuickJS's InternalError "out of memory" exception; paths without a
         // JS catch handler still surface error.OutOfMemory to the embedder.
-        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
+        error.OutOfMemory => .{ .name = "InternalError", .message = msg_out_of_memory },
         // Native C-stack recursion guard (QuickJS JS_ThrowStackOverflow ->
         // InternalError "stack overflow", quickjs.c).
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
@@ -634,7 +640,7 @@ pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
         error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
         // qjs OP_get_loc_checkthis likewise uses caller_ctx for the implicit
         // derived-constructor return.
-        error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },
+        error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = msg_derived_this_uninitialized },
         error.TypeError => .{ .name = "TypeError", .message = "" },
         // qjs JS_CreateProperty not_extensible.
         error.NotExtensible => .{ .name = "TypeError", .message = "object is not extensible" },
@@ -733,7 +739,7 @@ const HostIoError = std.Io.Dir.ReadFileAllocError || std.Io.Writer.Error;
 
 fn hostIoErrorInfo(err: HostIoError) ErrorInfo {
     return switch (err) {
-        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
+        error.OutOfMemory => .{ .name = "InternalError", .message = msg_out_of_memory },
         error.AccessDenied,
         error.AntivirusInterference,
         error.BadPathName,
@@ -879,23 +885,14 @@ pub const StaticMethod = enum(u32) {
 pub const internal_entries = errorEntries: {
     const Entry = core.host_function.InternalEntry;
     break :errorEntries [_]Entry{
-        errorEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
-        errorEntry("get stack", 1, @intFromEnum(PrototypeMethod.stack_getter)),
-        errorEntry("set stack", 1, @intFromEnum(PrototypeMethod.stack_setter)),
-        errorEntry("captureStackTrace", 1, @intFromEnum(StaticMethod.capture_stack_trace)),
-        errorEntry("isError", 1, @intFromEnum(StaticMethod.is_error)),
+        errorEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), &errorCall),
+        errorEntry("get stack", 1, @intFromEnum(PrototypeMethod.stack_getter), &errorCall),
+        errorEntry("set stack", 1, @intFromEnum(PrototypeMethod.stack_setter), &errorCall),
+        errorEntry("captureStackTrace", 1, @intFromEnum(StaticMethod.capture_stack_trace), &errorCall),
+        errorEntry("isError", 1, @intFromEnum(StaticMethod.is_error), &errorCall),
     };
 };
-fn errorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{
-        .name = name,
-        .length = length,
-        .id = id,
-        .magic = @intCast(id),
-        .cproto = .generic_magic,
-        .native_function = builtin_dispatch.genericMagicFunction(&errorCall),
-    };
-}
+const errorEntry = builtin_dispatch.entryWithHandler;
 
 fn errorCall(
     native_ctx: *core.JSContext,

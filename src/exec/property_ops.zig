@@ -525,7 +525,7 @@ pub fn execGetVarRefMaybeTdz(
         // so it remains catchable in the current (callee) realm while keeping
         // the constructor-specific message.
         const err = if (idx < function.varRefNamesLen() and function.varRefName(idx) == core.atom.ids.this_) blk: {
-            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, exception_ops.msg_derived_this_uninitialized) catch |err| break :blk err;
             unreachable;
         } else throwTdzReferenceError(ctx, if (idx < function.varRefNamesLen()) function.varRefName(idx) else core.atom.null_atom);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {

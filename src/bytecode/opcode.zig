@@ -451,10 +451,32 @@ pub const op = struct {
     pub const op_count: u16 = 255;
     /// First id of the temp/short overlap range (OP_nop + 1).
     pub const op_temp_start: u8 = 178;
+    /// Compiler-only forms, one physical id each in the overlap range.
+    pub const op_temp_count: u8 = blk: {
+        var n: u8 = 0;
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= logical.temp_base and f.value < logical.sub_base) n += 1;
+        }
+        break :blk n;
+    };
     /// One past the last temp id (exclusive).
-    pub const op_temp_end: u8 = 197;
-    /// Number of temp opcodes (= short-entry shift in `opcode_info`).
-    pub const op_temp_count: u8 = 19;
+    pub const op_temp_end: u8 = op_temp_start + op_temp_count;
+
+    comptime {
+        var previous: ?u16 = null;
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < logical.temp_base or f.value >= logical.sub_base) continue;
+            if (previous) |prev| {
+                if (f.value != prev + 1) @compileError("temp logical ids are not contiguous");
+            } else if (f.value != logical.temp_base) {
+                @compileError("temp logical ids do not start at temp_base");
+            }
+            previous = @intCast(f.value);
+        }
+        const last = previous orelse @compileError("no temp logical ids");
+        if (last != logical.temp_base + op_temp_count - 1)
+            @compileError("temp logical id count disagrees with the contiguous range");
+    }
 };
 
 /// Operand of `op.ext0` (244). `add_base + DisposalHint` is add_resource.
@@ -571,6 +593,15 @@ pub const ext0_sub = struct {
 /// hand-updated literal.
 pub const op_info_len: usize = @as(usize, op.op_count) + op.op_temp_count + logical.lowered_direct.len;
 
+/// Phase-1 id of a logical value: a final form's own id, a temp form's
+/// overlap id, or a cold-plane resident's lowered-direct byte.
+fn phase1IdOf(comptime value: u16) u8 {
+    if (value >= logical.sub_base) return decode.loweredDirectIdOf(value).?;
+    if (value >= logical.temp_base)
+        return op.op_temp_start + @as(u8, @intCast(value - logical.temp_base));
+    return @intCast(value);
+}
+
 /// G0: the metadata table is GENERATED from the declaration source --
 /// the enum is the slot map (an id below op_count with no <300 enum
 /// field is a reclaimed slot and gets the canonical dead row), and
@@ -594,8 +625,8 @@ pub const opcode_info: [op_info_len]Info = blk: {
     }
     // Temp forms occupy the overlap range at their raw position.
     for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value < 300 or f.value >= 400) continue;
-        t[op.op_temp_start + (f.value - 300)] = generatedRow(@enumFromInt(f.value));
+        if (f.value < logical.temp_base or f.value >= logical.sub_base) continue;
+        t[phase1IdOf(f.value)] = generatedRow(@enumFromInt(f.value));
     }
     // Lowered-direct rows append in declaration order.
     for (logical.lowered_direct, 0..) |e, k| {
@@ -610,7 +641,7 @@ pub const opcode_info: [op_info_len]Info = blk: {
 fn formForId(comptime id: u8) ?logical.LogicalOpcode {
     comptime {
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-            if (f.value < 300 and f.value == id) return @enumFromInt(f.value);
+            if (f.value < logical.temp_base and f.value == id) return @enumFromInt(f.value);
         }
         return null;
     }
@@ -624,11 +655,7 @@ fn generatedRow(comptime form: logical.LogicalOpcode) Info {
             var size: usize = 1;
             for (logical.operandsOf(form, d.fmt)) |operand| {
                 switch (operand.source) {
-                    .payload => |pl| size += switch (pl.width) {
-                        .u8, .i8 => 1,
-                        .u16, .i16 => 2,
-                        .u32, .i32 => 4,
-                    },
+                    .payload => |pl| size += pl.width.bytes(),
                     .fixed => {},
                 }
             }
@@ -970,7 +997,7 @@ comptime {
     // halves one instruction set rather than two lists.
     var seen = [_]bool{false} ** 256;
     for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value >= 300) continue; // compiler-only or cold-plane form
+        if (f.value >= logical.temp_base) continue; // compiler-only or cold-plane form
         if (f.value > 255)
             @compileError("final logical form has a value outside the 8-bit id space");
         const id: u8 = @intCast(f.value);
@@ -1002,25 +1029,16 @@ comptime {
         // are checked separately -- except the lowered-direct ones,
         // whose phase-1 row must agree with the declaration like any
         // other lowered form's.
-        if (f.value >= 400 and decode.loweredDirectIdOf(f.value) == null) continue;
-        const id: u8 = if (f.value >= 400)
-            decode.loweredDirectIdOf(f.value).?
-        else if (f.value >= 300)
-            op.op_temp_start + @as(u8, @intCast(f.value - 300))
-        else
-            @intCast(f.value);
-        const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+        if (f.value >= logical.sub_base and decode.loweredDirectIdOf(f.value) == null) continue;
+        const id = phase1IdOf(f.value);
+        const info = if (f.value >= logical.temp_base) phase1Info(id).? else finalInfo(id).?;
         const form: logical.LogicalOpcode = @enumFromInt(f.value);
         const fmt = info.fmt;
         const operands = logical.operandsOf(form, fmt);
         var payload: usize = 0;
         for (operands) |operand| {
             switch (operand.source) {
-                .payload => |pl| payload += switch (pl.width) {
-                    .u8, .i8 => 1,
-                    .u16, .i16 => 2,
-                    .u32, .i32 => 4,
-                },
+                .payload => |pl| payload += pl.width.bytes(),
                 .fixed => {},
             }
             // Assertion 15: addressing operands carry a dataflow
@@ -1043,12 +1061,9 @@ comptime {
     // format that is not must not be.
     for (logical.operand_overrides) |o| {
         const raw: u16 = @intFromEnum(o.form);
-        if (raw >= 400) @compileError("cold-plane form cannot use an operand override yet");
-        const id: u8 = if (raw >= 300)
-            op.op_temp_start + @as(u8, @intCast(raw - 300))
-        else
-            @intCast(raw);
-        const info = if (raw >= 300) phase1Info(id).? else finalInfo(id).?;
+        if (raw >= logical.sub_base) @compileError("cold-plane form cannot use an operand override yet");
+        const id = phase1IdOf(raw);
+        const info = if (raw >= logical.temp_base) phase1Info(id).? else finalInfo(id).?;
         const fmt = info.fmt;
         if (logical.operandTemplate(fmt) != null)
             @compileError("operand override shadows an unambiguous format template");
@@ -1133,7 +1148,7 @@ comptime {
     // unanchored, which is the same blindness the demotion caused in the
     // first place -- a name in one place and a number in another.
     for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value < 400) continue;
+        if (f.value < logical.sub_base) continue;
         const form: logical.LogicalOpcode = @enumFromInt(f.value);
         const plane = logical.planeOf(form);
         switch (plane) {
@@ -1194,7 +1209,7 @@ comptime {
                 @compileError("carrier-resident stack effect disagrees with the direct row");
             if (!aliased)
                 @compileError("late-encoding resident has no executable alias for its direct id");
-        } else if (@intFromEnum(r.form) >= 400) {
+        } else if (@intFromEnum(r.form) >= logical.sub_base) {
             // End state.
             if (aliased)
                 @compileError("closed late-encoding resident still has an executable alias");
@@ -1218,13 +1233,10 @@ comptime {
     // constant that drifts -- or a form added without its constant --
     // stops compiling here instead of emitting a neighbouring opcode.
     for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value >= 400) continue; // lowered-direct asserted below
+        if (f.value >= logical.sub_base) continue; // lowered-direct asserted below
         if (!@hasDecl(op, f.name))
             @compileError("form has no op emit constant: " ++ f.name);
-        const expected: u8 = if (f.value >= 300)
-            op.op_temp_start + @as(u8, @intCast(f.value - 300))
-        else
-            @intCast(f.value);
+        const expected = phase1IdOf(f.value);
         if (@field(op, f.name) != expected)
             @compileError("op constant disagrees with the declaration: " ++ f.name);
     }
@@ -1262,7 +1274,7 @@ comptime {
     // the reverse derivation undefined.
     for (logical.legacy_embedded) |run| {
         const base_id: u16 = @intFromEnum(run.first);
-        if (base_id >= 300) @compileError("legacy embedded run starts at a compiler-only form");
+        if (base_id >= logical.temp_base) @compileError("legacy embedded run starts at a compiler-only form");
         var k: u8 = 0;
         while (k < run.count) : (k += 1) {
             const id: u16 = base_id + k;
@@ -1379,14 +1391,9 @@ pub const decode = struct {
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
             // Carrier residents have no row of their own -- except the
             // lowered-direct ones, whose phase-1 row is theirs.
-            if (f.value >= 400 and loweredDirectIdOf(f.value) == null) continue;
-            const id: u8 = if (f.value >= 400)
-                loweredDirectIdOf(f.value).?
-            else if (f.value >= 300)
-                op.op_temp_start + @as(u8, @intCast(f.value - 300))
-            else
-                @intCast(f.value);
-            const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+            if (f.value >= logical.sub_base and loweredDirectIdOf(f.value) == null) continue;
+            const id = phase1IdOf(f.value);
+            const info = if (f.value >= logical.temp_base) phase1Info(id).? else finalInfo(id).?;
             const form: logical.LogicalOpcode = @enumFromInt(f.value);
             const fmt = info.fmt;
             const operands = logical.operandsOf(form, fmt);
@@ -1395,11 +1402,7 @@ pub const decode = struct {
             for (operands, 0..) |operand, i| {
                 switch (operand.source) {
                     .payload => |pl| {
-                        const w: u8 = switch (pl.width) {
-                            .u8, .i8 => 1,
-                            .u16, .i16 => 2,
-                            .u32, .i32 => 4,
-                        };
+                        const w = pl.width.bytes();
                         layout.slots[i] = .{
                             .kind = operand.kind,
                             .flow = operand.flow,
@@ -1545,16 +1548,11 @@ pub const decode = struct {
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
             // Same exception as layout_table: a lowered-direct resident
             // keeps a live row (the phase-1 view of its byte).
-            if (f.value >= 400 and loweredDirectIdOf(f.value) == null) continue;
-            const id: u8 = if (f.value >= 400)
-                loweredDirectIdOf(f.value).?
-            else if (f.value >= 300)
-                op.op_temp_start + @as(u8, @intCast(f.value - 300))
-            else
-                @intCast(f.value);
-            const info = if (f.value >= 300) phase1Info(id).? else finalCompactInfo(id).?;
+            if (f.value >= logical.sub_base and loweredDirectIdOf(f.value) == null) continue;
+            const id = phase1IdOf(f.value);
+            const info = if (f.value >= logical.temp_base) phase1Info(id).? else finalCompactInfo(id).?;
             var flags: u8 = 0;
-            if (f.value >= 300 or physical.stateOf(id) == .claimed)
+            if (f.value >= logical.temp_base or physical.stateOf(id) == .claimed)
                 flags |= FormRow.claimed_bit;
             if (dynamic_by_form[f.value] != null) flags |= FormRow.dynamic_bit;
             switch (info.fmt) {
@@ -1648,7 +1646,7 @@ pub const decode = struct {
                 continue;
             }
             const index: u16 = if (id >= op.op_temp_start and id < op.op_temp_end)
-                @as(u16, 300) + (id - op.op_temp_start)
+                logical.temp_base + (id - op.op_temp_start)
             else
                 id;
             // Compare by value: a reclaimed id has no enum tag, so the
@@ -1715,7 +1713,7 @@ pub const decode = struct {
             for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
                 const form: logical.LogicalOpcode = @enumFromInt(f.value);
                 if (form == wide or logical.familyOf(form) != fam) continue;
-                if (f.value >= 300) continue; // final forms only
+                if (f.value >= logical.temp_base) continue; // final forms only
                 const lay = layout_table[f.value] orelse continue;
                 // The short variant narrows or burns in the LEADING
                 // operand only; any trailing operands (the call family's
@@ -1759,7 +1757,7 @@ pub const decode = struct {
         @setEvalBranchQuota(400000);
         var t = [_]JumpSelection{.{ .narrow = null, .medium = null }} ** layout_table_len;
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |wf| {
-            if (wf.value >= 300) continue;
+            if (wf.value >= logical.temp_base) continue;
             const wide: logical.LogicalOpcode = @enumFromInt(wf.value);
             const wlay = layout_table[wf.value] orelse continue;
             // The wide rung is the family key: a four-byte label
@@ -1775,7 +1773,7 @@ pub const decode = struct {
             if (!wide_has_label) continue;
             const fam = logical.familyOf(wide);
             for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-                if (f.value >= 300 or f.value == wf.value) continue;
+                if (f.value >= logical.temp_base or f.value == wf.value) continue;
                 const form: logical.LogicalOpcode = @enumFromInt(f.value);
                 if (logical.familyOf(form) != fam) continue;
                 const lay = layout_table[f.value] orelse continue;
@@ -1813,7 +1811,7 @@ pub const decode = struct {
         @setEvalBranchQuota(200000);
         var t = [_]?logical.LogicalOpcode{null} ** 9;
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-            if (f.value >= 300) continue;
+            if (f.value >= logical.temp_base) continue;
             const form: logical.LogicalOpcode = @enumFromInt(f.value);
             if (logical.familyOf(form) != .push_int) continue;
             const lay = layout_table[f.value] orelse continue;
@@ -1879,7 +1877,7 @@ pub const decode = struct {
                         .tag = r.slot,
                     } };
             }
-            if (@intFromEnum(form) >= 300)
+            if (@intFromEnum(form) >= logical.temp_base)
                 @compileError("finalEncodingOf asked about a non-final form");
             return .{ .direct = @intCast(@intFromEnum(form)) };
         }
@@ -1951,12 +1949,8 @@ pub const decode = struct {
             const slot = lay.slots[index];
             const offset = slot.offset orelse
                 @compileError("operand of " ++ @tagName(form) ++ " is burned into the id, not in the payload");
-            const width: usize = switch (slot.width orelse
-                @compileError("operand of " ++ @tagName(form) ++ " has no payload width")) {
-                .u8, .i8 => 1,
-                .u16, .i16 => 2,
-                .u32, .i32 => 4,
-            };
+            const width: usize = (slot.width orelse
+                @compileError("operand of " ++ @tagName(form) ++ " has no payload width")).bytes();
             if (width != @sizeOf(T))
                 @compileError("width mismatch reading operand of " ++ @tagName(form));
             return 1 + offset;
@@ -1998,7 +1992,7 @@ pub const decode = struct {
         /// value ranges are the declaration's plane encoding: final
         /// forms sit at their physical id, lowered-only forms at 300+.
         pub inline fn isLowered(self: Header) bool {
-            return @intFromEnum(self.form) >= 300;
+            return @intFromEnum(self.form) >= logical.temp_base;
         }
         /// 0, 1 or 2 -- see `FormRow.index_width_shift`.
         pub inline fn indexWidth(self: Header) u8 {
@@ -2055,7 +2049,7 @@ pub const decode = struct {
         for (0..256) |i| {
             const id: u8 = @intCast(i);
             t[i] = if (id >= op.op_temp_start and id < op.op_temp_end)
-                @as(u16, 300) + (id - op.op_temp_start)
+                logical.temp_base + (id - op.op_temp_start)
             else
                 id;
         }
@@ -2197,7 +2191,7 @@ pub const decode = struct {
     /// pay for the structured path (P1-1).
     pub inline fn matchesFormAt(code: []const u8, pc: u32, form: logical.LogicalOpcode) bool {
         const raw = @intFromEnum(form);
-        if (raw >= 300) return false;
+        if (raw >= logical.temp_base) return false;
         return pc < code.len and code[pc] == @as(u8, @intCast(raw));
     }
 };
@@ -2219,8 +2213,8 @@ test "a demoted opcode keeps its scanner policy (5.2 clause 3)" {
     // Every resident is reachable from its tag, and a tag no resident
     // claims decodes to null rather than to something plausible.
     inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value >= 400) {
-            const tag: u8 = @intCast(f.value - 400);
+        if (f.value >= logical.sub_base) {
+            const tag: u8 = @intCast(f.value - logical.sub_base);
             try std.testing.expectEqual(
                 @as(?logical.LogicalOpcode, @enumFromInt(f.value)),
                 logical.subForm(tag),
@@ -2237,7 +2231,7 @@ test "decode layer round-trips every direct form against the raw reads" {
     @setEvalBranchQuota(200000);
     var buf: [16]u8 = undefined;
     inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-        if (f.value < 300) {
+        if (f.value < logical.temp_base) {
             const id: u8 = @intCast(f.value);
             const info = finalInfo(id).?;
             @memset(&buf, 0);
@@ -2301,15 +2295,14 @@ test "decode layer restores burned-in operands and rejects bad input" {
 }
 
 test "logical forms and physical rows are one instruction set" {
-    // 264 forms: 244 final (one per claimed id), 19 compiler-only and
-    // 20 carrier-plane residents (19 demoted using_* plus to_propkey,
-    // whose final id 112 was reclaimed when the C0 window closed).
+    // 284 forms: 243 final (one per claimed id), 19 compiler-only and
+    // 22 carrier-plane residents.
     const counts = comptime blk: {
         var final_count: usize = 0;
         var temp_count: usize = 0;
         var sub_count: usize = 0;
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-            if (f.value >= 400) sub_count += 1 else if (f.value >= 300) temp_count += 1 else final_count += 1;
+            if (f.value >= logical.sub_base) sub_count += 1 else if (f.value >= logical.temp_base) temp_count += 1 else final_count += 1;
         }
         break :blk .{ .final = final_count, .temp = temp_count, .sub = sub_count };
     };

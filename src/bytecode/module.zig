@@ -31,7 +31,6 @@ pub const IndirectExport = struct {
 
 pub const StarExport = struct {
     request_index: u32,
-    export_name: atom.Atom,
 };
 
 pub const ImportAttribute = struct {
@@ -72,7 +71,6 @@ pub const Record = struct {
             scope.note(entry.export_name);
             scope.note(entry.import_name);
         }
-        for (self.star_exports) |entry| scope.note(entry.export_name);
         for (self.import_attributes) |entry| {
             scope.note(entry.key);
             scope.note(entry.value);
@@ -157,10 +155,9 @@ pub const Record = struct {
         });
     }
 
-    pub fn addStarExport(self: *Record, request_index: u32, export_name: atom.Atom) !void {
+    pub fn addStarExport(self: *Record, request_index: u32) !void {
         try append(self.memory, StarExport, &self.star_exports, .{
             .request_index = request_index,
-            .export_name = export_name,
         });
     }
 

@@ -551,7 +551,7 @@ pub const JSContext = struct {
     fn toOwnedUtf8Impl(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
         self.discardStaleException();
         const string_value = try self.toString(val);
-        return JSValue.String.valueToOwnedUtf8(self.core.runtime, allocator, string_value, false);
+        return JSValue.String.valueToOwnedUtf8(self.core.runtime, allocator, string_value, .wtf8);
     }
 
     pub fn toNumber(self: *JSContext, val: JSValue) Error!f64 {

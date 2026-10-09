@@ -1350,11 +1350,12 @@ pub fn logicalInlineFrames(
 }
 
 pub fn inlinedSnapshot(site: *const InlinedSite, expanded_pc: usize) core.ActiveBacktraceSnapshot {
+    const start = site.callee_fb.startLocation();
     return .{
         .function_name = site.callee_name,
         .filename = site.callee_file,
-        .line_num = site.callee_fb.lineNum(),
-        .col_num = site.callee_fb.colNum(),
+        .line_num = start.line_num,
+        .col_num = start.col_num,
         .pc = mapCalleePc(site, expanded_pc),
         .location_data = site.callee_fb,
         .location_resolver = resolveCalleeLocation,
@@ -1422,8 +1423,7 @@ fn applyForwardGuardHolds(
     method_atom: core.Atom,
 ) bool {
     if (method_atom == core.atom.null_atom) return false;
-    const apply_obj = realmFunctionApply(global) orelse return false;
-    if (!isFunctionApplyBuiltin(apply_obj)) return false;
+    if (realmApplyBuiltin(global) == null) return false;
     const proto = ctor_obj.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return false;
     const method_fn = lookupProtoChainDataFunction(proto, method_atom) orelse return false;
     if (method_fn.findProperty(core.atom.ids.apply) != null) return false;
