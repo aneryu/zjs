@@ -1252,15 +1252,23 @@ fn flatStringsEqMixedWidth(a: *const String, b: *const String) bool {
     return true;
 }
 
+/// Equality, including the length mismatch that ordering still has to walk
+/// far enough to report. Non-strings are not equal.
+pub fn stringValuesEqual(a: JSValue, b: JSValue) bool {
+    if (!a.isString() or !b.isString()) return false;
+    if (a.same(b)) return true;
+    if (stringValueLen(a) != stringValueLen(b)) return false;
+    return (compareStringValues(a, b) orelse 1) == 0;
+}
+
 /// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
-/// a time. `eq_only` permits the same early length mismatch used by equality.
-pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
+/// a time. Returns null when either value is not a string.
+pub fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     if (a.same(b)) return 0;
 
     const a_len = stringValueLen(a);
     const b_len = stringValueLen(b);
-    if (eq_only and a_len != b_len) return 1;
 
     var remaining = @min(a_len, b_len);
     var a_iter = StringValueIterator.init(a);
@@ -2747,7 +2755,7 @@ test "S2-i tail buffer views read, compare and hash exactly like the flat string
 
     const flat = try String.createLatin1(rt, "abcdefghIJ");
     try std.testing.expectEqual(@as(usize, 10), stringValueLen(view.value()));
-    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(view.value(), flat.value(), false));
+    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(view.value(), flat.value()));
     try std.testing.expectEqual(
         stringValueContentHash(flat.value()).?,
         stringValueContentHash(view.value()).?,
@@ -2857,8 +2865,8 @@ test "rope index compare and hash traverse nested leaves without flattening" {
     try std.testing.expectEqual(@as(?u16, '!'), stringValueCodeUnitAt(outer_value, 4));
     try std.testing.expectEqual(@as(?u16, null), stringValueCodeUnitAt(outer_value, 5));
 
-    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(outer_value, expected.value(), false));
-    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(outer_value, expected.value(), true));
+    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(outer_value, expected.value()));
+    try std.testing.expect(stringValuesEqual(outer_value, expected.value()));
     try std.testing.expectEqual(expected.contentHash(), stringValueContentHash(outer_value).?);
     try std.testing.expectEqual(expected.contentHash(), outer.contentHash());
 

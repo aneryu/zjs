@@ -60,8 +60,6 @@ pub const Outcome = enum(u32) {
     tail,
     /// generator yield / await: state already persisted; unwind to the resume driver.
     suspended,
-    /// A cold callee needs the full prologue; the driver runs it and re-enters.
-    reenter,
     /// A bytecode callback reached the native fence that entered it; the nested
     /// driver hands the result back to the still-running builtin.
     native_returned,
@@ -430,12 +428,23 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16)
 /// Deliver a catchable runtime error to the CURRENT frame: true when this
 /// frame caught it (`frame.pc` is at the handler, so re-dispatch through
 /// `coldNext`), false when it must propagate. Two cold arms deliver onto a
-/// stack other than `vm.stack` and spell the call out instead.
+/// stack other than `vm.stack` and spell the call out instead. `coldStd`
+/// also spells `handleCatchableRuntimeError` out and must stay that way:
+/// `deliverCatchable` clears `pending_call_region` before the same call.
 inline fn deliverCatchable(vm: *Vm, err: HostError) HostError!bool {
     // A call that failed before its callee frame took over its arguments
     // leaves its window published; the call is over either way.
     vm.machine.pending_call_region.len = 0;
     return call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err);
+}
+
+/// The `deliverCatchable` + `coldNext` tail shared by resident catch sites.
+/// Callers that set `pending_error` and return a bool, or that deliver onto
+/// another stack, do not use this.
+inline fn catchHere(vm: *Vm, var_buf: [*]JSValue, err: HostError) Outcome {
+    const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
+    if (!caught) return vm.fail(err);
+    return coldNext(var_buf, vm);
 }
 
 /// Invoke a resolved native accessor entry. The caller function and frame ride
@@ -455,7 +464,7 @@ inline fn callNativeAccessor(
 inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
     if (vm.machine.depth == 0) {
         const stop_before_pc = vm.machine.l0.stop_before_pc orelse return false;
-        const r = vm_opcodes.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state, vm.catch_target.*, stop_before_pc) catch |e| {
+        const r = vm_opcodes.stopBeforePcVm(vm, stop_before_pc) catch |e| {
             out.* = vm.fail(e);
             return true;
         };
@@ -477,14 +486,20 @@ inline fn coldNext(var_buf: [*]JSValue, vm: *Vm) Outcome {
     return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{ npc, vm.stack.topPtr(), var_buf, vm });
 }
 
+/// Slot index of a pointer into `vm.stack.values`. Callers that need a byte
+/// length keep the raw pointer subtraction.
+inline fn stackIndex(vm: *Vm, p: [*]JSValue) usize {
+    return (@intFromPtr(p) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+}
+
 /// Tail of an inline managed native call: the value lands where the call
 /// window began and dispatch continues at `npc`. An exception sentinel routes
 /// to `vm_opcodes.failure` on the published frame; an armed L0 stop boundary
 /// takes `coldNext` with the value pushed.
 inline fn managedInlineFinish(vm: *Vm, value: JSValue, region_start: [*]JSValue, npc: [*]const u8, var_buf: [*]JSValue) Outcome {
     if (value.is(.exception)) {
-        const region_base: usize = (@intFromPtr(region_start) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
-        switch (vm_opcodes.failure(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, region_base, builtin_dispatch.nativeHostError(vm.ctx)) catch |e| return vm.fail(e)) {
+        const region_base: usize = stackIndex(vm, region_start);
+        switch (vm_opcodes.failureVm(vm, region_base, builtin_dispatch.nativeHostError(vm.ctx)) catch |e| return vm.fail(e)) {
             .caught => return coldNext(var_buf, vm),
             else => unreachable,
         }
@@ -1083,7 +1098,7 @@ inline fn resolveForwardedTarget(vm: *Vm, target_value: JSValue) ?inline_calls.R
 /// `stack.values`). Null when the reservation fails: nothing was touched and
 /// the generic apply body reports the overflow.
 noinline fn growForwardedWindow(vm: *Vm, sp: [*]JSValue, region_start: [*]JSValue, old_total: usize, new_total: usize) ?[*]JSValue {
-    const region_base = (@intFromPtr(region_start) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+    const region_base = stackIndex(vm, region_start);
     if (region_base + new_total <= vm.stack.capacity) return region_start;
     vm.stack.setTopPtr(sp);
     vm.stack.reserveAdditional(new_total - old_total) catch return null;
@@ -1433,7 +1448,7 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     }
     // Remaining (cold, larger) completion shapes: carry the result through the
     // frame's guaranteed stack_size + 1 scratch slot and tail into one shared
-    // body. The exported slot stops LLVM folding it back into both return handlers.
+    // body. The opaque slot stops LLVM folding it back into both return handlers.
     storeValueAsIntPair(&sp[0], value);
     return @call(.always_tail, Opaque(op_return_slow).get(), .{ pc, sp + 1, var_buf, vm });
 }
@@ -1514,8 +1529,8 @@ fn op_return_slow(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// Lean native-boundary return (`inline_calls.LeanFrame`): arena restore,
 /// budget release, unlink and the two-word result hand-off. `op_return` /
 /// `op_return_undef` test for it BEFORE tailing into their general body, so
-/// both keep an empty prologue (the general body is an exported tail slot
-/// with its own callee-saved set).
+/// both keep an empty prologue (the general body is reached only through a
+/// slot LLVM cannot see through, and it keeps its own callee-saved set).
 inline fn returnLeanTail(vm: *Vm, dying: *inline_calls.Entry, result_sp: [*]JSValue, value: JSValue) Outcome {
     vm.syncSp(result_sp);
     vm.machine.popReturnedLean(vm.rt, dying);
@@ -1524,8 +1539,8 @@ inline fn returnLeanTail(vm: *Vm, dying: *inline_calls.Entry, result_sp: [*]JSVa
 }
 
 /// Shared general body of `op_return`: everything that is not a lean
-/// native-boundary return. Reached through an exported Handler slot so the
-/// two hot return opcodes carry only the lean decision.
+/// native-boundary return. Reached only through a slot LLVM cannot see
+/// through, so the two hot return opcodes carry only the lean decision.
 fn op_return_general(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const result_sp = sp - 1;
     const value = loadValueAsSplitPair(&result_sp[0]);
@@ -1557,8 +1572,8 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) alig
     return returnLeanTail(vm, dying, result_sp, loadValueAsSplitPair(&result_sp[0]));
 }
 /// Depth-0 sibling of op_return: finish the optional generator, publish the
-/// value, and return to the driver. Reached through an exported Handler slot
-/// so LLVM cannot fold this error-union path into the hot handler.
+/// value, and return to the driver. Reached only through a slot LLVM cannot
+/// see through, so this error-union path stays out of the hot handler.
 fn op_return_depth0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = var_buf;
     vm.publish(pc, sp);
@@ -1581,7 +1596,7 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 fn op_return_undef_depth0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = var_buf;
     vm.publish(pc, sp);
-    const value = vm_opcodes.returnUndefined(vm.ctx, vm.frame, vm.machine.l0.generator_state) catch |e| return vm.fail(e);
+    const value = vm_opcodes.returnUndefined(vm) catch |e| return vm.fail(e);
     vm.return_value = value;
     return .returned;
 }
@@ -1672,6 +1687,33 @@ inline fn callBytecodeCallee(
     return pushAndEnter(var_buf, vm, &target, region_start, argc, .plain);
 }
 
+/// Generic `execCall` after the inline arms miss. Publishes `sp`, then either
+/// re-dispatches or asks the driver to push `vm.tail_request`.
+inline fn execCallFallback(vm: *Vm, var_buf: [*]JSValue, sp: [*]JSValue, argc: u16) Outcome {
+    vm.stack.setTopPtr(sp);
+    switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |err| return vm.fail(err)) {
+        .done, .continue_loop => return coldNext(var_buf, vm),
+        .inline_call => {
+            vm.tail_mode = .push;
+            return .tail;
+        },
+    }
+}
+
+/// Generic `callMethod` after the inline arms miss. `.inline_constructor` is
+/// not produced for a method call.
+inline fn callMethodFallback(vm: *Vm, var_buf: [*]JSValue, sp: [*]JSValue) Outcome {
+    vm.stack.setTopPtr(sp);
+    switch (vm_opcodes.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |err| return vm.fail(err)) {
+        .done, .continue_loop => return coldNext(var_buf, vm),
+        .inline_call => {
+            vm.tail_mode = .push;
+            return .tail;
+        },
+        .inline_constructor => unreachable,
+    }
+}
+
 /// qjs gives OP_call and OP_call0..3 distinct CASE labels; one comptime body
 /// per arity keeps the fixed forms from re-decoding their opcode. Only argc
 /// and the pc advance specialize.
@@ -1738,14 +1780,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     }
                 }
             }
-            vm.stack.setTopPtr(sp);
-            switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |e| return vm.fail(e)) {
-                .done, .continue_loop => return coldNext(var_buf, vm),
-                .inline_call => {
-                    vm.tail_mode = .push;
-                    return .tail;
-                },
-            }
+            return execCallFallback(vm, var_buf, sp, argc);
         }
     }.handler;
 }
@@ -1796,14 +1831,7 @@ fn opAsyncCall(comptime argc_source: CallArgcSource) Handler {
             if (inline_calls.resolveNoSuspendAsync(vm.ctx, vm.global, region[0])) |target|
                 return enterNoSuspendAsync(vm, var_buf, sp, region, argc, .plain, target);
             // opCall already advanced the caller PC and proved the operands.
-            vm.stack.setTopPtr(sp);
-            switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |err| return vm.fail(err)) {
-                .done, .continue_loop => return coldNext(var_buf, vm),
-                .inline_call => {
-                    vm.tail_mode = .push;
-                    return .tail;
-                },
-            }
+            return execCallFallback(vm, var_buf, sp, argc);
         }
     }.handler;
 }
@@ -1816,15 +1844,7 @@ fn op_async_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
         return enterNoSuspendAsync(vm, var_buf, sp, region, argc, .method, target);
     }
     // On a miss the method PC still points to argc, as callMethod requires.
-    vm.stack.setTopPtr(sp);
-    switch (vm_opcodes.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |err| return vm.fail(err)) {
-        .done, .continue_loop => return coldNext(var_buf, vm),
-        .inline_call => {
-            vm.tail_mode = .push;
-            return .tail;
-        },
-        .inline_constructor => unreachable,
-    }
+    return callMethodFallback(vm, var_buf, sp);
 }
 
 /// Opaque slots (see `Opaque`) for the five async-call arity forms.
@@ -2010,15 +2030,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
             }
         }
     }
-    vm.stack.setTopPtr(sp);
-    switch (vm_opcodes.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
-        .done, .continue_loop => return coldNext(var_buf, vm),
-        .inline_call => {
-            vm.tail_mode = .push;
-            return .tail;
-        },
-        .inline_constructor => unreachable,
-    }
+    return callMethodFallback(vm, var_buf, sp);
 }
 
 /// `recv.m(...)` where `m` resolved to a same-Machine bytecode function:
@@ -2749,9 +2761,7 @@ fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
         // Both operands were consumed: publish the shortened stack, then
         // deliver the error.
         vm.publish(pc, sp - 2);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     (sp - 2)[0] = result;
     return cont(pc + 1, sp - 1, var_buf, vm);
@@ -3245,12 +3255,18 @@ pub fn op_get_loc0_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     return @call(.always_tail, op_get_field, .{ pc + 1, sp + 1, var_buf, vm });
 }
 
+/// Publish, run one `get_loc*` opcode, then `coldNext` onto the leftover
+/// opcode that fusion left in the stream.
+inline fn fusedLocCold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm, comptime opc: u8) Outcome {
+    vm.publish(pc, sp);
+    vm_property.loc(vm, opc) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
 /// All-cold / L0-stop: do `get_loc0` only, then `coldNext` onto the surviving
 /// `get_field` so stop-before-pc between the two ops is preserved.
 pub fn op_get_loc0_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc0) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc0);
 }
 
 /// `get_loc2` then musttail `op_get_field`. Same contract as `get_loc0_field`.
@@ -3260,18 +3276,29 @@ pub fn op_get_loc2_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
 }
 
 pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc2) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc2);
 }
 
-/// get_field2, then musttail into `op_call_method` so the fused form shares
-/// its leaf / exact-args / native-method chain.
-pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+const Field2Then = enum { cont, call_method };
+
+/// Shared body of `op_get_field2` and `op_get_field2_call_method`. Object
+/// receiver: the value is copied from its holder slot and the receiver stays
+/// beneath as `this`. Own site arm resident; the prototype arm (`obj.m()`)
+/// is one indirect tail away. Definite absence keeps the receiver and pushes
+/// a bare `undefined`, as the cold path does. `pad` and `then` are the only
+/// differences between the two shells.
+inline fn getField2Body(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+    comptime pad: usize,
+    comptime then: Field2Then,
+) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (!receiver.is(.object)) {
-        sizePad(0x140);
+        sizePad(pad);
         return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
     }
     if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
@@ -3280,14 +3307,14 @@ pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
             if (site.proto_key == 0) {
                 const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
                 storeValueAsIntPair(&sp[0], value);
-                return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+                return field2Then(pc, sp, var_buf, vm, then);
             }
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
         }
         if (object.shape_ref.identity == site.secondary_guard_key) {
             const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
             storeValueAsIntPair(&sp[0], value);
-            return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+            return field2Then(pc, sp, var_buf, vm, then);
         }
         if (vm_property.siteCapturable(site))
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
@@ -3296,13 +3323,31 @@ pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
     if (vm_property.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&sp[0], value);
-        return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+        return field2Then(pc, sp, var_buf, vm, then);
     }
     if (absent) {
         sp[0] = JSValue.undefinedValue();
-        return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+        return field2Then(pc, sp, var_buf, vm, then);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+inline fn field2Then(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+    comptime then: Field2Then,
+) Outcome {
+    if (comptime then == .call_method)
+        return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+    return cont(pc + 6, sp + 1, var_buf, vm);
+}
+
+/// get_field2, then musttail into `op_call_method` so the fused form shares
+/// its leaf / exact-args / native-method chain.
+pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    return getField2Body(pc, sp, var_buf, vm, 0x140, .call_method);
 }
 
 pub fn op_get_field2_call_method_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
@@ -3326,11 +3371,9 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
                         vm.syncPc(pc, 6);
                         vm.stack.setTopPtr(sp);
                         const value = callNativeAccessor(vm, target, receiver, &.{}, .getter) catch |err| {
-                            const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+                            const operand_len = stackIndex(vm, sp);
                             vm.stack.setLen(operand_len - 1);
-                            const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-                            if (!caught) return vm.fail(err);
-                            return coldNext(var_buf, vm);
+                            return catchHere(vm, var_buf, err);
                         };
                         (sp - 1)[0] = value;
                         return cont(pc + 6, sp, var_buf, vm);
@@ -3377,11 +3420,9 @@ fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
             vm.syncPc(pc, 6);
             vm.stack.setTopPtr(sp);
             const value = callNativeAccessor(vm, target, receiver, &.{}, .getter) catch |err| {
-                const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+                const operand_len = stackIndex(vm, sp);
                 vm.stack.setLen(operand_len - 1);
-                const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-                if (!caught) return vm.fail(err);
-                return coldNext(var_buf, vm);
+                return catchHere(vm, var_buf, err);
             };
             storeValueAsIntPair(&(sp - 1)[0], value);
             return cont(pc + 6, sp, var_buf, vm);
@@ -3435,21 +3476,17 @@ fn op_get_field_native_getter_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
             storeValueAsIntPair(&(sp - 1)[0], raw);
             return cont(pc + 6, sp, var_buf, vm);
         }
-        const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+        const operand_len = stackIndex(vm, sp);
         vm.stack.setLen(operand_len - 1);
         const err = builtin_dispatch.nativeHostError(vm.ctx);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     }
     vm.syncPc(pc, 6);
     vm.stack.setTopPtr(sp);
     const value = callNativeAccessor(vm, target, receiver, &.{}, .getter) catch |err| {
-        const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+        const operand_len = stackIndex(vm, sp);
         vm.stack.setLen(operand_len - 1);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     storeValueAsIntPair(&(sp - 1)[0], value);
     return cont(pc + 6, sp, var_buf, vm);
@@ -3642,46 +3679,7 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 }
 
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
-    const receiver = (sp - 1)[0];
-    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
-    if (!receiver.is(.object)) {
-        sizePad(0x138);
-        return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
-    }
-    // Object receiver: the value is copied from its holder slot and the
-    // receiver stays beneath as `this`. Own site arm resident; the prototype
-    // arm (`obj.m()`) is one indirect tail away.
-    if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
-        const site = vm.propSite(pc[5]);
-        if (object.shape_ref.identity == site.guard_key) {
-            if (site.proto_key == 0) {
-                const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
-                storeValueAsIntPair(&sp[0], value);
-                return cont(pc + 6, sp + 1, var_buf, vm);
-            }
-            return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
-        }
-        if (object.shape_ref.identity == site.secondary_guard_key) {
-            const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
-            storeValueAsIntPair(&sp[0], value);
-            return cont(pc + 6, sp + 1, var_buf, vm);
-        }
-        if (vm_property.siteCapturable(site))
-            return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
-    }
-    var absent = false;
-    if (vm_property.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
-        const value = loadValueAsIntPair(slot);
-        storeValueAsIntPair(&sp[0], value);
-        return cont(pc + 6, sp + 1, var_buf, vm);
-    }
-    // Definite absence: get_field2 keeps the receiver beneath, so push a bare
-    // `undefined`, as the cold path does.
-    if (absent) {
-        sp[0] = JSValue.undefinedValue();
-        return cont(pc + 6, sp + 1, var_buf, vm);
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    return getField2Body(pc, sp, var_buf, vm, 0x138, .cont);
 }
 
 /// Island-tail typed-array `a[i] = v` arm, musttailed from `op_put_array_el`
@@ -3933,7 +3931,7 @@ fn op_get_array_el_atom_key(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 
 inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     vm.syncPc(pc, pc_advance);
-    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+    const operand_len = stackIndex(vm, sp);
     const getter = vm.stack.values[operand_len - 1];
     const receiver = vm.stack.values[operand_len - 2];
     // qjs invokes an accessor through the ordinary call path. An eligible
@@ -3951,9 +3949,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     if (builtin_dispatch.tryNativeAccessorCall(vm.ctx, vm.output, vm.global, receiver, getter, &.{}, vm.function, vm.frame, .getter)) |native_result| {
         const value = native_result catch |err| {
             vm.stack.setLen(operand_len - 2);
-            const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-            if (!caught) return vm.fail(err);
-            return coldNext(var_buf, vm);
+            return catchHere(vm, var_buf, err);
         };
         vm.stack.values[operand_len - 2] = value;
         vm.stack.setLen(operand_len - 1);
@@ -3970,9 +3966,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         vm.frame,
     ) catch |err| {
         vm.stack.setLen(operand_len - 2);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     vm.stack.values[operand_len - 2] = value;
     vm.stack.setLen(operand_len - 1);
@@ -3991,7 +3985,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     // The field family is a 6-byte op; `get_length` is 1.
     const pc_advance: usize = if (pc[0] == op.get_length) 1 else 6;
     vm.syncPc(pc, pc_advance);
-    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+    const operand_len = stackIndex(vm, sp);
     vm.stack.setTopPtr(sp);
     const receiver = vm.stack.values[operand_len - 1];
     if (tryInlineProxyTrap(false, var_buf, vm, vm.property_holder, vm.property_atom)) |outcome| return outcome;
@@ -4007,9 +4001,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
         vm.frame,
     ) catch |err| {
         vm.stack.setLen(operand_len - 1);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     vm.stack.values[operand_len - 1] = value;
     return coldNext(var_buf, vm);
@@ -4083,9 +4075,7 @@ fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
         vm.frame,
     ) catch |err| {
         vm.stack.setLen(operand_len - 2);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     vm.stack.values[operand_len - 2] = value;
     vm.stack.setLen(operand_len - 1);
@@ -4093,9 +4083,9 @@ fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
 }
 
 /// Island-tail typed-array `a[i]` arm, musttailed from `op_get_array_el` so the
-/// dense ARRAY path does not inherit this frame. Called through the exported
-/// `Handler` slot so LLVM cannot merge it back (`noinline` on the callee breaks
-/// Zig's always_tail type match).
+/// dense ARRAY path does not inherit this frame. Called through a slot LLVM
+/// cannot see through, so it cannot merge this body back (`noinline` on the
+/// callee breaks Zig's always_tail type match).
 pub fn op_get_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
@@ -4430,15 +4420,15 @@ fn opCompareEq(comptime opc: u8) Handler {
                 if (lhs.isString() and rhs.isString()) {
                     if (lhs.same(rhs)) break :blk true;
                     // Flat pair is qjs's inline arm (length, identity, one memcmp);
-                    // ropes never reach it there. compareStringValues opens two
-                    // iterators before it can compare lengths, so keep it for ropes.
+                    // ropes never reach it there. stringValuesEqual returns on a
+                    // length mismatch before it walks leaves.
                     if (lhs.tagOf() == core.Tag.string and rhs.tagOf() == core.Tag.string) {
                         break :blk core.string.flatStringsEq(
                             core.string.String.fromHeader(lhs.stringHeaderAssumeStringLike()),
                             core.string.String.fromHeader(rhs.stringHeaderAssumeStringLike()),
                         );
                     }
-                    break :blk (core.string.compareStringValues(lhs, rhs, true) orelse 1) == 0;
+                    break :blk core.string.stringValuesEqual(lhs, rhs);
                 }
                 break :blk null;
             };
@@ -4670,31 +4660,44 @@ pub fn opLogicCold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 /// arm; at the generator stop boundary (`local_fast_blocked`) it takes the
 /// publishing path so coldNext's maybeStop still fires. Generated per opcode so
 /// the predicate is comptime.
+/// `then == null` continues at the next opcode. A non-null handler is the
+/// fused leftover (`op_if_false8` for the eq/lt colds).
+inline fn compareSlow(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+    comptime opc: u8,
+    comptime then: ?Handler,
+) Outcome {
+    if (vm.local_fast_blocked) {
+        vm.publish(pc, sp);
+        vm_opcodes.compareVm(vm, opc) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
+    const lhs = (sp - 2)[0];
+    const rhs = (sp - 1)[0];
+    vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
+    // `compareAt` runs ToPrimitive (user code that allocates and can
+    // collect); sync the operand boundary so both operands and everything
+    // pushed since the last publish are rooted.
+    vm.syncSp(sp);
+    const result = vm_opcodes.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+        // Error only: compareAt freed both operands, so publish the doubly-popped sp
+        // (frame.pc → next op) for a consistent catch stack.
+        vm.publish(pc, sp - 2);
+        return catchHere(vm, var_buf, err);
+    };
+    (sp - 2)[0] = result;
+    if (comptime then) |handler|
+        return @call(.always_tail, handler, .{ pc + 1, sp - 1, var_buf, vm });
+    return cont(pc + 1, sp - 1, var_buf, vm);
+}
+
 pub fn opCompareCold(comptime opc: u8) Handler {
     return struct {
         fn handler(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) {
-                vm.publish(pc, sp);
-                vm_opcodes.compareVm(vm, opc) catch |e| return vm.fail(e);
-                return coldNext(var_buf, vm);
-            }
-            const lhs = (sp - 2)[0];
-            const rhs = (sp - 1)[0];
-            vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
-            // `compareAt` runs ToPrimitive (user code that allocates and can
-            // collect); sync the operand boundary so both operands and everything
-            // pushed since the last publish are rooted.
-            vm.syncSp(sp);
-            const result = vm_opcodes.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
-                // Error only: compareAt freed both operands, so publish the doubly-popped sp
-                // (frame.pc → next op) for a consistent catch stack.
-                vm.publish(pc, sp - 2);
-                const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-                if (!caught) return vm.fail(err);
-                return coldNext(var_buf, vm);
-            };
-            (sp - 2)[0] = result;
-            return cont(pc + 1, sp - 1, var_buf, vm);
+            return compareSlow(pc, sp, var_buf, vm, opc, null);
         }
     }.handler;
 }
@@ -4710,10 +4713,8 @@ fn op_instanceof_lookup_error(
     _ = sp;
     const err = vm.pending_error;
     call_runtime.popOwnedStackRegion(vm.stack, vm.stack.len() - 2);
-    const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-    if (!caught) return vm.fail(err);
     _ = pc;
-    return coldNext(var_buf, vm);
+    return catchHere(vm, var_buf, err);
 }
 
 const InternalMethodDispatch = enum { completed, caught, threw };
@@ -5323,45 +5324,13 @@ pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 }
 
 pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) {
-        vm.publish(pc, sp);
-        vm_opcodes.compareVm(vm, op.eq) catch |e| return vm.fail(e);
-        return coldNext(var_buf, vm);
-    }
-    const lhs = (sp - 2)[0];
-    const rhs = (sp - 1)[0];
-    vm.syncPc(pc, 1);
-    vm.syncSp(sp); // see opCompareCold: ToPrimitive allocates, so the operand window must be live
-    const result = vm_opcodes.compareAt(op.eq, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
-        vm.publish(pc, sp - 2);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
-    };
-    (sp - 2)[0] = result;
-    return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+    return compareSlow(pc, sp, var_buf, vm, op.eq, op_if_false8);
 }
 
 /// Slow `lt` then musttail `op_if_false8`. Indirect from the hot fused
 /// handler via `cold_table` so the int32 arm stays a leaf (opCompareCold).
 pub fn op_cmp_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) {
-        vm.publish(pc, sp);
-        vm_opcodes.compareVm(vm, op.lt) catch |e| return vm.fail(e);
-        return coldNext(var_buf, vm);
-    }
-    const lhs = (sp - 2)[0];
-    const rhs = (sp - 1)[0];
-    vm.syncPc(pc, 1);
-    vm.syncSp(sp); // see opCompareCold: ToPrimitive allocates, so the operand window must be live
-    const result = vm_opcodes.compareAt(op.lt, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
-        vm.publish(pc, sp - 2);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
-    };
-    (sp - 2)[0] = result;
-    return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+    return compareSlow(pc, sp, var_buf, vm, op.lt, op_if_false8);
 }
 
 // qjs OP_is_null: a null top slot becomes true; every other value releases only
@@ -5495,9 +5464,7 @@ pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     vm.syncSp(sp);
     vm_opcodes.updateLocalAt(vm, pc[0], &var_buf[idx]) catch |err| {
         vm.publish(pc + 1, sp);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     return cont(pc + 2, sp, var_buf, vm);
 }
@@ -5559,9 +5526,7 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         // Error only: publish the popped sp so the catch unwinder sees consistent
         // state; addLocalAt already released rhs, so the dead slot is excluded.
         vm.publish(pc + 1, sp - 1);
-        const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
+        return catchHere(vm, var_buf, err);
     };
     return cont(pc + 2, sp - 1, var_buf, vm);
 }
@@ -5576,11 +5541,15 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 ///
 /// Private frameless twin of Object.findProperty + the data test: the shared
 /// helpers' Flags.fromBits bitcast materializes through a stack slot when
-/// inlined here, which grew a scratch frame on the whole handler. Raw-bits
-/// probe: atom match + !deleted (bit 5) + kind == .data (bits 3-4). Every other
-/// outcome (lexical TDZ, runtime_strict preference, missing binding,
-/// accessor/proto reads) keeps the cold waterfall, which starts with this probe.
+/// inlined here, which grew a scratch frame on the whole handler. The masks
+/// are comptime `@bitCast`s of `Flags` (deleted is bit 5; `.auto_init` fills
+/// kind bits 3-4), not `fromBits`. Raw-bits probe: atom match + !deleted +
+/// kind == .data. Every other outcome (lexical TDZ, runtime_strict preference,
+/// missing binding, accessor/proto reads) keeps the cold waterfall, which
+/// starts with this probe.
 inline fn getVarGlobalOwnDataInline(vm: *Vm, idx: u16) ?JSValue {
+    const deleted_bit: u6 = comptime @bitCast(core.property.Flags{ .deleted = true });
+    const kind_bits: u6 = comptime @bitCast(core.property.Flags{ .kind = .auto_init });
     const function = vm.function;
     // idx < closureVarCount is finalize-validated, so the read is unchecked; the
     // assert covers the test-only adapter bridge.
@@ -5603,8 +5572,8 @@ inline fn getVarGlobalOwnDataInline(vm: *Vm, idx: u16) ?JSValue {
                 const prop = shape_ref.props()[prop_index];
                 shape_index = prop.hash_next;
                 if (prop_index >= props.len) continue;
-                if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
-                    if ((prop.flags & 0b011000) == 0) {
+                if (prop.atom_id == cv.var_name and (prop.flags & deleted_bit) == 0) {
+                    if ((prop.flags & kind_bits) == 0) {
                         return global.propertyEntry(prop_index).*.slot.data;
                     }
                     break; // found, but not a plain data slot → cold waterfall
@@ -5827,30 +5796,30 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 /// section slid the island and broke the `op_return` musttail ABI. Profiling
 /// builds count in `cont`/`next` instead, so handler bodies stay identical.
 const dispatch_table: [256]Handler = colds.buildTable(specials, true).table;
-const property_tail_table = [17]Handler{
-    op_get_field_primitive,
-    op_get_field2_primitive,
-    op_get_array_el_atom_key,
-    op_get_array_el_atom_key_getter,
-    op_get_array_el_atom_key_proxy,
-    op_get_field_cached_getter,
-    op_get_field_property_tail,
-    op_get_field_after_own_miss_tail,
-    op_get_static_cached_proxy,
-    op_get_length_property_tail,
-    op_get_field_typed_property_tail,
-    op_get_field_absent_tail,
-    op_get_field_native_getter_tail,
-    op_prop_site_indirect_tail,
-    op_prop_site_capture_tail,
-    op_put_field_add_tail,
-    op_put_array_el_cold,
-};
-const resident_tail_table = [3]Handler{
-    op_add_strings,
-    op_special_arguments,
-    op_if_false8_complex,
-};
+const property_tail_table = std.enums.directEnumArray(PropertyTailSlot, Handler, 0, .{
+    .get_field_primitive = op_get_field_primitive,
+    .get_field2_primitive = op_get_field2_primitive,
+    .get_array_el_atom_key = op_get_array_el_atom_key,
+    .get_array_el_atom_key_getter = op_get_array_el_atom_key_getter,
+    .get_array_el_atom_key_proxy = op_get_array_el_atom_key_proxy,
+    .get_field_cached_getter = op_get_field_cached_getter,
+    .get_field_property = op_get_field_property_tail,
+    .get_field_after_own_miss = op_get_field_after_own_miss_tail,
+    .get_static_cached_proxy = op_get_static_cached_proxy,
+    .get_length_property = op_get_length_property_tail,
+    .get_field_typed_property = op_get_field_typed_property_tail,
+    .get_field_absent = op_get_field_absent_tail,
+    .get_field_native_getter = op_get_field_native_getter_tail,
+    .prop_site_indirect = op_prop_site_indirect_tail,
+    .prop_site_capture = op_prop_site_capture_tail,
+    .put_field_add = op_put_field_add_tail,
+    .put_array_el_rest = op_put_array_el_cold,
+});
+const resident_tail_table = std.enums.directEnumArray(ResidentTailSlot, Handler, 0, .{
+    .add_strings = op_add_strings,
+    .special_arguments = op_special_arguments,
+    .if_false8_complex = op_if_false8_complex,
+});
 
 // ===========================================================================
 // Driver — the Outcome loop. `zjs_vm.zig` prepares the frame, then calls
@@ -5934,7 +5903,6 @@ pub inline fn runDispatchLoopPublished(vm: *Vm, entry_pc: [*]const u8) HostError
             .threw => return vm.pending_error,
             .tail => try driveTailRequest(vm),
             .suspended => return,
-            .reenter => unreachable, // cold callees complete inside vm_opcodes.call.
             .native_returned => return,
         }
         reloadTop(vm, &pc, &sp, &var_buf);
@@ -6073,7 +6041,8 @@ pub fn op_using_typeof_is_function(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
     return coldNext(var_buf, vm);
 }
 
-/// `get_field` then `b` `op_get_field2`. Leftover B stays.
+/// `get_field` then musttail `op_get_field2`. The second opcode stays in the
+/// stream so it still sees its own byte for throw, pc, and cold dispatch.
 pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
@@ -6112,11 +6081,9 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
             vm.syncPc(pc, 6);
             vm.stack.setTopPtr(sp);
             const value = callNativeAccessor(vm, target, receiver, &.{}, .getter) catch |err| {
-                const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+                const operand_len = stackIndex(vm, sp);
                 vm.stack.setLen(operand_len - 1);
-                const caught = deliverCatchable(vm, err) catch |e2| return vm.fail(e2);
-                if (!caught) return vm.fail(err);
-                return coldNext(var_buf, vm);
+                return catchHere(vm, var_buf, err);
             };
             storeValueAsIntPair(&(sp - 1)[0], value);
             return cont(pc + 6, sp, var_buf, vm);
@@ -6137,7 +6104,8 @@ pub fn op_get_field_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
     return coldNext(var_buf, vm);
 }
 
-/// `get_var` then `b` `op_get_field`. Leftover B stays.
+/// `get_var` then musttail `op_get_field`. The second opcode stays in the
+/// stream so it still sees its own byte for throw, pc, and cold dispatch.
 pub fn op_get_var_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const idx = readInt(u16, pc + 1);
     std.debug.assert(idx < vm.frame.var_refs.len);
@@ -6170,27 +6138,44 @@ pub fn op_get_loc2_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 }
 
 pub fn op_get_loc2_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc2) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc2);
 }
 
-/// `push_0` then musttail `or`. Leftover B stays.
+/// `push_0` then musttail `or`. The leftover `or` stays in the stream so the
+/// second opcode still sees its own byte for throw, pc, and cold dispatch.
 pub fn op_push_0_or(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     sp[0] = JSValue.int32(0);
     return @call(.always_tail, opBinary(.bor), .{ pc + 1, sp + 1, var_buf, vm });
 }
 
-/// `push_0_or` is a one-byte opcode, so `publish` already left `frame.pc` on the
-/// leftover `or`; advancing again would skip it (two-byte fusions do need the step).
-pub fn op_push_0_or_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+/// `v == null` reads the i8 immediate at `pc[1]` (`push_i8_add`). `advance` is
+/// the extra `frame.pc` step after `publish`. One-byte fusions pass 0:
+/// `publish` already left `frame.pc` on the leftover opcode, and stepping
+/// again would skip it.
+inline fn fusedPushCold(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+    comptime v: ?i32,
+    comptime advance: usize,
+) Outcome {
     vm.publish(pc, sp);
-    sp[0] = JSValue.int32(0);
+    const n: i32 = if (comptime v) |k| k else @as(i8, @bitCast(pc[1]));
+    sp[0] = JSValue.int32(n);
     vm.stack.setTopPtr(sp + 1);
+    if (comptime advance != 0) vm.frame.pc += advance;
     return coldNext(var_buf, vm);
 }
 
-/// `sar` then musttail `get_array_el`. Leftover B stays.
+/// `push_0_or` is a one-byte opcode, so `publish` already left `frame.pc` on the
+/// leftover `or`; advancing again would skip it (two-byte fusions do need the step).
+pub fn op_push_0_or_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    return fusedPushCold(pc, sp, var_buf, vm, 0, 0);
+}
+
+/// `sar` then musttail `get_array_el`. The leftover opcode stays in the stream
+/// so it still sees its own byte for throw, pc, and cold dispatch.
 pub fn op_sar_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
         return @call(.always_tail, op_sar_get_array_el_cold, .{ pc, sp, var_buf, vm });
@@ -6215,10 +6200,7 @@ pub fn op_push_2_sar(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 
 /// One-byte opcode: `publish` already points `frame.pc` at the leftover `sar`.
 pub fn op_push_2_sar_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    sp[0] = JSValue.int32(2);
-    vm.stack.setTopPtr(sp + 1);
-    return coldNext(var_buf, vm);
+    return fusedPushCold(pc, sp, var_buf, vm, 2, 0);
 }
 
 /// `get_loc8` then musttail leftover `push_2` / `push_0_*`. The leftover may
@@ -6244,9 +6226,7 @@ pub fn op_get_loc8_push_2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 }
 
 pub fn op_get_loc8_push_2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc8) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc8);
 }
 
 /// `push_0` then musttail leftover `shr`.
@@ -6256,10 +6236,7 @@ pub fn op_push_0_shr(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 }
 
 pub fn op_push_0_shr_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    sp[0] = JSValue.int32(0);
-    vm.stack.setTopPtr(sp + 1);
-    return coldNext(var_buf, vm);
+    return fusedPushCold(pc, sp, var_buf, vm, 0, 0);
 }
 
 /// `get_loc8` then musttail leftover `push_1`.
@@ -6269,9 +6246,7 @@ pub fn op_get_loc8_push_1(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 }
 
 pub fn op_get_loc8_push_1_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc8) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc8);
 }
 
 /// Leftover `get_loc8` may already be a push fusion; the hottest leftover
@@ -6313,11 +6288,7 @@ pub fn op_push_i8_add(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: 
 }
 
 pub fn op_push_i8_add_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    sp[0] = JSValue.int32(@as(i8, @bitCast(pc[1])));
-    vm.stack.setTopPtr(sp + 1);
-    vm.frame.pc += 1;
-    return coldNext(var_buf, vm);
+    return fusedPushCold(pc, sp, var_buf, vm, null, 1);
 }
 
 /// `get_loc8` then musttail leftover `push_i8` (possibly already fused to `push_i8_add`).
@@ -6329,19 +6300,7 @@ pub fn op_get_loc8_push_i8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 }
 
 pub fn op_get_loc8_push_i8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property.loc(vm, op.get_loc8) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
-comptime {
-    _ = &next;
-    _ = &readInt;
-    _ = &coldGen;
-    _ = &coldStd;
-    _ = &coldNext;
-    _ = &runDispatchLoop;
-    _ = dispatch_table;
+    return fusedLocCold(pc, sp, var_buf, vm, op.get_loc8);
 }
 
 // ----- Opt-in per-opcode profiling -----

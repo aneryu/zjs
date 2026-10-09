@@ -504,8 +504,7 @@ pub const JSValue = extern struct {
         }
         if (self.is(.null_value) or self.is(.undefined_value)) return self.same(other);
         if (self.isString() and other.isString()) {
-            if (self.same(other)) return true;
-            return (compareStringValues(self, other) orelse 1) == 0;
+            return string_mod.stringValuesEqual(self, other);
         }
         return self.same(other);
     }
@@ -553,10 +552,6 @@ pub fn isZeroBigInt(value: JSValue) ?bool {
 
 fn isNegativeZero(value: f64) bool {
     return value == 0 and std.math.isNegativeInf(1.0 / value);
-}
-
-fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
-    return string_mod.compareStringValues(a, b, true);
 }
 
 /// Numeric order of two BigInt values (short or heap); null if either is

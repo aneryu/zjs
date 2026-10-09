@@ -1604,9 +1604,11 @@ pub inline fn returnTop(vm: *Vm) !core.JSValue {
     return finishFunctionReturn(ctx, vm.frame, value);
 }
 
-pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
-    if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
-    return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
+/// Depth-0 `return_undef`. The only caller is the dispatch handler, which
+/// already has the Vm; the generator, context, and frame are read from it.
+pub inline fn returnUndefined(vm: *Vm) !core.JSValue {
+    if (vm.machine.l0.generator_state) |generator_object| generator_object.completeGeneratorExecution(vm.ctx.runtime);
+    return finishFunctionReturn(vm.ctx, vm.frame, core.JSValue.undefinedValue());
 }
 
 // Hot return-path passthrough: a non-derived-ctor frame returns the value verbatim.
@@ -2309,6 +2311,12 @@ pub fn stopBeforePc(
     return core.JSValue.undefinedValue();
 }
 
+/// `stopBeforePc` with the fields `maybeStop` already holds on `vm`. The
+/// original signature stays for `zjs_vm.zig`.
+pub inline fn stopBeforePcVm(vm: *Vm, stop_before_pc: ?usize) !?core.JSValue {
+    return stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state, vm.catch_target.*, stop_before_pc);
+}
+
 fn parkGeneratorStartBoundary(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -2909,7 +2917,7 @@ pub noinline fn dispatchNativeCall(
             frame,
         ));
         if (builtin_dispatch.nativeIsExc(ctx, result)) {
-            return failure(ctx, vm.output, stack, frame, vm.catch_target, vm.global, region_base, builtin_dispatch.nativeHostError(ctx));
+            return failureVm(vm, region_base, builtin_dispatch.nativeHostError(ctx));
         }
     }
     stack.setLen(region_base);
@@ -2956,6 +2964,12 @@ pub noinline fn failure(
         return @errorCast(handler_err);
     if (caught) return .caught;
     return err;
+}
+
+/// `failure` with the Vm fields both call sites were threading through.
+/// `failure` itself stays `noinline` and keeps its signature.
+pub inline fn failureVm(vm: *Vm, region_base: usize, err: core.errors.HostError) core.errors.HostError!Outcome {
+    return failure(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, region_base, err);
 }
 
 // ----- RegExp literal creation -----

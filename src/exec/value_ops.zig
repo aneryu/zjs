@@ -53,7 +53,7 @@ pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !co
 
 pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isString() and b.isString()) {
-        const cmp: i32 = if (a.same(b)) 0 else compareStringValues(a, b, false) orelse return error.TypeError;
+        const cmp: i32 = core.string.compareStringValues(a, b) orelse return error.TypeError;
         const out = switch (op) {
             bytecode.opcode.op.lt => cmp < 0,
             bytecode.opcode.op.lte => cmp <= 0,
@@ -876,20 +876,10 @@ fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
 }
 
 fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
-    const number = try primitiveToNumber(rt, value);
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
-    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
-    const wrapped: u32 = @intFromFloat(@mod(integer, 4294967296));
-    return @bitCast(wrapped);
+    return core.number.toInt32(try primitiveToNumber(rt, value));
 }
 
 pub fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    var values = [_]core.JSValue{ a, b };
-    const slots: []core.JSValue = &values;
-    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
-    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
-    roots.activate(rt);
-    defer roots.deactivate(rt);
     if (a.is(.symbol) or b.is(.symbol)) return error.SymbolToString;
     if (a.isString() and b.is(.int)) {
         return stringAddStringInt(rt, a, b.as(.int).?, .suffix);
@@ -898,6 +888,12 @@ pub fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JS
         return stringAddStringInt(rt, b, a.as(.int).?, .prefix);
     }
     if (a.isString() and b.isString()) return stringAddStringsOwned(rt, a, b);
+    var values = [_]core.JSValue{ a, b };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.nativeAllocator());
     try appendValueString(rt, &buffer, values[0]);
@@ -1128,8 +1124,7 @@ fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     }
     if (a.is(.null_value) or a.is(.undefined_value)) return a.same(b);
     if (a.isString() and b.isString()) {
-        if (a.same(b)) return true;
-        return (compareStringValues(a, b, true) orelse 1) == 0;
+        return core.string.stringValuesEqual(a, b);
     }
     return a.same(b);
 }
@@ -1138,10 +1133,6 @@ const compareBigIntValues = core.value.compareBigIntValues;
 
 pub fn isHTMLDDA(value: core.JSValue) bool {
     return core.value_semantics.isHTMLDDA(value);
-}
-
-fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32 {
-    return core.string.compareStringValues(a, b, eq_only);
 }
 
 // Strict equality over runtime values (moved from the VM call runtime).

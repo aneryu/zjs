@@ -818,14 +818,9 @@ fn writeU64Bits(buf: []u8, n: u64, radix_bits: u5, len: usize) void {
     var n2 = n;
     var i: isize = @as(isize, @intCast(len)) - 1;
     while (i >= 0) : (i -= 1) {
-        var digit: u8 = @truncate(n2 & mask);
+        const digit: u8 = @truncate(n2 & mask);
         n2 >>= radix_bits;
-        if (digit < 10) {
-            digit += '0';
-        } else {
-            digit += 'a' - 10;
-        }
-        buf[@intCast(i)] = digit;
+        buf[@intCast(i)] = std.fmt.digitToChar(digit, .lower);
     }
 }
 
@@ -841,13 +836,7 @@ fn writeWordDigits(buf: []u8, n: Word, radix: i32, len: i32) void {
     while (i >= 0) : (i -= 1) {
         const digit: Word = n2 % r;
         n2 /= r;
-        var c: u8 = @truncate(digit);
-        if (c < 10) {
-            c += '0';
-        } else {
-            c += 'a' - 10;
-        }
-        buf[@intCast(i)] = c;
+        buf[@intCast(i)] = std.fmt.digitToChar(@truncate(digit), .lower);
     }
 }
 
@@ -895,18 +884,14 @@ fn writeU64(buf: []u8, n: u64) usize {
         q[0] = @as(u8, @intCast(n3)) + '0';
         q = q[1..];
 
-        var tmp: [9]u8 = undefined;
-        writeU32Padded(&tmp, @truncate(n1), 9);
-        @memcpy(q[0..9], tmp[0..9]);
+        writeU32Padded(q[0..9], @truncate(n1), 9);
         q = q[9..];
     } else {
         const len = writeU32(q, @truncate(n1));
         q = q[len..];
     }
 
-    var tmp: [9]u8 = undefined;
-    writeU32Padded(&tmp, @truncate(n2), 9);
-    @memcpy(q[0..9], tmp[0..9]);
+    writeU32Padded(q[0..9], @truncate(n2), 9);
     q = q[9..];
 
     return writtenLen(buf, q);

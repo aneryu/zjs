@@ -2100,34 +2100,39 @@ pub fn appendSpreadValuesEnumerate(
     // Fast path (qjs quickjs.c): default Array Iterator (value kind)
     // + builtin `next` + hole-free fast-array target (`length == count`).
     fast: {
+        // JSValue slots stay put for this block. A copying collection can
+        // still move the objects, so each *Object is rebound after a call
+        // that can allocate.
         const next_obj = object_ops.objectFromValue(values[4]) orelse break :fast;
         if (!next_obj.isArrayIteratorNextFunction()) break :fast;
-        if (object_ops.objectFromValue(values[3]).?.class_id != core.class.ids.array_iterator) break :fast;
-        if (iterator_ops.arrayIteratorKind(object_ops.objectFromValue(values[3]).?) != .value) break :fast;
-        const target_value = (object_ops.objectFromValue(values[3]).?.iteratorTargetSlot().*) orelse break :fast;
+        const iter = object_ops.objectFromValue(values[3]).?;
+        if (iter.class_id != core.class.ids.array_iterator) break :fast;
+        if (iterator_ops.arrayIteratorKind(iter) != .value) break :fast;
+        const target_value = (iter.iteratorTargetSlot().*) orelse break :fast;
         values[6] = target_value;
-        _ = object_ops.objectFromValue(values[6]) orelse break :fast;
-        if (!object_ops.objectFromValue(values[6]).?.isArray() or object_ops.objectFromValue(values[6]).?.hasExoticMethods() or object_ops.objectFromValue(values[6]).?.proxyTarget() != null) break :fast;
-        const element_count = object_ops.objectFromValue(values[6]).?.arrayElements().len;
-        const length: usize = @intCast(object_ops.objectFromValue(values[6]).?.arrayLength());
+        const source = object_ops.objectFromValue(values[6]) orelse break :fast;
+        if (!source.isArray() or source.hasExoticMethods() or source.proxyTarget() != null) break :fast;
+        const element_count = source.arrayElements().len;
+        const length: usize = @intCast(source.arrayLength());
         if (length != element_count) break :fast; // qjs: len != count32 -> general_case
-        const cursor = object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().*;
+        const cursor = iter.iteratorIndexSlot().*;
         if (cursor > element_count) break :fast;
         // This builtin iterator has a known, side-effect-free dense range.
         // Reserve its destination once: each incremental growth otherwise
         // leaves an obsolete GC storage cell alive until the next sweep.
         // Keep all unusual descriptor/length targets on the per-item path.
-        if (cursor < element_count and index >= 0 and object_ops.objectFromValue(values[1]).? != object_ops.objectFromValue(values[6]).? and
-            object_ops.objectFromValue(values[1]).?.isArray() and !object_ops.objectFromValue(values[1]).?.hasExoticMethods() and
-            object_ops.objectFromValue(values[1]).?.arrayElementStorageMode() == .dense and
-            object_ops.objectFromValue(values[1]).?.flags.extensible and object_ops.objectFromValue(values[1]).?.flags.length_writable and
-            object_ops.objectFromValue(values[1]).?.shape_ref.prop_count == 0 and object_ops.objectFromValue(values[1]).?.arrayElements().len == @as(usize, @intCast(index)))
+        const dest = object_ops.objectFromValue(values[1]).?;
+        if (cursor < element_count and index >= 0 and dest != source and
+            dest.isArray() and !dest.hasExoticMethods() and
+            dest.arrayElementStorageMode() == .dense and
+            dest.flags.extensible and dest.flags.length_writable and
+            dest.shape_ref.prop_count == 0 and dest.arrayElements().len == @as(usize, @intCast(index)))
         {
             const needed = @as(usize, @intCast(index)) + element_count - cursor;
             if (needed <= std.math.maxInt(i32)) {
                 // A failed first definition has already consumed one item.
-                object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = cursor + 1;
-                try object_ops.objectFromValue(values[1]).?.reserveDenseArrayElements(rt, @intCast(needed));
+                iter.iteratorIndexSlot().* = cursor + 1;
+                try dest.reserveDenseArrayElements(rt, @intCast(needed));
             }
         }
         var i: usize = cursor;
@@ -2135,16 +2140,20 @@ pub fn appendSpreadValuesEnumerate(
             try exception_ops.pollNativeLoop(ctx, global);
             // Reserve and per-item growth can relocate storage, including
             // the source storage when source and destination are identical.
-            values[5] = object_ops.objectFromValue(values[6]).?.arrayElements()[i];
-            object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = i + 1;
+            const live_source = object_ops.objectFromValue(values[6]).?;
+            values[5] = live_source.arrayElements()[i];
+            const live_iter = object_ops.objectFromValue(values[3]).?;
+            live_iter.iteratorIndexSlot().* = i + 1;
             // A contiguous C_W_E definition can stay dense. The shared
             // CreateDataProperty helper retains descriptor/length fallbacks
             // and never invokes an inherited indexed setter.
-            try array_ops.createArrayDataOrTypedArrayElement(rt, object_ops.objectFromValue(values[1]).?, core.Atom.taggedInt(@intCast(index)), values[5]);
+            const live_dest = object_ops.objectFromValue(values[1]).?;
+            try array_ops.createArrayDataOrTypedArrayElement(rt, live_dest, core.Atom.taggedInt(@intCast(index)), values[5]);
             index += 1;
         }
-        object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = element_count; // exhaust, matching a full drain
-        object_ops.objectFromValue(values[3]).?.clearOptionalValueSlot(rt, object_ops.objectFromValue(values[3]).?.iteratorTargetSlot());
+        const done_iter = object_ops.objectFromValue(values[3]).?;
+        done_iter.iteratorIndexSlot().* = element_count; // exhaust, matching a full drain
+        done_iter.clearOptionalValueSlot(rt, done_iter.iteratorTargetSlot());
         return index;
     }
 

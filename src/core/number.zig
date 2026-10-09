@@ -131,7 +131,7 @@ fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
     }
 }
 
-fn toInt32(number: f64) i32 {
+pub fn toInt32(number: f64) i32 {
     if (number == 0 or std.math.isNan(number) or !std.math.isFinite(number)) return 0;
     const two32 = 4294967296.0;
     var int = @mod(@floor(@abs(number)), two32);

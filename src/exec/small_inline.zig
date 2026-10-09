@@ -29,6 +29,9 @@ const monomorph_hits: u8 = 8;
 const max_sites: u8 = 16;
 const max_copies: u8 = 4;
 const max_pc_map: usize = 64;
+const max_caller_code: usize = 2048;
+const max_rewrite_code: usize = 256;
+const pc_map_unknown: u16 = 0xFFFF;
 
 pub var probe_prep: u64 = 0;
 pub var probe_take: u64 = 0;
@@ -69,8 +72,8 @@ pub const InlinedSite = struct {
     this_slot: u16,
     arg_base: u16,
     argc: u16,
-    /// Expanded-rel-pc → original callee pc. 0xFFFF = unknown (map to body start).
-    pc_map: [max_pc_map]u16 = @splat(0xFFFF),
+    /// Expanded-rel-pc → original callee pc. `pc_map_unknown` maps to body start.
+    pc_map: [max_pc_map]u16 = @splat(pc_map_unknown),
     pc_map_len: u16 = 0,
     /// R-v15-b: take guard is this object pointer, not FB identity.
     callee_obj: ?*Object = null,
@@ -278,7 +281,7 @@ fn mapCalleePc(site: *const InlinedSite, expanded_pc: usize) usize {
     const rel = expanded_pc - site.pc_lo;
     if (rel >= site.pc_map_len) return 0;
     const mapped = site.pc_map[rel];
-    if (mapped == 0xFFFF) return 0;
+    if (mapped == pc_map_unknown) return 0;
     return mapped;
 }
 
@@ -314,7 +317,7 @@ pub fn noteMonomorphic(
         } else {
             slot.callee_obj = callee_obj;
         }
-        if (slot.count < 255) slot.count += 1;
+        if (slot.count < std.math.maxInt(u8)) slot.count += 1;
         return slot.count == monomorph_hits;
     }
     if (state.site_len >= max_sites) return false;
@@ -339,7 +342,7 @@ pub fn specializeCallSite(
     argc: u16,
 ) void {
     if (caller.isDirectOrIndirectEval() or caller.executionFlags().is_module) return;
-    if (caller.byteCode().len > 2048) return;
+    if (caller.byteCode().len > max_caller_code) return;
     if (argc < callee.arg_count) return;
     if (hasTrailingAfterReturn(callee.byteCode())) return;
     // Frame construction installs `current_function` from a bytecode-function
@@ -592,11 +595,11 @@ fn firstThisLocal(code: []const u8) ?u16 {
 }
 
 const Rewrite = struct {
-    code: [256]u8 = undefined,
+    code: [max_rewrite_code]u8 = undefined,
     len: usize = 0,
-    pc_map: [max_pc_map]u16 = @splat(0xFFFF),
+    pc_map: [max_pc_map]u16 = @splat(pc_map_unknown),
     map_len: usize = 0,
-    forward_call_rel: u32 = 0xFFFFFFFF,
+    forward_call_rel: u32 = no_forward_pc,
     method_atom: core.Atom = core.atom.null_atom,
 };
 
@@ -695,7 +698,7 @@ fn rewriteBody(
     // apply-forward bodies are also small (G-ctor is 22B). Reject overflow
     // rather than write past old_to_new.
     if (src.len > max_code) return null;
-    var old_to_new: [max_code + 1]u16 = @splat(0xFFFF);
+    var old_to_new: [max_code + 1]u16 = @splat(pc_map_unknown);
     var pc: usize = 0;
     if (src.len > 0 and src[0] == op.check_ctor) {
         old_to_new[0] = 0;
@@ -891,7 +894,7 @@ fn rewriteBody(
         if (target_opt) |target| {
             if (target > src.len) return null;
             const new_target = old_to_new[target];
-            if (new_target == 0xFFFF) return null;
+            if (new_target == pc_map_unknown) return null;
             const new_opc = out.code[emit_pc];
             patchJump(&out, emit_pc, new_opc, @intCast(new_target)) orelse return null;
         }
@@ -1008,7 +1011,7 @@ fn cloneAndExpand(
     const extra_each: u16 = 1 + extra_args + callee.var_count;
     const new_var_count: u16 = caller.var_count + extra_each * site_n;
 
-    var combined: [2048]u8 = undefined;
+    var combined: [max_caller_code]u8 = undefined;
     if (caller_code.len > combined.len) return null;
     @memcpy(combined[0..caller_code.len], caller_code);
     var combined_len: usize = caller_code.len;
@@ -1213,7 +1216,7 @@ fn cloneAndExpand(
         // assert var_count==0). They do not invalidate simple_inline_base:
         // kind / simple params / no global-decl are copied unchanged, so
         // the inherited simple_* bits still admit setupSimpleInlineEntry
-        // (qjs:17828 alloca, the var_count>0 path). 0d4169ba over-cleared
+        // (JS_CallInternal alloca, the var_count>0 path). 0d4169ba over-cleared
         // them and sent spec-copy plain calls through the general nest.
         facts.execution.simple_inline_empty_leaf = false;
         facts.execution.raw_this_inline_empty_leaf = false;
@@ -1260,7 +1263,7 @@ fn cloneAndExpand(
             .proto = if (cache) |c| c.proto else null,
             .proto_slot = if (cache) |c| c.slot else 0,
         };
-        state.apply_forward[state.inlined_len] = if (item.forward_call_rel != 0xFFFFFFFF)
+        state.apply_forward[state.inlined_len] = if (item.forward_call_rel != no_forward_pc)
             .{
                 .method_atom = if (item.method_atom != core.atom.null_atom)
                     rt.atoms.noteHolderStore(item.method_atom)
