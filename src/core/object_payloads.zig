@@ -78,7 +78,7 @@ pub const FinalizationRegistryCell = struct {
         // Active/pending cells still own the job-queue reservation taken at
         // register. Queued cells already consumed it via enqueueReserved.
         // Runtime teardown destroys the queue before leftover objects.
-        if ((self.isActive() or self.isPending()) and rt.job_queue.capacity != 0) {
+        if (self.keepsHeldValuesAlive() and rt.job_queue.capacity != 0) {
             rt.job_queue.releaseReservedEntries(1);
         }
     }

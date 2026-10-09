@@ -1954,8 +1954,8 @@ pub const Heap = struct {
     }
 
     /// Withdraw the previous cycle's can-allocate set before a new mark epoch.
-    /// Blocks with no condemned cells are republished by final remark, while
-    /// the rest wait for the global parked-free Pass B to finish.
+    /// The sweep republishes a block once its doomed cells are gone
+    /// (`publishCompletedHotBlocks`).
     fn withdrawHotBlocks(self: *Heap) void {
         for (&self.hot_blocks) |*head| {
             var cursor = head.*;

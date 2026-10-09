@@ -39,7 +39,7 @@ pub fn enqueueFinalizationCleanup(
     // Normal collections consume the slot reserved at register. Runtime
     // teardown deinits the queue first, then cycle-removes leftover
     // objects; fall back to an allocating enqueue so that path can
-    // rehydrate the queue the way trial deletion always did.
+    // rehydrate the queue.
     if (rt.job_queue.reserved_entries != 0) {
         rt.job_queue.enqueueReserved(job);
     } else {

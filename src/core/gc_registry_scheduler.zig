@@ -2,10 +2,9 @@
 //!
 //! Two scalars and a request slot. The request slot is a *latch*, not a
 //! queue: at most one major can be pending, and a second request either
-//! upgrades its urgency or refines its reason. The major phase is the
-//! collector's own state machine (idle -> mark_roots -> sweep -> idle), kept
-//! apart from `Registry.hot.phase`, which is the much coarser thing every
-//! JSValue release reads.
+//! upgrades its urgency or refines its reason. `major_phase` is published
+//! on the stats snapshot and does not select collector work. It is kept
+//! apart from `Registry.hot.phase`, which busy and teardown checks read.
 //!
 //! Nothing here touches the heap, so the whole group is decidable from
 //! policy plus the request latch. The two predicates that also need live
@@ -23,6 +22,9 @@ const PollMode = gc.PollMode;
 
 pub const Scheduler = struct {
     policy: Policy = .{},
+    /// Published as `Stats.major_phase`. Collectors do not branch on it.
+    /// `beginMajorCycle` and `setMajorPhase` only record where a
+    /// stop-the-world major is, for that snapshot.
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
     major_request: ?Request = null,
@@ -33,8 +35,8 @@ pub const Scheduler = struct {
     /// `collectForTeardown` already asks for -- production
     /// otherwise forces the conservative pass, and a stale native-stack slot
     /// pointing at a host-released Realm keeps it marked, which breaks the
-    /// `contexts.live_head == null` teardown invariant once the tracer rather than
-    /// refcounting owns object lifetime.
+    /// `contexts.live_head == null` teardown invariant once the tracer owns
+    /// object lifetime.
     host_quiescent: bool = false,
 
     /// Latch a major request, or strengthen the one already latched.

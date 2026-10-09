@@ -3045,7 +3045,7 @@ test "no-suspend async leaves suspension eval host-observed cadence and wrappers
     try std.testing.expectEqual(@as(usize, 0), inline_calls.machineTestMetrics().same_machine_async_calls);
     try js.runJobs();
     var interrupt = InterruptTestState{};
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt);
     defer js.runtime.setInterruptHandler(null, null);
     _ = try js.eval("leaf();");
     try std.testing.expectEqual(@as(usize, 0), inline_calls.machineTestMetrics().same_machine_async_calls);

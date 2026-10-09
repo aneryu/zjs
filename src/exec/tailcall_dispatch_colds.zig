@@ -497,10 +497,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.get_length] = dispatch.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs register-resident single-`bl` CASEs): fast handler
     // on the plain-data-add / OOM-free path; every exotic case falls to the cold h_* shell.
-    t[op.object] = dispatch.op_object; // bare {} create; OOM → cold h_object
+    t[op.object] = dispatch.op_object; // bare {} create; OOM → cold objectLiteral
     t[op.object_slots2] = dispatch.op_object_slots2;
-    t[op.define_field] = dispatch.op_define_field; // plain data add; array/private/proxy/setter → cold h_field
-    t[op.array_from] = dispatch.op_array_from; // dense array build; OOM → cold h_array_from
+    t[op.define_field] = dispatch.op_define_field; // plain data add; array/private/proxy/setter → cold defineField
+    t[op.array_from] = dispatch.op_array_from; // dense array build; OOM → cold arrayFrom
     t[op.add_loc] = dispatch.op_add_loc;
     t[op.get_var] = dispatch.op_get_var;
     t[op.get_var_undef] = dispatch.op_get_var;

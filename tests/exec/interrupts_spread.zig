@@ -278,7 +278,7 @@ test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
     const spin = try global.getProperty(spin_key);
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
     js.context.interrupt_counter = 8;
 
@@ -318,7 +318,7 @@ test "interrupt budget survives Machine replacement and bypasses catch markers" 
     }
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
 
     try std.testing.expectError(
@@ -392,7 +392,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
     js.context.interrupt_counter = 100;
     arm.exhaust = true;
@@ -482,7 +482,7 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
     const outer = try global.getProperty(outer_key);
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
     js.context.interrupt_counter = 100;
 
@@ -700,7 +700,7 @@ test "synchronous native fence restores every budget after interrupt" {
     const baseline_stack_bytes = js.runtime.stack.bytecode_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
 
     // Root call, native call, and sync-callback entry consume the first three
@@ -1392,7 +1392,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     const interrupt_key = try js.runtime.internAtom("__collectionCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt_state);
     js.context.interrupt_counter = 3; // NB2 D7: native calls no longer tick the interrupt counter (qjs parity)
     try std.testing.expectError(
         error.Interrupted,
@@ -1731,7 +1731,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     const interrupt_key = try js.runtime.internAtom("__propertyCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt_state);
     js.context.interrupt_counter = 3;
     try std.testing.expectError(
         error.Interrupted,
@@ -1926,7 +1926,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const interrupt_key = try js.runtime.internAtom("__jsonCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt_state);
     js.context.interrupt_counter = 3; // NB2 D7: native calls no longer tick the interrupt counter (qjs parity)
     try std.testing.expectError(
         error.Interrupted,
@@ -2179,7 +2179,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     const interrupt_key = try js.runtime.internAtom("__cohortFiveInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt_state);
     js.context.interrupt_counter = 4;
     try std.testing.expectError(
         error.Interrupted,
@@ -2415,7 +2415,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     const interrupt_key = try js.runtime.internAtom("__promiseExecutorInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &interrupt_state);
     js.context.interrupt_counter = 4;
     inline_calls.resetMachineTestMetrics();
     const interrupted_executor_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
@@ -2502,7 +2502,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     const next = try generator_object.getProperty(next_key);
 
     var state = InterruptTestState{};
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
 
     // The host-to-outer entry leaves one poll; the nested/tail call consumes it.
@@ -2647,7 +2647,7 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
     js.context.interrupt_counter = 2;
     child.interrupt_counter = 100;
@@ -2730,7 +2730,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     const stack_foreign = try child_global.getProperty(stack_foreign_key);
 
     var state = InterruptTestState{ .stop = true };
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     defer js.runtime.setInterruptHandler(null, null);
 
     // Call-entry polling precedes the function-Realm switch.
@@ -2813,7 +2813,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
 
     // When both limits are ready to fire, the caller interrupt wins and stays
     // uncatchable, matching JS_CallInternal's poll-before-stack order.
-    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
     js.context.interrupt_counter = 1;
     child.interrupt_counter = 100;
     try std.testing.expectError(

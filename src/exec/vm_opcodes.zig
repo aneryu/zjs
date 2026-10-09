@@ -5,19 +5,33 @@
 //! Property opcodes live in `vm_property.zig`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const internal_builtins = @import("internal_builtins.zig");
-const frame_mod = @import("frame.zig");
-const stack_mod = @import("stack.zig");
-const value_ops = @import("value_ops.zig");
+const array_ops = @import("array_ops.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
+const disposable_ops = @import("disposable_ops.zig");
+const eval_ops = @import("eval_entry.zig");
+const exception_ops = @import("exception_ops.zig");
+const frame_mod = @import("frame.zig");
+const inline_calls = @import("inline_calls.zig");
+const internal_builtins = @import("internal_builtins.zig");
+const iterator_ops = @import("iterator_ops.zig");
+const module_graph = @import("module.zig");
+const object_ops = @import("object_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const property_ops = @import("property_ops.zig");
+const stack_mod = @import("stack.zig");
+const string_ops = @import("string_ops.zig");
+const value_ops = @import("value_ops.zig");
+const vm_property = @import("vm_property.zig");
 
 const dispatch = @import("tailcall_dispatch.zig");
 const Vm = dispatch.Vm;
 const catchVmError = object_ops.catchVmError;
-const HostError = @import("exception_ops.zig").HostError;
+const HostError = exception_ops.HostError;
 const op = bytecode.opcode.op;
 
 pub const Step = enum { done, continue_loop };
@@ -243,7 +257,7 @@ pub fn unary(
 }
 
 pub noinline fn unaryVm(vm: *Vm, opc: u8) HostError!void {
-    unary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
+    try unary(vm.ctx, vm.stack, opc, vm.output, vm.global);
 }
 
 pub fn bitNot(
@@ -259,7 +273,7 @@ pub fn bitNot(
 }
 
 pub noinline fn bitNotVm(vm: *Vm) HostError!void {
-    bitNot(vm.ctx, vm.stack, vm.output, vm.global) catch |err| return catchVmError(vm, err);
+    try bitNot(vm.ctx, vm.stack, vm.output, vm.global);
 }
 
 pub fn postUpdate(
@@ -296,7 +310,7 @@ pub fn postUpdate(
 }
 
 pub noinline fn postUpdateVm(vm: *Vm, opc: u8) HostError!void {
-    postUpdate(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| return catchVmError(vm, err);
+    try postUpdate(vm.ctx, vm.stack, opc, vm.output, vm.global);
 }
 
 pub fn updateLocal(
@@ -777,11 +791,6 @@ fn looseEqualSameNumberTypes(lhs: core.JSValue, rhs: core.JSValue) bool {
 // Inline requests use caller-owned request storage to avoid an sret; hot native
 // dispatch remains separate from generic fallback. This follows QuickJS's
 // `JS_CallInternal` frame entry and class-call dispatch.
-const array_ops = @import("array_ops.zig");
-const property_ops = @import("property_ops.zig");
-const exception_ops = @import("exception_ops.zig");
-const builtin_dispatch = @import("builtin_dispatch.zig");
-const inline_calls = @import("inline_calls.zig");
 pub const CallStep = enum {
     done,
     continue_loop,
@@ -1490,7 +1499,7 @@ pub fn checkCtor(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.F
 }
 
 pub noinline fn checkCtorVm(vm: *Vm) HostError!void {
-    checkCtor(vm.ctx, vm.global, vm.frame) catch |err| return catchVmError(vm, err);
+    try checkCtor(vm.ctx, vm.global, vm.frame);
 }
 
 pub fn checkCtorReturn(stack: *stack_mod.Stack) !void {
@@ -1508,7 +1517,7 @@ pub fn checkCtorReturn(stack: *stack_mod.Stack) !void {
 }
 
 pub noinline fn checkCtorReturnVm(vm: *Vm) HostError!void {
-    checkCtorReturn(vm.stack) catch |err| return catchVmError(vm, err);
+    try checkCtorReturn(vm.stack);
 }
 
 pub fn initCtor(
@@ -1545,7 +1554,7 @@ pub fn initCtorArgs(frame: *const frame_mod.Frame) []const core.JSValue {
 }
 
 pub noinline fn initCtorVm(vm: *Vm) HostError!void {
-    initCtor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| return catchVmError(vm, err);
+    try initCtor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame);
 }
 
 /// Native stack the deepest builtin can use between two re-entry checks
@@ -1574,7 +1583,6 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 // Stack pops are ownership moves, matching QuickJS opcode semantics; handled
 // throws install or route the pending exception before execution resumes.
 // Hot dispatch remains outside this file and calls these focused helpers.
-const builtin = @import("builtin");
 pub const ThrowResult = enum {
     handled,
 };
@@ -1815,10 +1823,6 @@ const adapterValueBorrow = property_ops.adapterValueBorrow;
 // The active frame supplies lexical/caller authority, while module jobs and
 // promise settlement stay in their owning modules. Stack operands are moved
 // or released here before control returns to the dispatch loop.
-const eval_ops = @import("eval_entry.zig");
-const module_graph = @import("module.zig");
-const promise_ops = @import("promise_ops.zig");
-const string_ops = @import("string_ops.zig");
 pub const EvalStep = eval_ops.ExecEvalResult;
 pub noinline fn directEval(
     ctx: *core.JSContext,
@@ -1911,7 +1915,6 @@ pub noinline fn dynamicImport(vm: *Vm) HostError!void {
 // Await paths distinguish raw suspension from settled completion, including
 // top-level module evaluation. The transition shape follows QuickJS's async
 // opcode handling around quickjs.c.
-const iterator_ops = @import("iterator_ops.zig");
 pub const Result = union(enum) {
     none,
     continue_loop,
@@ -2471,7 +2474,6 @@ const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 // commit. Observable iterator and property work stays on the explicit call
 // environment. The opcode bodies follow QuickJS object/field creation,
 // spread copying and rest-array construction.
-const object_ops = @import("object_ops.zig");
 const special_object_subtype = bytecode.opcode.special_object_subtype;
 pub noinline fn objectLiteral(vm: *Vm) HostError!void {
     const created = try core.Object.create(vm.ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(vm.ctx.runtime, vm.global));
@@ -2623,7 +2625,7 @@ pub noinline fn defineField(vm: *Vm) HostError!void {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all));
         return;
     }
-    object_ops.createDataPropertyOrThrow(ctx, vm.output, vm.global, target, atom_id, rooted_value, vm.function, frame) catch |err| return catchVmError(vm, err);
+    try object_ops.createDataPropertyOrThrow(ctx, vm.output, vm.global, target, atom_id, rooted_value, vm.function, frame);
 }
 
 pub noinline fn setProto(
@@ -2657,12 +2659,9 @@ pub noinline fn defineArrayEl(vm: *Vm) HostError!void {
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    const object_value = property_ops.expectObject(rooted_array) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
-    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, vm.function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
-    object_ops.createDataPropertyOrThrow(ctx, output, global, object_value, atom_id, rooted_value, vm.function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
+    const object_value = try property_ops.expectObject(rooted_array);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, vm.function, frame);
+    try object_ops.createDataPropertyOrThrow(ctx, output, global, object_value, atom_id, rooted_value, vm.function, frame);
     try stack.push(rooted_index);
 }
 
@@ -2688,7 +2687,7 @@ pub fn appendSpreadValues(
 }
 
 pub noinline fn appendSpreadValuesVm(vm: *Vm, opc: u8) HostError!void {
-    appendSpreadValues(vm.ctx, vm.output, vm.global, vm.stack, opc) catch |err| return catchVmError(vm, err);
+    try appendSpreadValues(vm.ctx, vm.output, vm.global, vm.stack, opc);
 }
 
 pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
@@ -2697,7 +2696,6 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
     const global = vm.global;
     const stack = vm.stack;
     const caller_frame = vm.frame;
-    const catch_target = vm.catch_target;
     const mask = vm.function.byteCode()[vm.frame.pc];
     vm.frame.pc += 1;
     const rt = ctx.runtime;
@@ -2721,21 +2719,16 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
     // properties (its indices), so the other primitives copy nothing.
     // QuickJS skips every primitive, dropping `{..."ab"}`'s characters.
     if (rooted_source_value.isString()) {
-        rooted_source_value = object_ops.primitiveObjectForAccess(rt, global, rooted_source_value) catch |err|
-            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+        rooted_source_value = try object_ops.primitiveObjectForAccess(rt, global, rooted_source_value);
     } else if (!rooted_source_value.is(.object)) return;
 
-    const target = property_ops.expectObject(rooted_target_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
-    const source = property_ops.expectObject(rooted_source_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+    const target = try property_ops.expectObject(rooted_target_value);
+    const source = try property_ops.expectObject(rooted_source_value);
     const exclusion: ?*core.Object = if (rooted_exclusion_value.is(.null_value) or rooted_exclusion_value.is(.undefined_value))
         null
     else
-        property_ops.expectObject(rooted_exclusion_value) catch |err|
-            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
-    const keys = object_ops.objectRestOwnKeys(ctx, output, global, source) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+        try property_ops.expectObject(rooted_exclusion_value);
+    const keys = try object_ops.objectRestOwnKeys(ctx, output, global, source);
     defer core.Object.freeKeys(rt, keys);
     // A Proxy ownKeys result lives only in this native list across the
     // traps and allocations below; keep its atoms alive.
@@ -2766,15 +2759,13 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
                 // arrays / module namespaces take the interleaved path
                 // above); fall back defensively if that ever changes.
                 .descriptor => blk: {
-                    const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, live_source, key) catch |err|
-                        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+                    const maybe_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, live_source, key);
                     const desc = maybe_desc orelse break :blk false;
                     break :blk (desc.enumerable orelse false);
                 },
             };
             if (!copy) continue;
-            const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
-                return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+            const value = try object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame);
             var rooted_value = value;
             var value_root_values = [_]*core.JSValue{
                 &rooted_value,
@@ -2784,8 +2775,7 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
             };
             value_root_frame.activate(rt);
             defer value_root_frame.deactivate(rt);
-            property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
-                return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+            try property_ops.defineDataProperty(rt, target, key, rooted_value);
         }
         return;
     }
@@ -2794,32 +2784,16 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
         if (exclusion) |excluded| {
             if (excluded.hasOwnProperty(key)) continue;
         }
-        const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
-            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+        const maybe_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key);
         const desc = maybe_desc orelse continue;
         if (!(desc.enumerable orelse false)) continue;
-        const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
-            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+        const value = try object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame);
         var rooted_value = value;
         var value_root_frame = core.runtime.rootValues(.{&rooted_value});
         value_root_frame.activate(rt);
         defer value_root_frame.deactivate(rt);
-        property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
-            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+        try property_ops.defineDataProperty(rt, target, key, rooted_value);
     }
-}
-
-fn handleLiteralRuntimeError(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-    err: anytype,
-) HostError!void {
-    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
-    return err;
 }
 
 pub noinline fn specialObject(vm: *Vm) HostError!void {
@@ -2856,7 +2830,7 @@ pub noinline fn specialObject(vm: *Vm) HostError!void {
 
 pub noinline fn getLength(vm: *Vm) HostError!void {
     const value = try vm.stack.pop();
-    const length = object_ops.getValueProperty(vm.ctx, vm.output, vm.global, value, core.atom.ids.length, vm.function, vm.frame) catch |err| return catchVmError(vm, err);
+    const length = try object_ops.getValueProperty(vm.ctx, vm.output, vm.global, value, core.atom.ids.length, vm.function, vm.frame);
     try vm.stack.pushOwned(length);
 }
 
@@ -3136,12 +3110,7 @@ pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
 
 pub noinline fn pushThisVm(vm: *Vm) HostError!void {
     const this_value = object_ops.materializeFrameThisBinding(vm.ctx, vm.global, vm.frame) catch |err| return catchVmError(vm, err);
-    pushThis(vm.stack, this_value) catch |err| switch (err) {
-        error.ReferenceError => {
-            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.ReferenceError)) return;
-            return error.ReferenceError;
-        },
-    };
+    pushThis(vm.stack, this_value) catch |err| return catchVmError(vm, err);
 }
 
 pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void {
@@ -3154,7 +3123,7 @@ pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.St
 }
 
 pub noinline fn toObjectVm(vm: *Vm) HostError!void {
-    toObject(vm.ctx, vm.global, vm.stack) catch |err| return catchVmError(vm, err);
+    try toObject(vm.ctx, vm.global, vm.stack);
 }
 
 pub noinline fn typeOf(vm: *Vm) HostError!void {
@@ -3668,33 +3637,22 @@ test "push private symbol releases fresh atom on allocation failure" {
 // These handlers own and pop VM operands, delegate resource lifetime to
 // `disposable_ops`, and route synchronous/async disposal failures through the
 // active catch target. Promise scheduling remains in `promise_ops`.
-const disposable_ops = @import("disposable_ops.zig");
-const vm_property_field = @import("vm_property.zig");
 pub const DisposalDisposition = enum {
     normal,
     throw,
 };
 
-fn popOwnedOperands(_: *core.JSRuntime, stack: *stack_mod.Stack, count: usize) !void {
+fn popOwnedOperands(stack: *stack_mod.Stack, count: usize) !void {
     var remaining = count;
     while (remaining != 0) : (remaining -= 1) {
         _ = try stack.pop();
     }
 }
 
-fn routeRuntimeError(vm: *Vm, err: anytype) HostError!void {
-    if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
-        return;
-    }
-    return err;
-}
-
 pub noinline fn createStackVm(vm: *Vm) HostError!void {
     const stack = vm.stack;
     try stack.reserveAdditional(1);
-    const value = disposable_ops.usingCreateAsyncDisposableStack(vm.ctx, vm.global) catch |err| {
-        return routeRuntimeError(vm, err);
-    };
+    const value = try disposable_ops.usingCreateAsyncDisposableStack(vm.ctx, vm.global);
     stack.pushOwnedAssumeCapacity(value);
 }
 
@@ -3732,13 +3690,13 @@ pub noinline fn execVm(vm: *Vm) HostError!void {
         // The final encoding of to_propkey (the direct id 112 is reclaimed;
         // only the parser's phase-1 stream still carries it).
         bytecode.opcode.ext0_sub.to_propkey => {
-            try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
+            try vm_property.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
         },
         // The final encoding of set_name_computed. The opcode constant is
         // passed literally -- the shared setName helper selects its
         // computed arm from it, never from the stream byte.
         bytecode.opcode.ext0_sub.set_name_computed => {
-            try vm_property_field.setName(ctx, output, global, stack, function, frame, bytecode.opcode.op.set_name_computed);
+            try vm_property.setName(ctx, output, global, stack, function, frame, bytecode.opcode.op.set_name_computed);
         },
         bytecode.opcode.ext0_sub.set_proto => {
             try setProto(ctx, stack);
@@ -3802,10 +3760,10 @@ fn addResourceWithHint(vm: *Vm, hint_byte: u8) HostError!void {
         .sync => disposable_ops.usingAddSyncResource(ctx, vm.output, vm.global, args),
         .async => disposable_ops.usingAddAsyncResource(ctx, vm.output, vm.global, args),
     } catch |err| {
-        try popOwnedOperands(vm.rt, stack, 2);
-        return routeRuntimeError(vm, err);
+        try popOwnedOperands(stack, 2);
+        return err;
     };
-    try popOwnedOperands(vm.rt, stack, 2);
+    try popOwnedOperands(stack, 2);
 }
 
 fn disposeStack(
@@ -3850,10 +3808,10 @@ pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostEr
     const completion = if (disposition == .throw) stack.values[operand_base + 1] else null;
 
     const result = disposeStack(vm.ctx, vm.output, vm.global, stack_value, completion) catch |err| {
-        try popOwnedOperands(vm.rt, stack, operand_count);
-        return routeRuntimeError(vm, err);
+        try popOwnedOperands(stack, operand_count);
+        return err;
     };
-    try popOwnedOperands(vm.rt, stack, operand_count);
+    try popOwnedOperands(stack, operand_count);
     stack.pushOwnedAssumeCapacity(result);
 }
 

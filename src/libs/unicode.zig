@@ -1,5 +1,5 @@
-//! Unicode classification, conversion, normalization, encoding, QuickJS-format
-//! property-range construction, and zero-allocation `\p{…}` point lookup.
+//! Unicode classification, conversion, normalization, encoding, and QuickJS-format
+//! property-range construction.
 //! Tables come from `unicode_tables.bin`. Scalar lookups borrow them; allocating
 //! APIs return caller-owned buffers or explicitly deinitialized ranges.
 const std = @import("std");
@@ -489,25 +489,15 @@ fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {
     comptime {
         @setEvalBranchQuota(200000);
         var entries: []const MapEntry = &[_]MapEntry{};
-        var p = table;
         var pos: usize = 0;
-        while (p.len > 0 and p[0] != 0) {
-            var len_to_null: usize = 0;
-            while (len_to_null < p.len and p[len_to_null] != 0) : (len_to_null += 1) {}
-            const group = p[0..len_to_null];
-
-            var start: usize = 0;
-            var i: usize = 0;
-            while (i <= group.len) : (i += 1) {
-                if (i == group.len or group[i] == ',') {
-                    if (i > start) {
-                        entries = entries ++ &[_]MapEntry{.{ group[start..i], pos }};
-                    }
-                    start = i + 1;
-                }
+        var groups = std.mem.splitScalar(u8, table, 0);
+        while (groups.next()) |group| {
+            if (group.len == 0) break;
+            var aliases = std.mem.splitScalar(u8, group, ',');
+            while (aliases.next()) |alias| {
+                if (alias.len == 0) continue;
+                entries = entries ++ &[_]MapEntry{.{ alias, pos }};
             }
-
-            p = p[len_to_null + 1 ..];
             pos += 1;
         }
         return entries;
@@ -517,12 +507,10 @@ fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {
 fn countNameGroupsComptime(comptime table: []const u8) usize {
     comptime {
         @setEvalBranchQuota(200000);
-        var p = table;
         var count: usize = 0;
-        while (p.len > 0 and p[0] != 0) {
-            var len_to_null: usize = 0;
-            while (len_to_null < p.len and p[len_to_null] != 0) : (len_to_null += 1) {}
-            p = p[len_to_null + 1 ..];
+        var groups = std.mem.splitScalar(u8, table, 0);
+        while (groups.next()) |group| {
+            if (group.len == 0) break;
             count += 1;
         }
         return count;
@@ -550,17 +538,14 @@ fn firstAliasMatchesEnumField(comptime table: []const u8, comptime enum_type: ty
     comptime {
         @setEvalBranchQuota(200000);
         const enum_fields = @typeInfo(enum_type).@"enum".fields;
-        var p = table;
         var pos: usize = 0;
-        while (p.len > 0 and p[0] != 0) {
-            var len_to_sep: usize = 0;
-            while (len_to_sep < p.len and p[len_to_sep] != 0 and p[len_to_sep] != ',') : (len_to_sep += 1) {}
+        var groups = std.mem.splitScalar(u8, table, 0);
+        while (groups.next()) |group| {
+            if (group.len == 0) break;
+            var aliases = std.mem.splitScalar(u8, group, ',');
+            const alias = aliases.next() orelse return false;
             if (enum_offset + pos >= enum_fields.len) return false;
-            if (!std.mem.eql(u8, p[0..len_to_sep], enum_fields[enum_offset + pos].name)) return false;
-
-            while (p.len > 0 and p[0] != 0) : (p = p[1..]) {}
-            if (p.len == 0) break;
-            p = p[1..];
+            if (!std.mem.eql(u8, alias, enum_fields[enum_offset + pos].name)) return false;
             pos += 1;
         }
         return true;
@@ -898,353 +883,6 @@ pub fn derived(prop: Prop) ?Derived {
 pub fn isSupported(prop: Prop) bool {
     if (prop == .IDS_Unary_Operator or prop == .Modifier_Combining_Mark) return false;
     return propTable(prop) != null or derived(prop) != null;
-}
-
-const lu_mask = gcBit("Lu");
-const ll_mask = gcBit("Ll");
-
-fn matchGeneralCategory(code_point: u21, gc_mask: u32) bool {
-    var p: []const u8 = unicode_gc_table;
-    var c: u32 = 0;
-    while (p.len > 0) {
-        const b = p[0];
-        p = p[1..];
-        var n: u32 = b >> 5;
-        const v: u32 = b & 0x1f;
-
-        if (n == 7) {
-            const next_b = p[0];
-            p = p[1..];
-            if (next_b < 128) {
-                n = next_b + 7;
-            } else if (next_b < 128 + 64) {
-                n = @as(u32, next_b - 128) << 8;
-                n |= p[0];
-                p = p[1..];
-                n += 7 + 128;
-            } else {
-                n = @as(u32, next_b - 128 - 64) << 16;
-                n |= @as(u32, p[0]) << 8;
-                n |= p[1];
-                p = p[2..];
-                n += 7 + 128 + (1 << 14);
-            }
-        }
-
-        const c0 = c;
-        c += n + 1;
-
-        if (code_point >= c0 and code_point < c) {
-            if (v == 31) {
-                const upper_lower = gc_mask & (lu_mask | ll_mask);
-                if (upper_lower != 0) {
-                    if (upper_lower == (lu_mask | ll_mask)) {
-                        return true;
-                    } else {
-                        var temp_c0 = c0;
-                        if ((gc_mask & ll_mask) != 0) temp_c0 += 1;
-                        if (code_point < temp_c0) return false;
-                        return (code_point - temp_c0) % 2 == 0;
-                    }
-                }
-            } else if (((gc_mask >> @intCast(v)) & 1) != 0) {
-                return true;
-            }
-            break;
-        }
-    }
-    return false;
-}
-
-fn matchPropTable(code_point: u21, prop: Prop) bool {
-    const table = propTable(prop) orelse return false;
-    var p: usize = 0;
-    var c: u32 = 0;
-    var bit = false;
-    while (p < table.len) {
-        var c0 = c;
-        const b = table[p];
-        p += 1;
-        if (b < 64) {
-            c += (b >> 3) + 1;
-            if (bit and code_point >= c0 and code_point < c) return true;
-            bit = !bit;
-            c0 = c;
-            c += (b & 7) + 1;
-        } else if (b >= 0x80) {
-            c += b - 0x80 + 1;
-        } else if (b < 0x60) {
-            c += ((@as(u32, b - 0x40) << 8) | table[p]) + 1;
-            p += 1;
-        } else {
-            c += ((@as(u32, b - 0x60) << 16) | (@as(u32, table[p]) << 8) | table[p + 1]) + 1;
-            p += 2;
-        }
-        if (bit and code_point >= c0 and code_point < c) return true;
-        bit = !bit;
-    }
-    return false;
-}
-
-fn matchCaseMask(code_point: u21, case_mask: u32) bool {
-    if (case_mask == 0) return false;
-    const mask = caseMaskRunTypes(case_mask);
-    for (case_conv_table1) |v| {
-        const run: CaseRun = @bitCast(v);
-        const code: u32 = run.code;
-        const len: u32 = run.len;
-        if (!mask.contains(run.typ)) continue;
-        if (code_point >= code and code_point < code + len) {
-            switch (run.typ) {
-                .ul => {
-                    if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
-                        return true;
-                    } else {
-                        const offset = if ((case_mask & CASE_U) != 0) @as(u32, 1) else 0;
-                        return ((code_point - code) % 2) == offset;
-                    }
-                },
-                .lsu => {
-                    if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
-                        return true;
-                    } else {
-                        if ((case_mask & CASE_U) == 0) {
-                            if (code_point == code or code_point == code + 1) return true;
-                        } else {
-                            if (code_point == code + 1 or code_point == code + 2) return true;
-                        }
-                        return false;
-                    }
-                },
-                else => return true,
-            }
-        }
-    }
-    return false;
-}
-
-fn matchPropOps(code_point: u21, ops: []const Op) bool {
-    var stack: [4]bool = undefined;
-    var stack_len: usize = 0;
-
-    for (ops) |op| {
-        switch (op) {
-            .gc => |mask| {
-                stack[stack_len] = matchGeneralCategory(code_point, mask);
-                stack_len += 1;
-            },
-            .prop => |prop_idx| {
-                stack[stack_len] = matchPropTable(code_point, prop_idx);
-                stack_len += 1;
-            },
-            .case_mask => |mask| {
-                stack[stack_len] = matchCaseMask(code_point, mask);
-                stack_len += 1;
-            },
-            .op_union => {
-                stack[stack_len - 2] = stack[stack_len - 2] or stack[stack_len - 1];
-                stack_len -= 1;
-            },
-            .op_inter => {
-                stack[stack_len - 2] = stack[stack_len - 2] and stack[stack_len - 1];
-                stack_len -= 1;
-            },
-            .op_xor => {
-                stack[stack_len - 2] = stack[stack_len - 2] != stack[stack_len - 1];
-                stack_len -= 1;
-            },
-            .op_invert => stack[stack_len - 1] = !stack[stack_len - 1],
-        }
-    }
-
-    std.debug.assert(stack_len == 1);
-    return stack[0];
-}
-
-fn matchProp(code_point: u21, prop: Prop) bool {
-    if (derived(prop)) |derived_prop| {
-        return switch (derived_prop) {
-            .ascii => code_point < 0x80,
-            .any => code_point < 0x110000,
-            .ops => |ops| matchPropOps(code_point, ops),
-        };
-    }
-
-    return matchPropTable(code_point, prop);
-}
-
-fn matchScript(code_point: u21, script_idx: Script, is_ext: bool) bool {
-    const script_idx_value = @intFromEnum(script_idx);
-    const is_common = script_idx == Script.Common or script_idx == Script.Inherited;
-    var p: []const u8 = unicode_script_table;
-    var c: u32 = 0;
-    var primary_match = false;
-    var found_range = false;
-    while (p.len > 0) {
-        const b = p[0];
-        p = p[1..];
-        const type_bit = b >> 7;
-        var n: u32 = b & 0x7f;
-        if (n < 96) {
-            // no-op
-        } else if (n < 112) {
-            n = (n - 96) << 8;
-            n |= p[0];
-            p = p[1..];
-            n += 96;
-        } else {
-            n = (n - 112) << 16;
-            n |= @as(u32, p[0]) << 8;
-            n |= p[1];
-            p = p[2..];
-            n += 96 + (1 << 12);
-        }
-
-        var v: u32 = 0;
-        if (type_bit != 0) {
-            v = p[0];
-            p = p[1..];
-        }
-
-        const c1 = c + n + 1;
-        if (code_point >= c and code_point < c1) {
-            found_range = true;
-            if (v == script_idx_value) {
-                primary_match = true;
-            }
-            break;
-        }
-        c = c1;
-    }
-    if (!found_range and code_point >= c and code_point <= max_code_point and script_idx == Script.Unknown) {
-        primary_match = true;
-    }
-
-    if (!is_ext) {
-        return primary_match;
-    }
-
-    var p_ext: []const u8 = unicode_script_ext_table;
-    c = 0;
-    var ext_match = false;
-    var ext_has_any = false;
-    while (p_ext.len > 0) {
-        const b = p_ext[0];
-        p_ext = p_ext[1..];
-        var n: u32 = 0;
-        if (b < 128) {
-            n = b;
-        } else if (b < 128 + 64) {
-            n = @as(u32, b - 128) << 8;
-            n |= p_ext[0];
-            p_ext = p_ext[1..];
-            n += 128;
-        } else {
-            n = @as(u32, b - 128 - 64) << 16;
-            n |= @as(u32, p_ext[0]) << 8;
-            n |= p_ext[1];
-            p_ext = p_ext[2..];
-            n += 128 + (1 << 14);
-        }
-
-        const c1 = c + n + 1;
-        const v_len = p_ext[0];
-        p_ext = p_ext[1..];
-
-        if (code_point >= c and code_point < c1) {
-            if (is_common) {
-                if (v_len != 0) {
-                    ext_has_any = true;
-                }
-            } else {
-                for (p_ext[0..v_len]) |val| {
-                    if (val == script_idx_value) {
-                        ext_match = true;
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-
-        p_ext = p_ext[v_len..];
-        c = c1;
-    }
-
-    if (is_common) {
-        return primary_match and !ext_has_any;
-    } else {
-        return primary_match or ext_match;
-    }
-}
-
-pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
-    return switch (parsePropertyExpression(name) orelse return false) {
-        .script, .gc_mask => true,
-        .prop_idx => |prop| isSupported(prop),
-    };
-}
-
-pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
-    return switch (parsePropertyExpression(name) orelse return false) {
-        .script => |script| matchScript(code_point, script.idx, script.is_ext),
-        .gc_mask => |mask| matchGeneralCategory(code_point, mask),
-        .prop_idx => |prop_idx| isSupported(prop_idx) and matchProp(code_point, prop_idx),
-    };
-}
-
-test "regexp unicode script properties include Unknown sentinel" {
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script=Zzzz"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "sc=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "sc=Zzzz"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script_Extensions=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script_Extensions=Zzzz"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "scx=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x038b, "scx=Zzzz"));
-    try std.testing.expect(isUnicodePropertyMatches(0x0e01f0, "Script=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x10ffff, "Script=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x0e01f0, "Script_Extensions=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x10ffff, "Script_Extensions=Unknown"));
-
-    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Script=Unknown"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Script_Extensions=Unknown"));
-    try std.testing.expect(isUnicodePropertyMatches(0x03c0, "Script=Greek"));
-    try std.testing.expect(isUnicodePropertyMatches(0x03c0, "Script_Extensions=Greek"));
-}
-
-test "regexp unicode script extensions exclude explicit Inherited extensions" {
-    try std.testing.expect(isUnicodePropertyMatches(0x0300, "Script=Inherited"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x0300, "Script_Extensions=Inherited"));
-}
-
-test "regexp unicode ID properties use generated QuickJS tables" {
-    try std.testing.expect(isUnicodePropertyMatches('A', "ID_Start"));
-    try std.testing.expect(isUnicodePropertyMatches('_', "ID_Continue"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x2e2f, "ID_Start"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x2e2f, "ID_Continue"));
-}
-
-test "regexp unicode property support rejects names without QuickJS property ranges" {
-    try std.testing.expect(!isSupportedUnicodePropertyExpression("ID_Compat_Math_Start"));
-    try std.testing.expect(!isSupportedUnicodePropertyExpression("ID_Compat_Math_Continue"));
-    try std.testing.expect(!isSupportedUnicodePropertyExpression("InCB"));
-    try std.testing.expect(!isUnicodePropertyMatches('x', "ID_Compat_Math_Start"));
-    try std.testing.expect(!isUnicodePropertyMatches('x', "ID_Compat_Math_Continue"));
-    try std.testing.expect(!isUnicodePropertyMatches('x', "InCB"));
-
-    try std.testing.expect(isSupportedUnicodePropertyExpression("Lowercase"));
-    try std.testing.expect(isSupportedUnicodePropertyExpression("Math"));
-    try std.testing.expect(isUnicodePropertyMatches('a', "Lowercase"));
-    try std.testing.expect(isUnicodePropertyMatches('+', "Math"));
-}
-
-test "regexp unicode property parser rejects bare script values" {
-    try std.testing.expect(!isSupportedUnicodePropertyExpression("Greek"));
-    try std.testing.expect(!isSupportedUnicodePropertyExpression("Grek"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Greek"));
-    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Grek"));
-    try std.testing.expect(isUnicodePropertyMatches(0x03c0, "Script=Greek"));
 }
 
 pub const Category = enum {
@@ -1655,18 +1293,11 @@ fn propertyRangeSet(allocator: std.mem.Allocator, expr: []const u8) UnicodeError
     // `\p{Name=}`: an `=` needs a value.
     if (equals != null and value.len == 0) return error.InvalidProperty;
 
-    return if (std.mem.eql(u8, name, "Script") or std.mem.eql(u8, name, "sc"))
-        scriptRanges(allocator, value, false)
-    else if (std.mem.eql(u8, name, "Script_Extensions") or std.mem.eql(u8, name, "scx"))
-        scriptRanges(allocator, value, true)
-    else if (std.mem.eql(u8, name, "General_Category") or std.mem.eql(u8, name, "gc"))
-        generalCategory(allocator, value)
-    else if (value.len == 0) blk: {
-        break :blk generalCategory(allocator, name) catch |err| switch (err) {
-            error.InvalidProperty => try unicodeProp(allocator, name),
-            else => return err,
-        };
-    } else return error.InvalidProperty;
+    return switch (parsePropertyExpression(expr) orelse return error.InvalidProperty) {
+        .script => |script| scriptRanges(allocator, script.idx, script.is_ext),
+        .gc_mask => |mask| unicodeGeneralCategory1(allocator, mask),
+        .prop_idx => |prop| unicodeProp(allocator, prop),
+    };
 }
 
 pub fn toUpperAscii(c: u8) u8 {
@@ -2459,20 +2090,18 @@ pub const CharRange = struct {
         var d_end: u32 = char_range_sentinel;
         var idx: usize = 0;
         var v = case_conv_table1[idx];
-        var code = v >> (32 - 17);
-        var len = (v >> (32 - 17 - 7)) & 0x7f;
+        var run: CaseRun = @bitCast(v);
 
         var range_index: usize = 0;
         while (range_index < cr_inter.rangeCount()) : (range_index += 1) {
             const range = cr_inter.rangeAt(range_index);
             var c = range.lo;
             while (c < range.hi) : (c += 1) {
-                while (!(c >= code and c < code + len)) {
+                while (!(c >= run.code and c < run.code + run.len)) {
                     idx += 1;
                     std.debug.assert(idx < case_conv_table1.len);
                     v = case_conv_table1[idx];
-                    code = v >> (32 - 17);
-                    len = (v >> (32 - 17 - 7)) & 0x7f;
+                    run = @bitCast(v);
                 }
 
                 const d = caseFoldingEntry(@intCast(c), idx, v, is_unicode);
@@ -2533,11 +2162,6 @@ fn insertionSortPointPairs(points: []u32) void {
         points[j] = lo;
         points[j + 1] = hi;
     }
-}
-
-fn generalCategory(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const gc = gcIndex(name) orelse return error.InvalidProperty;
-    return try unicodeGeneralCategory1(allocator, gcMaskByIndex(gc));
 }
 
 fn unicodeGeneralCategory1(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Allocator.Error!RangeSet {
@@ -2709,8 +2333,7 @@ fn unicodePropOps(allocator: std.mem.Allocator, ops: []const Op) UnicodeError!Ra
     return stack[0];
 }
 
-fn unicodeProp(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const prop = propIndex(name) orelse return error.InvalidProperty;
+fn unicodeProp(allocator: std.mem.Allocator, prop: Prop) UnicodeError!RangeSet {
     if (!isSupported(prop)) return error.InvalidProperty;
 
     if (derived(prop)) |derived_prop| {
@@ -2734,8 +2357,7 @@ fn unicodeProp(allocator: std.mem.Allocator, name: []const u8) UnicodeError!Rang
     return try unicodeProp1(allocator, prop);
 }
 
-fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: bool) UnicodeError!RangeSet {
-    const script_idx = scriptIndex(script_name) orelse return error.InvalidProperty;
+fn scriptRanges(allocator: std.mem.Allocator, script_idx: Script, is_ext: bool) UnicodeError!RangeSet {
     const script_idx_value = @intFromEnum(script_idx);
     const is_common = script_idx == Script.Common or script_idx == Script.Inherited;
 
@@ -2831,6 +2453,33 @@ pub fn isSequencePropertyName(prop_name: []const u8) bool {
 
 const sequence_max_len = 16;
 
+const emoji_modifier_base: u21 = 0x1f3fb;
+const emoji_modifier_count: usize = 5;
+const emoji_modifier_pair_count: usize = emoji_modifier_count * emoji_modifier_count;
+const emoji_modifier_distinct_pair_count: usize = emoji_modifier_count * (emoji_modifier_count - 1);
+const regional_indicator_base: u21 = 0x1f1e6;
+const regional_indicator_count: u21 = 26;
+const hair_component_base: u21 = 0x1f9b0;
+const hair_component_count: usize = 4;
+
+fn forEachPropCodePoint(
+    allocator: std.mem.Allocator,
+    comptime Context: type,
+    ctx: *Context,
+    prop: Prop,
+    comptime visit: fn (*Context, u21) UnicodeError!void,
+) UnicodeError!void {
+    var cr = try unicodeProp1(allocator, prop);
+    defer cr.deinit();
+    cr.normalize();
+    var range_index: usize = 0;
+    while (range_index < cr.rangeCount()) : (range_index += 1) {
+        const range = cr.rangeAt(range_index);
+        var c = range.lo;
+        while (c < range.hi) : (c += 1) try visit(ctx, @intCast(c));
+    }
+}
+
 fn sequenceProp1(
     allocator: std.mem.Allocator,
     comptime Context: type,
@@ -2844,43 +2493,34 @@ fn sequenceProp1(
             try emitPropertySequences(allocator, Context, ctx, Prop.Basic_Emoji2, &.{0xfe0f}, callback);
         },
         .RGI_Emoji_Modifier_Sequence => {
-            var cr = try unicodeProp1(allocator, Prop.Emoji_Modifier_Base);
-            defer cr.deinit();
-            cr.normalize();
-
-            var seq: [sequence_max_len]u21 = undefined;
-            var range_index: usize = 0;
-            while (range_index < cr.rangeCount()) : (range_index += 1) {
-                const range = cr.rangeAt(range_index);
-                var c = range.lo;
-                while (c < range.hi) : (c += 1) {
-                    var j: u21 = 0;
-                    while (j < 5) : (j += 1) {
-                        seq[0] = @intCast(c);
-                        seq[1] = 0x1f3fb + j;
-                        try callback(ctx, seq[0..2]);
+            const State = struct {
+                parent: *Context,
+                seq: [sequence_max_len]u21 = undefined,
+                fn visit(s: *@This(), c: u21) UnicodeError!void {
+                    for (0..emoji_modifier_count) |tone| {
+                        s.seq[0] = c;
+                        s.seq[1] = emoji_modifier_base + @as(u21, @intCast(tone));
+                        try callback(s.parent, s.seq[0..2]);
                     }
                 }
-            }
+            };
+            var state = State{ .parent = ctx };
+            try forEachPropCodePoint(allocator, State, &state, .Emoji_Modifier_Base, State.visit);
         },
         .RGI_Emoji_Flag_Sequence => {
-            var cr = try unicodeProp1(allocator, Prop.RGI_Emoji_Flag_Sequence);
-            defer cr.deinit();
-            cr.normalize();
-
-            var seq: [sequence_max_len]u21 = undefined;
-            var range_index: usize = 0;
-            while (range_index < cr.rangeCount()) : (range_index += 1) {
-                const range = cr.rangeAt(range_index);
-                var c = range.lo;
-                while (c < range.hi) : (c += 1) {
-                    const c0 = c / 26;
-                    const c1 = c % 26;
-                    seq[0] = @intCast(0x1f1e6 + c0);
-                    seq[1] = @intCast(0x1f1e6 + c1);
-                    try callback(ctx, seq[0..2]);
+            const State = struct {
+                parent: *Context,
+                seq: [sequence_max_len]u21 = undefined,
+                fn visit(s: *@This(), c: u21) UnicodeError!void {
+                    const c0 = c / regional_indicator_count;
+                    const c1 = c % regional_indicator_count;
+                    s.seq[0] = regional_indicator_base + c0;
+                    s.seq[1] = regional_indicator_base + c1;
+                    try callback(s.parent, s.seq[0..2]);
                 }
-            }
+            };
+            var state = State{ .parent = ctx };
+            try forEachPropCodePoint(allocator, State, &state, .RGI_Emoji_Flag_Sequence, State.visit);
         },
         .RGI_Emoji_ZWJ_Sequence => try emitZwjSequences(Context, ctx, callback),
         .RGI_Emoji_Tag_Sequence => {
@@ -2922,21 +2562,17 @@ fn emitPropertySequences(
     comptime suffix: []const u21,
     comptime callback: fn (*Context, []const u21) std.mem.Allocator.Error!void,
 ) UnicodeError!void {
-    var cr = try unicodeProp1(allocator, prop);
-    defer cr.deinit();
-    cr.normalize();
-
-    var seq: [sequence_max_len]u21 = undefined;
-    var range_index: usize = 0;
-    while (range_index < cr.rangeCount()) : (range_index += 1) {
-        const range = cr.rangeAt(range_index);
-        var c = range.lo;
-        while (c < range.hi) : (c += 1) {
-            seq[0] = @intCast(c);
-            inline for (suffix, 0..) |cp, i| seq[i + 1] = cp;
-            try callback(ctx, seq[0 .. suffix.len + 1]);
+    const State = struct {
+        parent: *Context,
+        seq: [sequence_max_len]u21 = undefined,
+        fn visit(s: *@This(), c: u21) UnicodeError!void {
+            s.seq[0] = c;
+            inline for (suffix, 0..) |cp, i| s.seq[i + 1] = cp;
+            try callback(s.parent, s.seq[0 .. suffix.len + 1]);
         }
-    }
+    };
+    var state = State{ .parent = ctx };
+    try forEachPropCodePoint(allocator, State, &state, prop, State.visit);
 }
 
 fn emitZwjSequences(
@@ -2969,7 +2605,7 @@ fn emitZwjSequences(
             else
                 0x1f000 + (@as(u21, code) - 0x1000);
 
-            if (c == 0x1f9b0) hc_pos = k;
+            if (c == hair_component_base) hc_pos = k;
             std.debug.assert(k < seq.len);
             seq[k] = c;
             k += 1;
@@ -2996,27 +2632,27 @@ fn emitZwjSequences(
         }
 
         const n_mod: usize = switch (mod) {
-            1 => 5,
-            2 => 25,
-            3 => 20,
+            1 => emoji_modifier_count,
+            2 => emoji_modifier_pair_count,
+            3 => emoji_modifier_distinct_pair_count,
             else => 1,
         };
-        const n_hc: usize = if (hc_pos != null) 4 else 1;
+        const n_hc: usize = if (hc_pos != null) hair_component_count else 1;
 
         var hc_idx: usize = 0;
         while (hc_idx < n_hc) : (hc_idx += 1) {
             var mod_idx: usize = 0;
             while (mod_idx < n_mod) : (mod_idx += 1) {
-                if (hc_pos) |pos| seq[pos] = 0x1f9b0 + @as(u21, @intCast(hc_idx));
+                if (hc_pos) |pos| seq[pos] = hair_component_base + @as(u21, @intCast(hc_idx));
 
                 switch (mod) {
-                    1 => seq[mod_pos[0]] = 0x1f3fb + @as(u21, @intCast(mod_idx)),
+                    1 => seq[mod_pos[0]] = emoji_modifier_base + @as(u21, @intCast(mod_idx)),
                     2, 3 => {
-                        var skin0 = mod_idx / 5;
-                        const skin1 = mod_idx % 5;
+                        var skin0 = mod_idx / emoji_modifier_count;
+                        const skin1 = mod_idx % emoji_modifier_count;
                         if (mod == 3 and skin0 >= skin1) skin0 += 1;
-                        seq[mod_pos[0]] = 0x1f3fb + @as(u21, @intCast(skin0));
-                        seq[mod_pos[1]] = 0x1f3fb + @as(u21, @intCast(skin1));
+                        seq[mod_pos[0]] = emoji_modifier_base + @as(u21, @intCast(skin0));
+                        seq[mod_pos[1]] = emoji_modifier_base + @as(u21, @intCast(skin1));
                     },
                     else => {},
                 }
@@ -3024,6 +2660,32 @@ fn emitZwjSequences(
             }
         }
     }
+}
+
+test "unicode sequence properties emit flag, modifier, and keycap runs" {
+    const Sink = struct {
+        flag: bool = false,
+        modifier: bool = false,
+        keycap: bool = false,
+        heart: bool = false,
+
+        fn onSeq(self: *@This(), seq: []const u21) std.mem.Allocator.Error!void {
+            if (seq.len == 2 and seq[0] == 0x1f1fa and seq[1] == 0x1f1f8) self.flag = true;
+            if (seq.len == 2 and seq[0] == 0x1f468 and seq[1] == emoji_modifier_base) self.modifier = true;
+            if (seq.len == 3 and seq[0] == '#' and seq[1] == 0xfe0f and seq[2] == 0x20e3) self.keycap = true;
+            if (seq.len >= 1 and seq[0] == 0x2764) self.heart = true;
+        }
+    };
+    var sink = Sink{};
+    try std.testing.expect(try addSequenceProperty(std.testing.allocator, Sink, &sink, "RGI_Emoji_Flag_Sequence", Sink.onSeq));
+    try std.testing.expect(try addSequenceProperty(std.testing.allocator, Sink, &sink, "RGI_Emoji_Modifier_Sequence", Sink.onSeq));
+    try std.testing.expect(try addSequenceProperty(std.testing.allocator, Sink, &sink, "Emoji_Keycap_Sequence", Sink.onSeq));
+    try std.testing.expect(try addSequenceProperty(std.testing.allocator, Sink, &sink, "Basic_Emoji", Sink.onSeq));
+    try std.testing.expect(sink.flag);
+    try std.testing.expect(sink.modifier);
+    try std.testing.expect(sink.keycap);
+    try std.testing.expect(sink.heart);
+    try std.testing.expect(!try addSequenceProperty(std.testing.allocator, Sink, &sink, "Not_A_Sequence", Sink.onSeq));
 }
 
 test "unicode functionality" {
@@ -3085,40 +2747,42 @@ test "unicode functionality" {
     try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "InCB", false));
 }
 
-test "regexp unicode shortcut matches range builder boundaries" {
-    const expressions = [_][]const u8{
-        "ASCII",
-        "Any",
-        "Assigned",
-        "Math",
-        "Lowercase",
-        "Uppercase",
-        "Cased",
-        "Alphabetic",
-        "Grapheme_Base",
-        "Grapheme_Extend",
-        "ID_Start",
-        "ID_Continue",
-        "XID_Start",
-        "XID_Continue",
-        "Changes_When_Uppercased",
-        "Changes_When_Lowercased",
-        "Changes_When_Casemapped",
-        "Changes_When_Titlecased",
-        "Changes_When_Casefolded",
-        "Changes_When_NFKC_Casefolded",
-        "gc=Lu",
-        "General_Category=L",
-        "Script=Greek",
-        "Script_Extensions=Greek",
-        "Script=Unknown",
-        "Script_Extensions=Unknown",
-        "Script_Extensions=Inherited",
+test "regexp unicode property ranges keep alias and sentinel coverage" {
+    const cases = [_]struct { expr: []const u8, point: u21, hit: bool }{
+        .{ .expr = "Script=Unknown", .point = 0x038b, .hit = true },
+        .{ .expr = "Script=Zzzz", .point = 0x038b, .hit = true },
+        .{ .expr = "sc=Unknown", .point = 0x038b, .hit = true },
+        .{ .expr = "sc=Zzzz", .point = 0x038b, .hit = true },
+        .{ .expr = "Script_Extensions=Unknown", .point = 0x038b, .hit = true },
+        .{ .expr = "Script_Extensions=Zzzz", .point = 0x038b, .hit = true },
+        .{ .expr = "scx=Unknown", .point = 0x038b, .hit = true },
+        .{ .expr = "scx=Zzzz", .point = 0x038b, .hit = true },
+        .{ .expr = "Script=Unknown", .point = 0x0e01f0, .hit = true },
+        .{ .expr = "Script=Unknown", .point = 0x10ffff, .hit = true },
+        .{ .expr = "Script_Extensions=Unknown", .point = 0x0e01f0, .hit = true },
+        .{ .expr = "Script_Extensions=Unknown", .point = 0x10ffff, .hit = true },
+        .{ .expr = "Script=Unknown", .point = 0x03c0, .hit = false },
+        .{ .expr = "Script_Extensions=Unknown", .point = 0x03c0, .hit = false },
+        .{ .expr = "Script=Greek", .point = 0x03c0, .hit = true },
+        .{ .expr = "Script_Extensions=Greek", .point = 0x03c0, .hit = true },
+        .{ .expr = "Script=Inherited", .point = 0x0300, .hit = true },
+        .{ .expr = "Script_Extensions=Inherited", .point = 0x0300, .hit = false },
+        .{ .expr = "ID_Start", .point = 'A', .hit = true },
+        .{ .expr = "ID_Start", .point = 0x2e2f, .hit = false },
+        .{ .expr = "ID_Continue", .point = '_', .hit = true },
+        .{ .expr = "ID_Continue", .point = 0x2e2f, .hit = false },
+        .{ .expr = "Lowercase", .point = 'a', .hit = true },
+        .{ .expr = "Math", .point = '+', .hit = true },
     };
-
-    for (expressions) |expr| {
-        try expectRegexpShortcutMatchesRangeBuilder(expr);
+    for (cases) |case| {
+        var ranges = try propertyRangePoints(std.testing.allocator, case.expr, false);
+        defer ranges.deinit();
+        try std.testing.expectEqual(case.hit, pointsContain(ranges.items(), case.point));
     }
+
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "Greek", false));
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "Grek", false));
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "Script=", false));
 }
 
 test "unicode surrogate range helpers cover boundaries" {
@@ -3399,38 +3063,4 @@ fn pointsContain(points: []const u32, code_point: u21) bool {
         if (code_point >= points[i] and code_point < points[i + 1]) return true;
     }
     return false;
-}
-
-fn expectRegexpShortcutMatchesRangeBuilder(expr: []const u8) !void {
-    var ranges = try propertyRangePoints(std.testing.allocator, expr, false);
-    defer ranges.deinit();
-    const points = ranges.items();
-
-    try expectRegexpShortcutPointMatchesRanges(expr, points, 0);
-    try expectRegexpShortcutPointMatchesRanges(expr, points, 0x2e2f);
-    try expectRegexpShortcutPointMatchesRanges(expr, points, max_code_point);
-
-    var i: usize = 0;
-    while (i + 1 < points.len) : (i += 2) {
-        const lo = points[i];
-        const hi = points[i + 1];
-        if (lo > 0 and lo <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(lo - 1));
-        if (lo <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(lo));
-        if (hi > 0 and hi - 1 <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(hi - 1));
-        if (hi <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(hi));
-    }
-}
-
-fn expectRegexpShortcutPointMatchesRanges(expr: []const u8, points: []const u32, code_point: u21) !void {
-    const actual = isUnicodePropertyMatches(code_point, expr);
-    const expected = pointsContain(points, code_point);
-    if (actual != expected) {
-        std.debug.print("regexp unicode shortcut mismatch expr={s} code_point=0x{x} actual={} expected={}\n", .{
-            expr,
-            code_point,
-            actual,
-            expected,
-        });
-        return error.TestUnexpectedResult;
-    }
 }

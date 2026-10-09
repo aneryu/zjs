@@ -95,8 +95,10 @@ pub const ShapeTraceListState = extern struct {
 
     const is_hashed_mask: usize = 1;
 
-    pub inline fn init(is_hashed: bool) @This() {
-        return .{ .tagged_previous = @intFromBool(is_hashed) };
+    pub const Membership = enum { hashed, unhashed };
+
+    pub inline fn init(membership: Membership) @This() {
+        return .{ .tagged_previous = @intFromBool(membership == .hashed) };
     }
 
     pub inline fn previous(self: *const @This()) ?*gc.Header {
@@ -127,18 +129,6 @@ pub const ShapeTraceListState = extern struct {
 pub const ShapeColdState = extern struct {
     deleted_prop_count: u32 = 0,
 };
-
-inline fn initialOwnership() ShapeOwnership {
-    return .{};
-}
-
-inline fn initialTraceListState(is_hashed: bool) ShapeTraceListState {
-    return .init(is_hashed);
-}
-
-inline fn initialColdState(deleted_prop_count: u32) ShapeColdState {
-    return .{ .deleted_prop_count = deleted_prop_count };
-}
 
 pub const Shape = extern struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.shape);
@@ -189,7 +179,7 @@ pub const Shape = extern struct {
     /// Compact trace replaces the common backlink with this Shape-owned slot;
     /// its free low bit carries the cold hash-membership flag. RC builds use
     /// the header backlink and pay zero bytes here.
-    trace_list_previous: ShapeTraceListState = initialTraceListState(false),
+    trace_list_previous: ShapeTraceListState = .init(.unhashed),
     ownership: ShapeOwnership = .{},
     hash: u32 = 0,
     prop_hash_mask: u32 = no_property_hash,
@@ -325,13 +315,6 @@ pub const Shape = extern struct {
             if (property.Flags.fromBits(prop.flags).deleted) continue;
             try gc_visit.atom(visitor, prop.atom_id);
         }
-    }
-
-    pub inline fn traceChildEdgesNoFail(self: *Shape, rt: *JSRuntime, visitor: anytype) void {
-        // Only the cycle collector's MarkVisitor instantiates this wrapper;
-        // its visit methods return void. Allocation-bearing graph visitors use
-        // traceChildEdgesFallible directly, so this instantiation cannot fail.
-        self.traceChildEdgesFallible(rt, visitor) catch unreachable;
     }
 };
 
@@ -478,20 +461,18 @@ pub const Registry = struct {
         // qjs js_new_shape_nohash only zeros the hash table. Unused prop
         // slots are written on append; walking uses prop_count.
         @memset(shape.hashBuckets(), no_property_index);
-        try self.link(shape, true);
+        try self.link(shape, .hashed);
         errdefer self.unlink(shape);
         if (publication == .published) self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
         return shape;
     }
 
     /// Inline transition-cache probe + commit for the named-property append hot
-    /// path. Mirrors the qjs `add_property` cache-hit leg:
-    /// `find_hashed_shape_prop` hit -> `js_dup_shape(new_sh)` -> shape swap ->
-    /// `js_free_shape(sh)` all run inside the single add_property frame — no
-    /// per-property call boundary on a hit (only the parent's rc==0 teardown
-    /// leaves via the outlined destroyShape). Returns false on a miss with the
-    /// shape untouched; the caller falls to `transitionPropertyUncached` for
-    /// the shared-clone / unshared in-place legs.
+    /// path (qjs `add_property` cache-hit leg). A hit marks the cached shape
+    /// shared, swaps `shape_ptr`, and drops the parent in this frame. Only an
+    /// unshared parent is destroyed, through `destroyShape`. Returns false on
+    /// a miss with the shape untouched; the caller falls to
+    /// `transitionPropertyUncached` for the shared-clone / unshared in-place legs.
     pub inline fn tryCachedTransition(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) bool {
         const parent = shape_ptr.*;
         const cached = self.findHashedShapeProperty(parent, atom_id, flags, property_capacity) orelse return false;
@@ -528,7 +509,7 @@ pub const Registry = struct {
             // truth here, and it always covers the child's own props array
             // because the caller grew it to at least `prop_count + 1`.
             std.debug.assert(property_capacity >= parent.prop_count + 1);
-            var child = try self.cloneShape(rt, parent, parent.proto, property_capacity, true);
+            var child = try self.cloneShape(rt, parent, parent.proto, property_capacity, .hashed);
             // appendProperty may relocate `child` (inline FAM grow moves the
             // shape); thread &child so the fresh pointer flows back before hash.
             try self.appendProperty(rt, &child, atom_id, flags);
@@ -580,7 +561,7 @@ pub const Registry = struct {
     }
 
     pub fn cloneForMutation(self: *Registry, rt: *JSRuntime, source: *Shape) !*Shape {
-        const clone = try self.cloneShape(rt, source, source.proto, source.prop_size, false);
+        const clone = try self.cloneShape(rt, source, source.proto, source.prop_size, .unhashed);
         return clone;
     }
 
@@ -659,13 +640,13 @@ pub const Registry = struct {
 
         new_shape.* = .{
             .header = .{},
-            .trace_list_previous = initialTraceListState(old.isHashed()),
-            .ownership = initialOwnership(),
+            .trace_list_previous = .init(if (old.isHashed()) .hashed else .unhashed),
+            .ownership = .{},
             .hash = old.hash,
             .prop_hash_mask = if (new_bucket_count == 0) no_property_hash else @as(u32, @intCast(new_bucket_count - 1)),
             .prop_size = new_prop_size,
             .prop_count = old_prop_count,
-            .cold_state = initialColdState(old.deletedPropCount()),
+            .cold_state = .{ .deleted_prop_count = old.deletedPropCount() },
             .registry_hash_next = null, // re-established by insertShapeHash below
             .proto = old.proto, // proto ref MOVES to the new shape (old freed w/o proto cleanup)
             // PERF-SHAPE-ID: grow-relocation keeps the SAME logical layout at
@@ -686,13 +667,7 @@ pub const Registry = struct {
             if (new_buckets.len != 0) @memcpy(new_buckets, old.hashBuckets());
         } else {
             if (new_buckets.len != 0) @memset(new_buckets, no_property_index);
-            if (new_shape.hasPropertyHash()) {
-                for (new_props[0..old_prop_count], 0..) |*prop, index| {
-                    prop.hash_next = no_property_index;
-                    if (prop.atom_id == atom.null_atom) continue;
-                    self.linkPropertyHash(new_shape, index);
-                }
-            }
+            self.relinkAllPropertyHashes(new_shape);
         }
 
         // Splice the new block into the registries in the old shape's place.
@@ -821,13 +796,13 @@ pub const Registry = struct {
 
         new_shape.* = .{
             .header = .{},
-            .trace_list_previous = initialTraceListState(false),
-            .ownership = initialOwnership(),
+            .trace_list_previous = .init(.unhashed),
+            .ownership = .{},
             .hash = old.hash,
             .prop_hash_mask = @intCast(new_bucket_count - 1),
             .prop_size = new_prop_size,
             .prop_count = live_count,
-            .cold_state = initialColdState(0),
+            .cold_state = .{ .deleted_prop_count = 0 },
             .registry_hash_next = null,
             .proto = old.proto,
             // PERF-SHAPE-ID: compaction renumbers every slot -- a NEW layout,
@@ -903,42 +878,28 @@ pub const Registry = struct {
             target_capacity,
         );
 
-        // Build a fresh shape block holding the baseline layout (dup'd atoms);
-        // the inline FAM forces an allocate-new + swap rather than an in-place
-        // storage replacement.
+        // Fresh block for the baseline layout. Property atoms are noted into
+        // the new holder, not duplicated. The inline FAM cannot be resized
+        // in place, so this allocates and swaps.
         const fam_bytes = famRegionBytes(target_capacity, bucket_count);
         const new_shape = try rt.gc.createWithFam(Shape, fam_bytes);
         errdefer rt.gc.destroyWithFam(Shape, new_shape, fam_bytes);
         new_shape.* = .{
             .header = .{},
-            .trace_list_previous = initialTraceListState(old.isHashed()),
-            .ownership = initialOwnership(),
+            .trace_list_previous = .init(if (old.isHashed()) .hashed else .unhashed),
+            .ownership = .{},
             .hash = baseline_hash,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
             .prop_size = @intCast(target_capacity),
             .prop_count = @intCast(baseline_props.len),
-            .cold_state = initialColdState(@intCast(baseline_deleted_count)),
+            .cold_state = .{ .deleted_prop_count = @intCast(baseline_deleted_count) },
             .registry_hash_next = null,
             .proto = old.proto, // proto ref moves to the new shape
             // PERF-SHAPE-ID: a restored baseline layout is a NEW layout.
             .identity = self.freshIdentity(),
         };
-        @memset(new_shape.props(), .{});
-        if (new_shape.hashBuckets().len != 0) @memset(new_shape.hashBuckets(), no_property_index);
-        for (baseline_props, 0..) |prop, index| {
-            new_shape.props()[index] = .{
-                .hash_next = no_property_index,
-                .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
-            };
-        }
-        if (new_shape.hasPropertyHash()) {
-            for (new_shape.props()[0..new_shape.prop_count], 0..) |*prop, index| {
-                prop.hash_next = no_property_index;
-                if (prop.atom_id == atom.null_atom) continue;
-                self.linkPropertyHash(new_shape, index);
-            }
-        }
+        self.initPropsFrom(new_shape, baseline_props);
+        self.relinkAllPropertyHashes(new_shape);
 
         // Swap registries old->new (no more fallible / GC-triggering ops below).
         // Same-value passthroughs: old_fam_bytes reads the untouched old
@@ -950,8 +911,8 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         if (new_shape.isHashed()) self.insertShapeHash(new_shape);
 
-        // Discard the OLD layout's block. Its property atoms need no teardown:
-        // the atom table is not refcounted from shapes any more.
+        // Discard the old block. Shape property atoms are not refcounted,
+        // so there is nothing to release.
         rt.gc.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
@@ -1006,14 +967,12 @@ pub const Registry = struct {
         return shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1;
     }
 
-    /// A holder drops its shape. An UNSHARED shape has exactly one holder
-    /// (every second adoption goes through `markShared`), so the drop may free
-    /// it at once -- qjs `js_free_shape` on `--ref_count == 0`, and the only
-    /// way an unpublished `*Reserved` shape (on no GC list) ever gets freed.
-    /// A shared shape is tracer-owned garbage-or-not: leave it to the sweep.
-    /// Skips mirror the old release guards: during `gc.deinit` the teardown
-    /// pass owns every shape, and a condemned shape is freed
-    /// by the morgue's shape pass after all its objects.
+    /// A holder drops its shape. An unshared shape has exactly one holder
+    /// (every second adoption goes through `markShared`), so the drop frees
+    /// it at once. That is also the only way an unpublished reserved shape
+    /// (on no GC list) is freed. A shared shape stays for the sweep.
+    /// During `gc.deinit` the teardown pass owns every shape, and a
+    /// condemned shape is freed by the morgue's shape pass after its objects.
     ///
     /// TGC S4-h: the condemnation test is the reserved mark epoch, which is
     /// what a list carrier's `mark_epoch` field carries once the sweep has
@@ -1052,7 +1011,7 @@ pub const Registry = struct {
         source: *Shape,
         proto: ?*Object,
         needed: usize,
-        hashed: bool,
+        comptime membership: ShapeTraceListState.Membership,
     ) !*Shape {
         const capacity: u32 = @intCast(@max(initial_prop_size, needed));
         // qjs js_clone_shape copies hash_size = prop_hash_mask+1 verbatim because
@@ -1074,28 +1033,14 @@ pub const Registry = struct {
             .header = .{},
             .hash = source.hash,
             .prop_count = source.prop_count,
-            .cold_state = initialColdState(source.deletedPropCount()),
+            .cold_state = .{ .deleted_prop_count = source.deletedPropCount() },
             .proto = proto,
             .prop_size = capacity,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
         };
-        @memset(shape.props(), .{});
-        if (shape.hashBuckets().len != 0) @memset(shape.hashBuckets(), no_property_index);
-        for (source.props()[0..source.prop_count], 0..) |prop, index| {
-            shape.props()[index] = .{
-                .hash_next = no_property_index,
-                .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
-            };
-        }
-        if (shape.hasPropertyHash()) {
-            for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
-                prop.hash_next = no_property_index;
-                if (prop.atom_id == atom.null_atom) continue;
-                self.linkPropertyHash(shape, index);
-            }
-        }
-        try self.link(shape, hashed);
+        self.initPropsFrom(shape, source.props()[0..source.prop_count]);
+        self.relinkAllPropertyHashes(shape);
+        try self.link(shape, membership);
         errdefer self.unlink(shape);
         // Same-value passthrough: fam_bytes derives from the capacity fields
         // stored above, so this equals allocationSize() bit-for-bit.
@@ -1136,6 +1081,27 @@ pub const Registry = struct {
         try self.relocateShape(rt, shape_ptr, shape_ptr.*.prop_size, bucket_count);
     }
 
+    fn initPropsFrom(self: *Registry, shape: *Shape, source: []const Property) void {
+        @memset(shape.props(), .{});
+        if (shape.hashBuckets().len != 0) @memset(shape.hashBuckets(), no_property_index);
+        for (source, 0..) |prop, index| {
+            shape.props()[index] = .{
+                .hash_next = no_property_index,
+                .flags = prop.flags,
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
+            };
+        }
+    }
+
+    fn relinkAllPropertyHashes(self: *Registry, shape: *Shape) void {
+        if (!shape.hasPropertyHash()) return;
+        for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
+            prop.hash_next = no_property_index;
+            if (prop.atom_id == atom.null_atom) continue;
+            self.linkPropertyHash(shape, index);
+        }
+    }
+
     fn linkPropertyHash(self: *Registry, shape: *Shape, index: usize) void {
         _ = self;
         std.debug.assert(shape.hasPropertyHash());
@@ -1155,23 +1121,22 @@ pub const Registry = struct {
         return id;
     }
 
-    inline fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
-        // PERF-SHAPE-ID: every construction that links (createShape* /
-        // createShapeWithPropertyCapacity* / cloneShape) is a new layout.
+    inline fn link(self: *Registry, shape: *Shape, comptime membership: ShapeTraceListState.Membership) !void {
+        // PERF-SHAPE-ID: every construction that links (createShapeImpl /
+        // cloneShape) is a new layout.
         shape.identity = self.freshIdentity();
         // Shapes are tracked solely through the GC object list (added by the
-        // caller via `gc_registry.addInitializedWithSize`), exactly like qjs `add_gc_object`.
+        // caller via `gc_registry.addInitializedShape`), exactly like qjs `add_gc_object`.
         // The only per-shape bookkeeping here is hash-table insertion.
         //
         // Inline: qjs pays this boundary as straight-line code inside
         // js_new_shape2 — an inline resize check plus
-        // js_shape_hash_link's three stores. With three
-        // call sites (createShape / createShapeWithPropertyCapacity /
-        // cloneShape) LLVM outlined the whole body, adding a bl + full
-        // prologue/epilogue to every shape creation. The grow path stays
-        // outlined (noinline ensureShapeHashCapacity); the hot leg is the
-        // capacity compare + bucket splice + count bump.
-        if (hashed) {
+        // js_shape_hash_link's three stores. With two call sites
+        // (createShapeImpl / cloneShape) LLVM outlined the whole body, adding
+        // a bl + full prologue/epilogue to every shape creation. The grow
+        // path stays outlined (noinline ensureShapeHashCapacity); the hot leg
+        // is the capacity compare + bucket splice + count bump.
+        if (membership == .hashed) {
             const buckets_len = self.shape_hash_buckets.len;
             if (buckets_len == 0 or 2 * (self.shape_hash_count + 1) > buckets_len) {
                 @branchHint(.unlikely);

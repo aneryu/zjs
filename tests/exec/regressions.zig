@@ -3124,7 +3124,7 @@ test "an interrupt raised inside an iterator's return() during a throw is not sw
         const global = try engine.exec.zjs_vm.contextGlobal(js.context);
         const run = try global.getProperty(try js.runtime.internAtom("run"));
         var state = InterruptTestState{ .stop = true };
-        js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+        js.runtime.setInterruptHandler(InterruptTestState.poll, &state);
         defer js.runtime.setInterruptHandler(null, null);
         try std.testing.expectError(error.Interrupted, engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), run, &.{}, null, null));
         try std.testing.expect(js.context.exceptionIsUncatchable());

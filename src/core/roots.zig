@@ -910,35 +910,27 @@ pub const ValueRootFrame = struct {
     }
 };
 
-/// A `ValueRootFrame` plus the storage it points at, held in one local.
+/// Scalar root scope over `*Slot` locals. `field` is the `ValueRootFrame`
+/// slice those pointers are published through (`"values"` or `"objects"`).
 ///
-/// The manual spelling of this — declare a `[_]*JSValue` array, declare
-/// a frame whose `.values` points at it, activate, defer deactivate — was
-/// written out at every rooting site in the tree. `rootValues` collapses the
-/// declarations, leaving the two operations that carry meaning:
-///
-///     var roots = core.runtime.rootValues(.{ &receiver, &argument });
-///     roots.activate(rt);
-///     defer roots.deactivate(rt);
-///
-/// Activation stays a separate step on purpose. The frame links itself into
-/// the runtime BY ADDRESS, so it must be linked once it sits in its final
-/// stack slot — not in the temporary a returning constructor builds it in.
-pub fn ValueRootScope(comptime count: usize) type {
+/// Activation stays a separate step. The frame links itself into the runtime
+/// by address, so it must be linked once it sits in its final stack slot —
+/// not in the temporary a returning constructor builds it in.
+fn ScalarRootScope(comptime Slot: type, comptime field: []const u8, comptime count: usize) type {
     return struct {
         const Self = @This();
 
-        storage: if (value_root_scalar_scopes_enabled) [count]*JSValue else void =
+        storage: if (value_root_scalar_scopes_enabled) [count]*Slot else void =
             if (value_root_scalar_scopes_enabled) undefined else {},
         frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
             if (value_root_scalar_scopes_enabled) .{} else {},
 
         /// Point the frame at this scope's own storage, then link it. The
-        /// slice is taken here rather than in `rootValues` for the same
-        /// reason the link is: `storage` only has its final address now.
+        /// slice is taken here rather than in the builder: `storage` only
+        /// has its final address now.
         pub inline fn activate(self: *Self, rt: *JSRuntime) void {
             if (comptime value_root_scalar_scopes_enabled) {
-                self.frame.values = &self.storage;
+                @field(self.frame, field) = &self.storage;
                 self.frame.activate(rt);
             }
         }
@@ -949,49 +941,41 @@ pub fn ValueRootScope(comptime count: usize) type {
     };
 }
 
-/// Build an inactive `ValueRootScope` over `slots`, a tuple of `*JSValue`.
-/// The caller activates it; see `ValueRootScope`.
-pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
-    if (comptime value_root_scalar_scopes_enabled) {
-        var scope: ValueRootScope(slots.len) = .{};
-        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
-        return scope;
-    }
-    return .{};
+/// A `ValueRootFrame` plus the storage it points at, held in one local.
+/// `rootValues` collapses the manual array-plus-frame spelling, leaving the
+/// two operations that carry meaning:
+///
+///     var roots = core.runtime.rootValues(.{ &receiver, &argument });
+///     roots.activate(rt);
+///     defer roots.deactivate(rt);
+pub fn ValueRootScope(comptime count: usize) type {
+    return ScalarRootScope(JSValue, "values", count);
 }
 
 /// A `ValueRootFrame` over `*?*Object` slots, same activate discipline as
 /// `rootValues`. Tracing does not treat a Zig `*Object` local as a root
 /// unless it is named here.
 pub fn ObjectRootScope(comptime count: usize) type {
-    return struct {
-        const Self = @This();
-
-        storage: if (value_root_scalar_scopes_enabled) [count]*?*Object else void =
-            if (value_root_scalar_scopes_enabled) undefined else {},
-        frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
-            if (value_root_scalar_scopes_enabled) .{} else {},
-
-        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
-            if (comptime value_root_scalar_scopes_enabled) {
-                self.frame.objects = &self.storage;
-                self.frame.activate(rt);
-            }
-        }
-
-        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
-            if (comptime value_root_scalar_scopes_enabled) self.frame.deactivate(rt);
-        }
-    };
+    return ScalarRootScope(?*Object, "objects", count);
 }
 
-pub inline fn rootObjects(slots: anytype) ObjectRootScope(slots.len) {
+inline fn rootScalarSlots(slots: anytype, comptime Scope: type) Scope {
     if (comptime value_root_scalar_scopes_enabled) {
-        var scope: ObjectRootScope(slots.len) = .{};
+        var scope: Scope = .{};
         inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
         return scope;
     }
     return .{};
+}
+
+/// Build an inactive `ValueRootScope` over `slots`, a tuple of `*JSValue`.
+/// The caller activates it; see `ValueRootScope`.
+pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
+    return rootScalarSlots(slots, ValueRootScope(slots.len));
+}
+
+pub inline fn rootObjects(slots: anytype) ObjectRootScope(slots.len) {
+    return rootScalarSlots(slots, ObjectRootScope(slots.len));
 }
 
 comptime {

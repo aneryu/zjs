@@ -4,6 +4,7 @@ const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
 const helpers = @import("../harness.zig");
+const BareRuntime = @import("../harness/bare_runtime.zig").BareRuntime;
 const vm_helpers = helpers.vm_helpers;
 const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
@@ -13,6 +14,7 @@ const object_ops = zjs.exec.object_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
 const common = @import("common.zig");
+const getGlobalObject = common.getGlobalObject;
 const makeFixture = common.makeFixture;
 const runFixture = common.runFixture;
 const CrossRealmNativeProbe = common.CrossRealmNativeProbe;
@@ -1436,13 +1438,11 @@ test "function expressions execute wide closure operands past 255 constants" {
 }
 
 test "call subsystem installs and invokes host globals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
     var wrapper = zjs.borrowContext(ctx);
     try zjs.test262_host.installTest262Globals(rt, &wrapper, global);
 
@@ -1462,10 +1462,8 @@ test "call subsystem installs and invokes host globals" {
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("1 true\n", stream.buffered());
 
-    const console_key = try rt.internAtom("console");
     const log_key = try rt.internAtom("log");
-    const console_value = try global.getProperty(console_key);
-    const console_object = core.Object.fromHeader(console_value.refHeader().?);
+    const console_object = try getGlobalObject(rt, global, "console");
     const log = try console_object.getProperty(log_key);
     const log_object = core.Object.fromHeader(log.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.output, log_object.hostFunctionKindSlot().*);
@@ -1520,28 +1518,20 @@ test "call subsystem installs and invokes host globals" {
 }
 
 test "native builtin record dispatch is independent from dispatch-name strings" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
-
-    const math_key = try rt.internAtom("Math");
-    const abs_key = try rt.internAtom("abs");
-    const math_value = try global.getProperty(math_key);
-    const math_object = core.Object.fromHeader(math_value.refHeader().?);
-    const abs_value = try math_object.getProperty(abs_key);
-    const abs_object = core.Object.fromHeader(abs_value.refHeader().?);
+    const math_object = try getGlobalObject(rt, global, "Math");
+    const abs_object = try getGlobalObject(rt, math_object, "abs");
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
     const abs_record = abs_object.nativeEntry() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.native_entry.Kind.leaf, abs_record.kind);
     try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_to_f64, abs_record.sig);
 
-    const atan2_key = try rt.internAtom("atan2");
-    const atan2_value = try math_object.getProperty(atan2_key);
-    const atan2_object = core.Object.fromHeader(atan2_value.refHeader().?);
+    const atan2_object = try getGlobalObject(rt, math_object, "atan2");
     const atan2_record = atan2_object.nativeEntry() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.native_entry.Kind.leaf, atan2_record.kind);
     try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_f64_to_f64, atan2_record.sig);
@@ -1570,14 +1560,11 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("8\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("8\n", vm_result.output);
 }
 
 test "bytecode calls execute directly from the shared function bytecode" {
@@ -3205,23 +3192,17 @@ test "Iterator.from follows QuickJS wrapper selection" {
 }
 
 test "number native builtin records cover static and prototype dispatch" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
-    const number_key = try rt.internAtom("Number");
-    const is_integer_key = try rt.internAtom("isInteger");
     const prototype_key = core.atom.ids.prototype;
-    const to_fixed_key = try rt.internAtom("toFixed");
 
-    const number_value = try global.getProperty(number_key);
-    const number_object = core.Object.fromHeader(number_value.refHeader().?);
+    const number_object = try getGlobalObject(rt, global, "Number");
 
-    const is_integer_value = try number_object.getProperty(is_integer_key);
-    const is_integer_object = core.Object.fromHeader(is_integer_value.refHeader().?);
+    const is_integer_object = try getGlobalObject(rt, number_object, "isInteger");
     try std.testing.expect(is_integer_object.nativeFunctionIdSlot().* != 0);
 
     const fake_static = try engine.core.function.nativeFunction(ctx, "notNumberIsInteger", 1);
@@ -3236,8 +3217,7 @@ test "number native builtin records cover static and prototype dispatch" {
 
     const prototype_value = try number_object.getProperty(prototype_key);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
-    const to_fixed_value = try prototype_object.getProperty(to_fixed_key);
-    const to_fixed_object = core.Object.fromHeader(to_fixed_value.refHeader().?);
+    const to_fixed_object = try getGlobalObject(rt, prototype_object, "toFixed");
     try std.testing.expect(to_fixed_object.nativeFunctionIdSlot().* != 0);
 
     const fake_proto = try engine.core.function.nativeFunction(ctx, "notNumberToFixed", 1);
@@ -3258,30 +3238,24 @@ test "number native builtin records cover static and prototype dispatch" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("false\n1.25\n", vm_result.output);
 }
 
 test "string static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const string_key = try rt.internAtom("String");
-    const from_code_point_key = try rt.internAtom("fromCodePoint");
     const string_value = try global.getProperty(string_key);
     const string_object = core.Object.fromHeader(string_value.refHeader().?);
-    const from_code_point_value = try string_object.getProperty(from_code_point_key);
-    const from_code_point_object = core.Object.fromHeader(from_code_point_value.refHeader().?);
+    const from_code_point_object = try getGlobalObject(rt, string_object, "fromCodePoint");
     try std.testing.expect(from_code_point_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notStringFromCodePoint", 1);
@@ -3301,32 +3275,26 @@ test "string static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("B\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("B\n", vm_result.output);
 }
 
 test "string prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const string_key = try rt.internAtom("String");
-    const index_of_key = try rt.internAtom("indexOf");
     const string_value = try global.getProperty(string_key);
     const string_object = core.Object.fromHeader(string_value.refHeader().?);
     const prototype_value = try string_object.getProperty(core.atom.ids.prototype);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
-    const index_of_value = try prototype_object.getProperty(index_of_key);
-    const index_of_object = core.Object.fromHeader(index_of_value.refHeader().?);
+    const index_of_object = try getGlobalObject(rt, prototype_object, "indexOf");
     try std.testing.expect(index_of_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notStringIndexOf", 1);
@@ -3347,14 +3315,11 @@ test "string prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("4\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("4\n", vm_result.output);
 }
 
 test "String case conversion records preserve coercion and Unicode semantics" {
@@ -3394,19 +3359,16 @@ test "String case conversion records preserve coercion and Unicode semantics" {
 }
 
 test "date static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const date_key = try rt.internAtom("Date");
-    const utc_key = try rt.internAtom("UTC");
     const date_value = try global.getProperty(date_key);
     const date_object = core.Object.fromHeader(date_value.refHeader().?);
-    const utc_value = try date_object.getProperty(utc_key);
-    const utc_object = core.Object.fromHeader(utc_value.refHeader().?);
+    const utc_object = try getGlobalObject(rt, date_object, "UTC");
     try std.testing.expect(utc_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notDateUTC", 7);
@@ -3425,23 +3387,19 @@ test "date static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("1704067200000\n", vm_result.output);
 }
 
 test "date constructor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
     ctx.global = global;
 
     const date_key = try rt.internAtom("Date");
@@ -3492,14 +3450,11 @@ test "date constructor native builtin records ignore dispatch names" {
         \\print(Reflect.construct(fakeDateConstructor, [3], Date).getTime());
     , .{ .mode = .script, .filename = "date-constructor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", vm_result.output);
 }
 
 test "AggregateError construct releases copied errors array owner" {
@@ -3631,21 +3586,18 @@ test "Proxy construct does not Get prototype for foreign newTarget or illegal ar
 }
 
 test "date prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const date_key = try rt.internAtom("Date");
-    const set_time_key = try rt.internAtom("setTime");
     const date_value = try global.getProperty(date_key);
     const date_object = core.Object.fromHeader(date_value.refHeader().?);
     const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
-    const set_time_value = try prototype_object.getProperty(set_time_key);
-    const set_time_object = core.Object.fromHeader(set_time_value.refHeader().?);
+    const set_time_object = try getGlobalObject(rt, prototype_object, "setTime");
     try std.testing.expect(set_time_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notDateSetTime", 1);
@@ -3665,34 +3617,26 @@ test "date prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", vm_result.output);
 }
 
 test "array static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const array_key = try rt.internAtom("Array");
-    const is_array_key = try rt.internAtom("isArray");
-    const from_key = try rt.internAtom("from");
     const array_value = try global.getProperty(array_key);
     const array_object = core.Object.fromHeader(array_value.refHeader().?);
-    const is_array_value = try array_object.getProperty(is_array_key);
-    const is_array_object = core.Object.fromHeader(is_array_value.refHeader().?);
+    const is_array_object = try getGlobalObject(rt, array_object, "isArray");
     try std.testing.expect(is_array_object.nativeFunctionIdSlot().* != 0);
-    const from_value = try array_object.getProperty(from_key);
-    const from_object = core.Object.fromHeader(from_value.refHeader().?);
+    const from_object = try getGlobalObject(rt, array_object, "from");
     try std.testing.expect(from_object.nativeFunctionIdSlot().* != 0);
 
     const fake_is_array = try engine.core.function.nativeFunction(ctx, "notArrayIsArray", 1);
@@ -3726,30 +3670,24 @@ test "array static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("true\n7,8\n", vm_result.output);
 }
 
 test "array prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const array_key = try rt.internAtom("Array");
     const prototype_key = try rt.internAtom("prototype");
     const to_string_key = try rt.internAtom("toString");
-    const join_key = try rt.internAtom("join");
     const map_key = try rt.internAtom("map");
-    const values_key = try rt.internAtom("values");
     const array_value = try global.getProperty(array_key);
     const array_object = core.Object.fromHeader(array_value.refHeader().?);
     const prototype_value = try array_object.getProperty(prototype_key);
@@ -3758,14 +3696,12 @@ test "array prototype native builtin records ignore dispatch names" {
     const to_string_value = try prototype_object.getProperty(to_string_key);
     const to_string_object = core.Object.fromHeader(to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
-    const join_value = try prototype_object.getProperty(join_key);
-    const join_object = core.Object.fromHeader(join_value.refHeader().?);
+    const join_object = try getGlobalObject(rt, prototype_object, "join");
     try std.testing.expect(join_object.nativeFunctionIdSlot().* != 0);
     const map_value = try prototype_object.getProperty(map_key);
     const map_object = core.Object.fromHeader(map_value.refHeader().?);
     try std.testing.expect(map_object.nativeFunctionIdSlot().* != 0);
-    const values_value = try prototype_object.getProperty(values_key);
-    const values_object = core.Object.fromHeader(values_value.refHeader().?);
+    const values_object = try getGlobalObject(rt, prototype_object, "values");
     try std.testing.expect(values_object.nativeFunctionIdSlot().* != 0);
 
     const fake_join = try engine.core.function.nativeFunction(ctx, "notArrayJoin", 1);
@@ -3806,56 +3742,42 @@ test "array prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("2,3\n9\n", vm_result.output);
 }
 
 test "collection native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const map_key = try rt.internAtom("Map");
     const set_key = try rt.internAtom("Set");
     const prototype_key = try rt.internAtom("prototype");
-    const group_by_key = try rt.internAtom("groupBy");
-    const map_set_key = try rt.internAtom("set");
-    const map_for_each_key = try rt.internAtom("forEach");
-    const set_union_key = try rt.internAtom("union");
-    const set_values_key = try rt.internAtom("values");
 
     const map_value = try global.getProperty(map_key);
     const map_object = core.Object.fromHeader(map_value.refHeader().?);
-    const group_by_value = try map_object.getProperty(group_by_key);
-    const group_by_object = core.Object.fromHeader(group_by_value.refHeader().?);
+    const group_by_object = try getGlobalObject(rt, map_object, "groupBy");
     try std.testing.expect(group_by_object.nativeFunctionIdSlot().* != 0);
     const map_prototype_value = try map_object.getProperty(prototype_key);
     const map_prototype_object = core.Object.fromHeader(map_prototype_value.refHeader().?);
-    const map_set_value = try map_prototype_object.getProperty(map_set_key);
-    const map_set_object = core.Object.fromHeader(map_set_value.refHeader().?);
+    const map_set_object = try getGlobalObject(rt, map_prototype_object, "set");
     try std.testing.expect(map_set_object.nativeFunctionIdSlot().* != 0);
-    const map_for_each_value = try map_prototype_object.getProperty(map_for_each_key);
-    const map_for_each_object = core.Object.fromHeader(map_for_each_value.refHeader().?);
+    const map_for_each_object = try getGlobalObject(rt, map_prototype_object, "forEach");
     try std.testing.expect(map_for_each_object.nativeFunctionIdSlot().* != 0);
 
     const set_value = try global.getProperty(set_key);
     const set_object = core.Object.fromHeader(set_value.refHeader().?);
     const set_prototype_value = try set_object.getProperty(prototype_key);
     const set_prototype_object = core.Object.fromHeader(set_prototype_value.refHeader().?);
-    const set_union_value = try set_prototype_object.getProperty(set_union_key);
-    const set_union_object = core.Object.fromHeader(set_union_value.refHeader().?);
+    const set_union_object = try getGlobalObject(rt, set_prototype_object, "union");
     try std.testing.expect(set_union_object.nativeFunctionIdSlot().* != 0);
-    const set_values_value = try set_prototype_object.getProperty(set_values_key);
-    const set_values_object = core.Object.fromHeader(set_values_value.refHeader().?);
+    const set_values_object = try getGlobalObject(rt, set_prototype_object, "values");
     try std.testing.expect(set_values_object.nativeFunctionIdSlot().* != 0);
 
     const fake_map_set = try engine.core.function.nativeFunction(ctx, "notMapSet", 2);
@@ -3899,38 +3821,26 @@ test "collection native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", vm_result.output);
 }
 
 test "buffer native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
-    const array_buffer_key = try rt.internAtom("ArrayBuffer");
-    const shared_array_buffer_key = try rt.internAtom("SharedArrayBuffer");
-    const data_view_key = try rt.internAtom("DataView");
     const prototype_key = try rt.internAtom("prototype");
-    const is_view_key = try rt.internAtom("isView");
     const slice_key = try rt.internAtom("slice");
     const byte_length_key = try rt.internAtom("byteLength");
-    const get_uint8_key = try rt.internAtom("getUint8");
-    const set_uint8_key = try rt.internAtom("setUint8");
 
-    const array_buffer_value = try global.getProperty(array_buffer_key);
-    const array_buffer_object = core.Object.fromHeader(array_buffer_value.refHeader().?);
-    const is_view_value = try array_buffer_object.getProperty(is_view_key);
-    const is_view_object = core.Object.fromHeader(is_view_value.refHeader().?);
+    const array_buffer_object = try getGlobalObject(rt, global, "ArrayBuffer");
+    const is_view_object = try getGlobalObject(rt, array_buffer_object, "isView");
     try std.testing.expect(is_view_object.nativeFunctionIdSlot().* != 0);
     const array_buffer_prototype_value = try array_buffer_object.getProperty(prototype_key);
     const array_buffer_prototype_object = core.Object.fromHeader(array_buffer_prototype_value.refHeader().?);
@@ -3941,23 +3851,19 @@ test "buffer native builtin records ignore dispatch names" {
     const array_buffer_byte_length_getter = core.Object.fromHeader(array_buffer_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(array_buffer_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
-    const shared_array_buffer_value = try global.getProperty(shared_array_buffer_key);
-    const shared_array_buffer_object = core.Object.fromHeader(shared_array_buffer_value.refHeader().?);
+    const shared_array_buffer_object = try getGlobalObject(rt, global, "SharedArrayBuffer");
     const shared_array_buffer_prototype_value = try shared_array_buffer_object.getProperty(prototype_key);
     const shared_array_buffer_prototype_object = core.Object.fromHeader(shared_array_buffer_prototype_value.refHeader().?);
     const shared_array_buffer_slice_value = try shared_array_buffer_prototype_object.getProperty(slice_key);
     const shared_array_buffer_slice_object = core.Object.fromHeader(shared_array_buffer_slice_value.refHeader().?);
     try std.testing.expect(shared_array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
 
-    const data_view_value = try global.getProperty(data_view_key);
-    const data_view_object = core.Object.fromHeader(data_view_value.refHeader().?);
+    const data_view_object = try getGlobalObject(rt, global, "DataView");
     const data_view_prototype_value = try data_view_object.getProperty(prototype_key);
     const data_view_prototype_object = core.Object.fromHeader(data_view_prototype_value.refHeader().?);
-    const get_uint8_value = try data_view_prototype_object.getProperty(get_uint8_key);
-    const get_uint8_object = core.Object.fromHeader(get_uint8_value.refHeader().?);
+    const get_uint8_object = try getGlobalObject(rt, data_view_prototype_object, "getUint8");
     try std.testing.expect(get_uint8_object.nativeFunctionIdSlot().* != 0);
-    const set_uint8_value = try data_view_prototype_object.getProperty(set_uint8_key);
-    const set_uint8_object = core.Object.fromHeader(set_uint8_value.refHeader().?);
+    const set_uint8_object = try getGlobalObject(rt, data_view_prototype_object, "setUint8");
     try std.testing.expect(set_uint8_object.nativeFunctionIdSlot().* != 0);
     const data_view_byte_length_desc = (try data_view_prototype_object.getOwnProperty(rt, byte_length_key)).?;
     const data_view_byte_length_getter = core.Object.fromHeader(data_view_byte_length_desc.getter.refHeader().?);
@@ -4024,31 +3930,25 @@ test "buffer native builtin records ignore dispatch names" {
         \\print(fakeDataViewByteLength.call(v));
     , .{ .mode = .script, .filename = "buffer-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", vm_result.output);
 }
 
 test "typed array accessor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
-    const typed_array_key = try rt.internAtom("TypedArray");
     const prototype_key = try rt.internAtom("prototype");
     const byte_length_key = try rt.internAtom("byteLength");
     const length_key = try rt.internAtom("length");
 
-    const typed_array_value = try global.getProperty(typed_array_key);
-    const typed_array_object = core.Object.fromHeader(typed_array_value.refHeader().?);
+    const typed_array_object = try getGlobalObject(rt, global, "TypedArray");
     const prototype_value = try typed_array_object.getProperty(prototype_key);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
 
@@ -4098,30 +3998,24 @@ test "typed array accessor native builtin records ignore dispatch names" {
         \\print(fakeTypedArrayTag.call({}));
     , .{ .mode = .script, .filename = "typed-array-accessor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", vm_result.output);
 }
 
 test "regexp static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const regexp_key = try rt.internAtom("RegExp");
-    const escape_key = try rt.internAtom("escape");
     const regexp_value = try global.getProperty(regexp_key);
     const regexp_object = core.Object.fromHeader(regexp_value.refHeader().?);
-    const escape_value = try regexp_object.getProperty(escape_key);
-    const escape_object = core.Object.fromHeader(escape_value.refHeader().?);
+    const escape_object = try getGlobalObject(rt, regexp_object, "escape");
     try std.testing.expect(escape_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notRegExpEscape", 1);
@@ -4143,37 +4037,29 @@ test "regexp static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", vm_result.output);
 }
 
 test "regexp prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const regexp_key = try rt.internAtom("RegExp");
-    const exec_key = try rt.internAtom("exec");
-    const test_key = try rt.internAtom("test");
     const to_string_key = try rt.internAtom("toString");
     const regexp_value = try global.getProperty(regexp_key);
     const regexp_object = core.Object.fromHeader(regexp_value.refHeader().?);
     const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
-    const exec_value = try prototype_object.getProperty(exec_key);
-    const exec_object = core.Object.fromHeader(exec_value.refHeader().?);
+    const exec_object = try getGlobalObject(rt, prototype_object, "exec");
     try std.testing.expect(exec_object.nativeFunctionIdSlot().* != 0);
-    const test_value = try prototype_object.getProperty(test_key);
-    const test_object = core.Object.fromHeader(test_value.refHeader().?);
+    const test_object = try getGlobalObject(rt, prototype_object, "test");
     try std.testing.expect(test_object.nativeFunctionIdSlot().* != 0);
     const to_string_value = try prototype_object.getProperty(to_string_key);
     const to_string_object = core.Object.fromHeader(to_string_value.refHeader().?);
@@ -4233,23 +4119,19 @@ test "regexp prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", vm_result.output);
 }
 
 test "regexp symbol native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const regexp_key = try rt.internAtom("RegExp");
     const regexp_value = try global.getProperty(regexp_key);
@@ -4345,23 +4227,19 @@ test "regexp symbol native builtin records ignore dispatch names" {
         \\print(fakeRegExpSplit.call(r, 'cat').join('|'));
     , .{ .mode = .script, .filename = "regexp-symbol-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", vm_result.output);
 }
 
 test "regexp accessor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{});
+    defer host.deinit();
+    const rt = host.rt;
+    const ctx = host.ctx;
+    const global = host.global;
 
     const regexp_key = try rt.internAtom("RegExp");
     const regexp_value = try global.getProperty(regexp_key);
@@ -4412,14 +4290,11 @@ test "regexp accessor native builtin records ignore dispatch names" {
         \\print(fakeRegExpGlobalGetter.call(r));
     , .{ .mode = .script, .filename = "regexp-accessor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(rt, ctx.stackLimit());
-    defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
-    try std.testing.expect(vm_result.is(.undefined_value));
-    try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
+    const vm_result = try host.run(function, &output_buffer);
+    try std.testing.expect(vm_result.value.is(.undefined_value));
+    try std.testing.expectEqualStrings("a\\/b\ntrue\n", vm_result.output);
 }
 
 test "vm host native builtin records dispatch by id before name fallback" {

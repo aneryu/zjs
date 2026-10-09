@@ -10,6 +10,19 @@ pub const exec = @import("exec.zig");
 test {
     _ = public_api;
     _ = core;
+    _ = core.value_boundary;
+    _ = core.roots_nursery;
+    _ = core.atoms_s3;
+    _ = core.storage_s4;
+    _ = core.gc_stress;
+    _ = core.oom_cap;
+    _ = core.embedding_api;
+    _ = core.heap_limit;
+    _ = core.interrupts;
+    _ = core.runtime_lifecycle;
+    _ = core.microtasks;
+    _ = core.value_root_buffer;
+    _ = core.regressions;
     _ = exec;
     // A `pub const` import does not collect that file's tests. Reference
     // each area from this existing test so the suite does not grow one.

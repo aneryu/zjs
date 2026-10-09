@@ -238,7 +238,7 @@ rememberOwnerForBulkWrite(owner: *Header)
   (`--gc-stats` 会打开它)时返回 0,否则返回 `barrier_skip_bits`。安全构建
   在每次屏障调用重算门值,并断言已发布的门与它相等(C1)。
 - **慢路径是分代 remember-owner**。增量 major 及其目标染色已经退役,
-  收集是 stop-the-world(`gc_incremental.zig` 头注)。
+  收集是 stop-the-world(`gc_mark_epoch.zig` 头注)。
   - `detailed_reports` 打开时走 `generationalBarrierDetailed`:先计数,
     young owner 或 `!flags.young` 的目标直接返回,否则 `rememberGenerationalOwner`。
   - 其余情况下,开着的门已经说明 owner 是 old 且尚未 remembered。未发布的
@@ -249,7 +249,7 @@ rememberOwnerForBulkWrite(owner: *Header)
   `rememberGenerationalOwner`。
 - **线程模型**:收集在 runtime owner 线程上 stop-the-world 完成,没有
   marker worker。store 与屏障在同一函数内同步调用,这就是屏障相对存储的
-  同步条件。S4-b 并行标记**已撤回**(`gc_incremental.zig`;若重新引入,
+  同步条件。S4-b 并行标记**已撤回**(`gc_mark_epoch.zig`;若重新引入,
   §8.4 的撕裂前提使 owner-only 记录不 sound,须回到本节修订)。
 - JIT/asm 侧预留的 patchable 位对应上述三个签名(§5.3)。
 
@@ -388,7 +388,7 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
   缺根,其余是 LLVM 栈槽残渣与调用方 callee-saved 溢出;正路 = 缩帧 /
   擦栈 + cold 出口 publish(完成对账 §6 第 6 条)。落地前 §4.2 保守
   扫描是生产设计。
-- **并行标记**:S4-b 已撤回(`gc_incremental.zig`);重新引入须先修订
+- **并行标记**:S4-b 已撤回(`gc_mark_epoch.zig`);重新引入须先修订
   §3(屏障撕裂前提)并重建 live-size 门。
 - **typed / AOT 六契约**(typed 计划 v1.3 R8):根、窗口、安全点/
   publish、屏障、artifact 不携带 Runtime-local 身份(atom 落盘为字符串)、

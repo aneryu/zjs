@@ -203,7 +203,8 @@ pub const State = struct {
         };
     }
 
-    fn percentileIndex(len: usize, percentile: usize) usize {
+    /// Nearest-rank index: the smallest sample at or above the percentile.
+    pub fn percentileIndex(len: usize, percentile: usize) usize {
         const rank = (len * percentile + 99) / 100;
         return @min(if (rank == 0) 0 else rank - 1, len - 1);
     }

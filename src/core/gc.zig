@@ -200,8 +200,8 @@ pub inline fn invariantChecksEnabled() bool {
 }
 
 /// Mark epoch and morgue state.
-pub const incremental = @import("gc_incremental.zig");
-/// Unbounded segmented private/shared mark frontier (§8.4).
+pub const mark_state = @import("gc_mark_epoch.zig");
+/// Host pins and construction roots. See `gc_registry_pins.zig`.
 pub const registry_pins = @import("gc_registry_pins.zig");
 pub const registry_scheduler = @import("gc_registry_scheduler.zig");
 pub const registry_lists = @import("gc_registry_lists.zig");
@@ -302,8 +302,8 @@ const GenerationState = @import("gc_generation.zig").State;
 const PinLedger = registry_pins.Ledger;
 const Scheduler = registry_scheduler.Scheduler;
 const Lists = registry_lists.Lists;
-const Marking = incremental.Marking;
-const Morgue = incremental.Morgue;
+const Marking = mark_state.Marking;
+const Morgue = mark_state.Morgue;
 const ExternalTokens = registry_heap.Tokens;
 const NonBlockObjectAuthority = registry_heap.NonBlockObjectAuthority;
 
@@ -1224,12 +1224,12 @@ pub const PauseDistribution = struct {
 };
 
 /// Counters the collector actually maintains. Every field here has a write
-/// site in `completeMajor` / `failMajor` / `recordMinor`; refcount
-/// traffic is deliberately uninstrumented because a counter on that path is
-/// not cost-neutral (2026-08-11 ruling), and cycle *count* is absent because
-/// the collector reports freed objects, not strongly-connected components.
+/// site in `completeMajor` / `failMajor` / `recordMinor`. The collector
+/// reports freed objects, not strongly-connected components.
 pub const GeStats = struct {
+    /// Completed majors. Published as `major_gc_count`.
     cycle_gc_count: usize = 0,
+    /// Time in completed majors. Published as `major_gc_time_ns`.
     cycle_gc_time_ns: u64 = 0,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
@@ -1297,6 +1297,7 @@ pub const Stats = struct {
     major_gc_count: usize = 0,
     major_gc_time_ns: u64 = 0,
     last_collection_time_ns: u64 = 0,
+    /// Copy of `Scheduler.major_phase`. Information only.
     major_phase: MajorPhase = .idle,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
@@ -1333,15 +1334,9 @@ pub fn noteHeapWalk() void {
 }
 
 /// Z-GE Registry
-/// The two words every write barrier and every JSValue release reads.
-///
-/// K4: `phase` was read by every JSValue release in the rc build
-/// (mirroring qjs `__JS_FreeValueRT`'s
-/// `gc_phase` check) -- including the per-return function rc-- on the hot
-/// call path. QuickJS keeps `gc_phase` in the JSRuntime head
-///; zjs auto layout had pushed it to the Registry tail at
-/// rt+18-19KB, costing a `mov #imm` address materialization plus a cold
-/// cache line on every release (M1 dossier K4).
+/// Hot collector words. The barrier fast path loads `barrier_gate`;
+/// `phase` is what busy and teardown checks read. Both stay in the
+/// Registry's first cache line.
 ///
 /// `extern` rather than a plain struct because auto layout sorts by
 /// alignment and would put the u64 first; the contract these two words are
@@ -1358,17 +1353,13 @@ pub const HotWords = extern struct {
     /// `Registry.isBusy`.
     collecting: bool = false,
 
-    /// Write-barrier gate: the phase-owned mask the fast path ANDs against
-    /// the owner's state word (`barrierOwnerWord`). `barrier_skip_bits` in
-    /// the steady state, zero whenever some richer arm must run -- major
-    /// marking (exact-target shading) or `--gc-stats` (call accounting).
-    /// Rewriting one word at a phase boundary is JSC's `m_barrierThreshold`
-    /// protocol (Heap.cpp:3382-3386), and it is what takes both of those
-    /// global loads OFF the barrier's hot path.
+    /// Write-barrier gate: the mask the fast path ANDs against the owner's
+    /// state word (`barrierOwnerWord`). `barrier_skip_bits` in the steady
+    /// state, and zero when `detailed_reports` must count every call.
+    /// `refreshBarrierGate` is the only writer; `initLists` seeds it.
     ///
     /// Deliberately adjacent to `phase` so it rides the Registry's pinned
     /// front cache line rather than a cold tail line.
-    /// `refreshBarrierGate` is the only writer; `initLists` seeds it.
     barrier_gate: u64 = barrier_skip_bits,
 };
 
@@ -1418,7 +1409,7 @@ pub const Registry = struct {
     // This is the same lesson as the 32 KB embedded ring, one level up: what
     // a Registry contains is paid for by every runtime, including the ones
     // that fail halfway through construction.
-    /// Mark frontier and mark epoch. See `gc_incremental.zig`.
+    /// Mark epoch. See `gc_mark_epoch.zig`.
     marking: Marking = .{},
 
     /// Page-radix map of published GC objects.
@@ -1445,7 +1436,7 @@ pub const Registry = struct {
     /// Off-account external memory the host holds. See `gc_registry_heap.zig`.
     external: ExternalTokens = .{},
 
-    /// Condemned-but-not-yet-destroyed corpses. See `gc_incremental.zig`.
+    /// Condemned-but-not-yet-destroyed corpses. See `gc_mark_epoch.zig`.
     morgue: Morgue = .{},
 
     /// Major-collection pacing and the pending-request latch.
@@ -1712,8 +1703,8 @@ pub const Registry = struct {
         }
 
         // Phase 3: every cell owner is gone. Their releases were suppressed by
-        // the deinit phase/finalizing bit, so reclaim each prepared cell struct
-        // exactly once regardless of its residual refcount.
+        // the deinit phase/finalizing bit, so reclaim each prepared cell
+        // struct exactly once.
         while (held_var_refs) |h| {
             const next = h.nextNonObject();
             h.setNextNonObject(null);
@@ -1962,7 +1953,7 @@ pub const Registry = struct {
             std.debug.assert(!is_large);
         }
 
-        const tracked = isCycleCandidate(h);
+        const tracked = isTracerOwnedKind(h);
         // Checkers for the two hoisted classifications above. Everything this
         // function does between the read and here writes `heap_accounted`,
         // `size_class` or Registry scalars -- none of which may move
@@ -2006,10 +1997,10 @@ pub const Registry = struct {
         }
     }
 
-    /// qjs `add_gc_object` for shapes: rc/kind already live
-    /// in the prefix, then heap_accounted + list_add_tail.
+    /// qjs `add_gc_object` for shapes: kind already lives in the
+    /// prefix, then heap_accounted + list_add_tail.
     /// Shapes stay below `large_object_threshold` (8KiB); skip the large
-    /// compare, standalone size_class stamp, and isCycleCandidate test.
+    /// compare, standalone size_class stamp, and isTracerOwnedKind test.
     pub fn addInitializedShape(self: *Registry, h: *Header, bytes: usize) void {
         assertInitialHeaderLifetime(h);
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
@@ -2092,7 +2083,7 @@ pub const Registry = struct {
     /// Every Metadata kind is tracer-owned, so every published header is a
     /// candidate. Spelled as an exhaustive switch rather than `true` so a new
     /// kind has to state its answer here (the S4 storage kinds did).
-    pub fn isCycleCandidate(h: *const Header) bool {
+    pub fn isTracerOwnedKind(h: *const Header) bool {
         return switch (h.metaConst().flags.kind) {
             .object,
             .function_bytecode,
@@ -2165,7 +2156,7 @@ pub const Registry = struct {
         // Let that structural stamp answer before kind, list, and generation
         // work.
         if (headerCondemned(h)) return;
-        if (!isCycleCandidate(h)) return;
+        if (!isTracerOwnedKind(h)) return;
         // An explicit destroy (an `errdefer` after user code ran, a replaced
         // shape) can free an old cell a barrier already remembered; the cell
         // may be reused by any kind, so the entry must go now.
@@ -2180,7 +2171,7 @@ pub const Registry = struct {
         self.removeGcObject(h);
     }
 
-    /// Account an allocation already detached by `detachCycleCandidate`.
+    /// Account an allocation already detached by `condemnHeader`.
     ///
     /// Trace condemnation removes the object from every live membership
     /// structure before its resource destructor runs. The dominant object
@@ -2762,7 +2753,7 @@ pub const Registry = struct {
             std.debug.assert(self.block_heap.containsExtent(base));
             return self.block_heap.extentIsMarked(base, self.block_heap.mark_epoch);
         }
-        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        if (std.debug.runtime_safety) std.debug.assert(isTracerOwnedKind(h));
         return @atomicLoad(u16, &h.metaConst().lifetime.mark_epoch, .monotonic) == self.marking.header_epoch;
     }
 
@@ -2788,7 +2779,7 @@ pub const Registry = struct {
             self.block_heap.extentSetMark(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
             return;
         }
-        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        if (std.debug.runtime_safety) std.debug.assert(isTracerOwnedKind(h));
         @atomicStore(u16, &h.meta().lifetime.mark_epoch, self.marking.header_epoch, .monotonic);
     }
 
@@ -2864,7 +2855,7 @@ pub const Registry = struct {
             block.clearMark(h.metaConst().size_class, self.block_heap.mark_epoch);
             return;
         }
-        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        if (std.debug.runtime_safety) std.debug.assert(isTracerOwnedKind(h));
         @atomicStore(u16, &h.meta().lifetime.mark_epoch, 0, .monotonic);
     }
 
@@ -2893,7 +2884,7 @@ pub const Registry = struct {
         self.marking.header_epoch = 1;
     }
 
-    pub fn detachCycleCandidate(self: *Registry, header: *Header) void {
+    pub fn condemnHeader(self: *Registry, header: *Header) void {
         std.debug.assert(!headerCondemned(header));
         if (header.metaConst().flags.kind == .object) {
             if (!isBlockCellHeader(header) and !isNurseryHeader(header))
@@ -2917,9 +2908,9 @@ pub const Registry = struct {
         stampHeaderCondemned(header);
     }
 
-    /// Sequential-sweep twin of `detachCycleCandidate`; the predecessor must
+    /// Sequential-sweep twin of `condemnHeader`; the predecessor must
     /// still name the live-list node immediately before `header`.
-    pub fn detachCycleCandidateAfter(self: *Registry, previous: *Header, header: *Header) void {
+    pub fn condemnHeaderAfter(self: *Registry, previous: *Header, header: *Header) void {
         std.debug.assert(!headerCondemned(header));
         self.removeGcObjectAfter(previous, header);
         stampHeaderCondemned(header);
@@ -2994,18 +2985,8 @@ pub const Registry = struct {
     /// value turns out to be old or primitive costs one re-trace of an object
     /// the minor would otherwise skip; missing one frees a live object.
     ///
-    /// The marking arm RE-QUEUES THE OWNER. An earlier version said the
-    /// marking arm was "deliberately absent" because a choke point cannot
-    /// shade the exact target -- true, and it did not need to: re-tracing the
-    /// owner finds every child the bulk write installed, including the new
-    /// one. What "absent" actually meant was that a black array's appends
-    /// were invisible to the remark (the remembered set is retired at cycle
-    /// begin and consumed only by minors), so anything reachable only through
-    /// a mid-cycle dense append was condemned alive.
-    ///
-    /// A hot array appended in a loop re-pushes once per bulk write -- the
-    /// mark state cannot dedup an owner that must be re-traced -- so the
-    /// shared frontier must be unbounded rather than silently dropping work.
+    /// There is no marking arm. A fall-through only remembers the owner for
+    /// the minor, and `detailed_reports` is the only reason the gate closes.
     pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *Header) void {
         if (self.barrierOwnerSkips(owner)) return;
         self.rememberOwnerForBulkWriteSlow(owner);
@@ -3061,11 +3042,9 @@ pub const Registry = struct {
             // permits a skip never reaches it. So check it here, on every
             // barrier call, in every safety build.
             std.debug.assert(self.hot.barrier_gate == expectedBarrierGate());
-            // C2. The gate reads byte 6 bit7 as the remembered lease, which is
-            // only that for eligible kinds: `.string` has no `Metadata` prefix
-            // at all, and `.big_int` aliases the byte onto its live refcount.
-            // Audit §10.3 walked every barrier call site and found neither
-            // kind; this turns that survey into a machine check.
+            // C2. The gate reads Metadata byte 6 bit7 as the remembered lease.
+            // Every published kind uses that prefix. The byte is not a
+            // refcount, and a string is not a kind without Metadata.
         }
         return barrierOwnerWord(owner) & self.hot.barrier_gate != 0;
     }
@@ -3224,11 +3203,10 @@ pub const Registry = struct {
 
     /// Everything the folded fast path stopped doing inline.
     ///
-    /// The exact-target shading arm stays a real arm rather than being folded
-    /// into the gate: §8.4's tearing premise is what makes owner-only records
-    /// unsound under a real parallel marker, and JSC's 8-byte atomic escape
-    /// hatch does not exist for a 16-byte JSValue. The gate carries the PHASE
-    /// decision; the arm carries the semantics.
+    /// `detailed_reports` counts the call and returns. Otherwise the open
+    /// gate already means an old, unremembered owner, and this remembers it
+    /// when the target is young or still unpublished. There is no
+    /// exact-target shading arm.
     fn generationalBarrierSlow(self: *Registry, owner: *Header, target: *Header) void {
         @branchHint(.cold);
         // The counter block is diagnostic, not policy, and it was two
@@ -3260,10 +3238,9 @@ pub const Registry = struct {
     /// this store is somebody's business: young owners account for the vast
     /// majority of property writes and a minor scans them regardless.
     ///
-    /// Marking and detailed reports both need the target decoded even for a
-    /// young owner, and both announce themselves by zeroing the gate -- so the
-    /// gate-first shape decodes exactly when the pre-fold three-way ordering
-    /// did, and the edge-only counters stay comparable with earlier runs.
+    /// `detailed_reports` is the only reason the gate is zero, and that is
+    /// when a young owner still decodes its target. The steady state skips
+    /// before the decode, so the edge-only counters stay on the slow path.
     pub inline fn generationalBarrierValue(self: *Registry, owner: *Header, child: JSValue) void {
         if (comptime std.debug.runtime_safety) self.assertStoreIsCurrent(child);
         if (self.barrierOwnerSkips(owner)) return;
@@ -3649,9 +3626,9 @@ pub const Registry = struct {
         // `young_head`, so forgetting an object must also move the anchor
         // off it -- otherwise the next minor's `clearYoungMarks` walks a
         // freed header. Both `lists.objects` detach paths funnel through here
-        // (`removeGcObject` and `unlinkObjectWithBytes`, the ordinary
-        // mutator-side RC free used by shape replacement, var_ref release
-        // and the typed frees), and both still have `header.next` valid:
+        // (`removeGcObject` and `unlinkObjectWithBytes`, the explicit
+        // frees used by shape replacement, var_ref release and the typed
+        // frees), and both still have `header.next` valid:
         // the `delAfter` follows this call. Freeing the anchor shrinks the
         // suffix to its successor; the suffix never grows here.
         if (self.lists.young_head == header) {

@@ -316,11 +316,10 @@ pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) align(64) vo
     if (prospective <= self.gc.heap_budget.gc_threshold) {
         _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
     }
-    // §8.6: allocation debt buys bounded slices of the collector's work.
-    // The time budget bounds one slice; the byte interval below also
-    // bounds how many allocation-boundary slices one burst can concatenate
-    // into a mutator-visible operation. Scheduler/callback/idle polls call
-    // pollGC directly and remain unpaced.
+    // A pending major is collected here, in full, before the allocation
+    // lands. A registry that is already collecting, or that has nothing
+    // pending, returns and leaves the request latched. Safepoint and
+    // callback polls call `pollGC` themselves.
     if (self.gc.isBusy()) return;
     if (!self.gc.hasPendingMajorRequest()) return;
     return pollGCBeforeObjectAllocation(self);

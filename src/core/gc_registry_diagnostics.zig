@@ -39,7 +39,7 @@ const pause_sample_capacity = gc.pause_sample_capacity;
 const heapByteSizeFromHeader = Registry.heapByteSizeFromHeader;
 const verifyCircularHeaderList = registry_lists.verifyCircularHeaderList;
 const verifyMetadataSemantics = gc.verifyMetadataSemantics;
-const isCycleCandidate = Registry.isCycleCandidate;
+const isTracerOwnedKind = Registry.isTracerOwnedKind;
 const construction_pin_count = gc.construction_pin_count;
 const trace_remembered_mask = gc.trace_remembered_mask;
 const kindIsOwnedStorageCell = gc.kindIsOwnedStorageCell;
@@ -68,17 +68,11 @@ pub fn pauseDistribution(self: *const Registry) ?PauseDistribution {
     std.sort.heap(u64, window, {}, std.sort.asc(u64));
     return .{
         .samples = self.stats.pause_sample_count,
-        .p50_ns = window[percentileIndex(retained, 50)],
-        .p95_ns = window[percentileIndex(retained, 95)],
-        .p99_ns = window[percentileIndex(retained, 99)],
+        .p50_ns = window[gc.generation.State.percentileIndex(retained, 50)],
+        .p95_ns = window[gc.generation.State.percentileIndex(retained, 95)],
+        .p99_ns = window[gc.generation.State.percentileIndex(retained, 99)],
         .max_ns = window[retained - 1],
     };
-}
-
-/// Nearest-rank index: the smallest sample at or above the percentile.
-fn percentileIndex(len: usize, percentile: usize) usize {
-    const rank = (len * percentile + 99) / 100;
-    return @min(if (rank == 0) 0 else rank - 1, len - 1);
 }
 
 pub const HeapSpaceSnapshot = struct {
@@ -441,7 +435,7 @@ pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
             if (!saw_young_head and is_young) return error.DanglingYoungHead;
             if (saw_young_head and !is_young) return error.DanglingYoungHead;
         } else if (is_young) return error.DanglingYoungHead;
-        if (!isCycleCandidate(h) or h.metaConst().flags.kind == .object)
+        if (!isTracerOwnedKind(h) or h.metaConst().flags.kind == .object)
             return error.CorruptGcList;
         {
             const state = h.metaConst().lifetime;

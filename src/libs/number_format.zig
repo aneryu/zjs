@@ -187,17 +187,40 @@ const RoundMode = enum {
     toward_zero,
 };
 
-const pow5_table = [17]u32{
-    0x00000005, 0x00000019, 0x0000007d, 0x00000271,
-    0x00000c35, 0x00003d09, 0x0001312d, 0x0005f5e1,
-    0x001dcd65, 0x009502f9, 0x02e90edd, 0x0e8d4a51,
-    0x48c27395, 0x6bcc41e9, 0x1afd498d, 0x86f26fc1,
-    0xa2bc2ec5,
+const pow5_tables = blk: {
+    var low: [17]u32 = undefined;
+    var high: [4]u8 = undefined;
+    var value: u64 = 1;
+    for (&low, 0..) |*slot, index| {
+        value *= 5;
+        slot.* = @truncate(value);
+        if (index >= 13) high[index - 13] = @truncate(value >> 32);
+    }
+    break :blk .{ .low = low, .high = high };
 };
 
-const pow5h_table = [4]u8{
-    0x01, 0x07, 0x23, 0xb1,
+const radix_word_tables = blk: {
+    var digits: [radix_max - 1]u8 = undefined;
+    var base: [radix_max - 1]u32 = undefined;
+    // `radix^n == 2^32` does not fit in a `u32`, so those bases are stored as 0.
+    const word_limit: u64 = 1 << 32;
+    for (&digits, &base, 0..) |*digit, *word, index| {
+        const radix: u32 = @intCast(index + 2);
+        var value: u64 = 1;
+        var count: u8 = 0;
+        while (value * radix <= word_limit) {
+            value *= radix;
+            count += 1;
+            if (value == word_limit) break;
+        }
+        digit.* = count;
+        word.* = if (value == word_limit) 0 else @intCast(value);
+    }
+    break :blk .{ .digits = digits, .base = base };
 };
+
+const pow5_table: [17]u32 = pow5_tables.low;
+const pow5h_table: [4]u8 = pow5_tables.high;
 
 const pow5_inv_table = [13]u32{
     0x99999999, 0x47ae147a, 0x0624dd2f, 0xa36e2eb1,
@@ -218,22 +241,8 @@ const mul_log2_radix_table = [radix_max - 1]u32{
     0x3251dd, 0x31e8d6, 0x318465,
 };
 
-const digits_per_word_table = [radix_max - 1]u8{
-    32, 20, 16, 13, 12, 11, 10, 10, 9, 9, 8, 8, 8, 8, 8, 7, 7, 7,
-    7,  7,  7,  7,  6,  6,  6,  6,  6, 6, 6, 6, 6, 6, 6, 6, 6,
-};
-
-const radix_base_table = [radix_max - 1]u32{
-    0x00000000, 0xcfd41b91, 0x00000000, 0x48c27395,
-    0x81bf1000, 0x75db9c97, 0x40000000, 0xcfd41b91,
-    0x3b9aca00, 0x8c8b6d2b, 0x19a10000, 0x309f1021,
-    0x57f6c100, 0x98c29b81, 0x00000000, 0x18754571,
-    0x247dbc80, 0x3547667b, 0x4c4b4000, 0x6b5a6e1d,
-    0x94ace180, 0xcaf18367, 0x0b640000, 0x0e8d4a51,
-    0x1269ae40, 0x17179149, 0x1cb91000, 0x23744899,
-    0x2b73a840, 0x34e63b41, 0x40000000, 0x4cfa3cc1,
-    0x5c13d840, 0x6d91b519, 0x81bf1000,
-};
+const digits_per_word_table: [radix_max - 1]u8 = radix_word_tables.digits;
+const radix_base_table: [radix_max - 1]u32 = radix_word_tables.base;
 
 const max_format_digits = [radix_max - 1]u8{
     54, 35, 28, 24, 22, 20, 19, 18, 17, 17, 16, 16, 15, 15, 15, 14, 14, 14,
@@ -740,7 +749,7 @@ fn mulLog2Radix(a: i32, radix: i32) i32 {
         if (a2 < 0) a2 -= radix_bits - 1;
         return @divTrunc(a2, radix_bits);
     }
-    const mult = mul_log2_radix_table[@intCast(radix - 2)];
+    const mult = mul_log2_radix_table[RadixSpec.of(radix).tableIndex()];
     return @intCast(@divFloor(@as(i64, a) * @as(i64, mult), @as(i64, 1 << mul_log2_radix_base_log2)));
 }
 
@@ -1175,6 +1184,10 @@ fn stripFracLeadingZero(body: []u8, len: usize) usize {
 // f64 → digits (Ryu for radix-10 shortest; WordInt otherwise)
 // ============================================================
 
+const fixed_magnitude_slack: i32 = 10;
+const scientific_suffix_len: i32 = 1 + 1 + 6;
+const format_len_floor: i32 = 9;
+
 fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, options: FormatOptions) usize {
     const spec = RadixSpec.of(radix);
     var n: i32 = 0;
@@ -1186,10 +1199,10 @@ fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, options: FormatOptions) 
             if (ieee.isNonFinite()) {
                 n = 0;
             } else {
-                n += 10 + @as(i32, @intCast(@abs(mulLog2Radix(ieee.biased_exp - 1024, radix))));
+                n += fixed_magnitude_slack + @as(i32, @intCast(@abs(mulLog2Radix(ieee.biased_exp - 1024, radix))));
             }
         } else {
-            n += 1 + 1 + 6;
+            n += scientific_suffix_len;
         }
     } else {
         const ieee = Ieee64.unpack(d);
@@ -1201,7 +1214,7 @@ fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, options: FormatOptions) 
             n += 1 + 1 + 1 + n_digits;
         }
     }
-    return @intCast(@max(n, 9));
+    return @intCast(@max(n, format_len_floor));
 }
 
 fn writeNonFinite(buf: []u8, ieee: Ieee64) usize {
@@ -1423,7 +1436,7 @@ fn shortestRadixScale(tmp1: *WordInt, m: u64, e: i32, spec: RadixSpec) ScaledDig
     const radix = spec.radix;
     const radix1 = spec.odd_part;
     const radix_shift = spec.pow2_shift;
-    const P_max: i32 = max_format_digits[@intCast(radix - 2)];
+    const P_max: i32 = max_format_digits[spec.tableIndex()];
     const E0 = 1 + mulLog2Radix(e - 1, radix);
     var E_found: i32 = 0;
     var P_found: i32 = 0;
@@ -1858,29 +1871,38 @@ fn consumePrefix(str: []const u8, i_in: usize, radix_arg: i32, flags: ParseFlags
     const signed = i_in != 0;
 
     if (i < str.len and str[i] == '0' and (!signed or flags.accept_prefix_after_sign)) {
-        var no_prefix = false;
-        if (i + 1 < str.len and (str[i + 1] == 'x' or str[i + 1] == 'X') and (radix == 0 or radix == 16)) {
-            i += 2;
-            radix = 16;
-        } else if (i + 1 < str.len and (str[i + 1] == 'o' or str[i + 1] == 'O') and radix == 0 and flags.accept_bin_oct) {
-            i += 2;
-            radix = 8;
-        } else if (i + 1 < str.len and (str[i + 1] == 'b' or str[i + 1] == 'B') and radix == 0 and flags.accept_bin_oct) {
-            i += 2;
-            radix = 2;
-        } else if (i + 1 < str.len and str[i + 1] >= '0' and str[i + 1] <= '9' and radix == 0 and flags.accept_legacy_octal) {
-            sep = null;
-            var idx: usize = i + 1;
-            while (idx < str.len and str[idx] >= '0' and str[idx] <= '7') : (idx += 1) {}
-            if (idx < str.len and (str[idx] == '8' or str[idx] == '9')) {
-                no_prefix = true;
-            } else {
-                i += 1;
-                radix = 8;
+        // `| 0x20` folds only X/O/B. A failed letter gate is not an octal digit,
+        // so it stays `no_prefix`. Legacy octal still reads the raw byte.
+        var no_prefix = true;
+        if (i + 1 < str.len) {
+            const mark = str[i + 1];
+            switch (mark | 0x20) {
+                'x' => if (radix == 0 or radix == 16) {
+                    i += 2;
+                    radix = 16;
+                    no_prefix = false;
+                },
+                'o' => if (radix == 0 and flags.accept_bin_oct) {
+                    i += 2;
+                    radix = 8;
+                    no_prefix = false;
+                },
+                'b' => if (radix == 0 and flags.accept_bin_oct) {
+                    i += 2;
+                    radix = 2;
+                    no_prefix = false;
+                },
+                else => if (mark >= '0' and mark <= '9' and radix == 0 and flags.accept_legacy_octal) {
+                    sep = null;
+                    var idx: usize = i + 1;
+                    while (idx < str.len and str[idx] >= '0' and str[idx] <= '7') : (idx += 1) {}
+                    if (idx >= str.len or (str[idx] != '8' and str[idx] != '9')) {
+                        i += 1;
+                        radix = 8;
+                        no_prefix = false;
+                    }
+                },
             }
-        } else {
-            // Plain `0...`: skip the digit-after-prefix check.
-            no_prefix = true;
         }
         if (!no_prefix) {
             if (i >= str.len or toDigit(str[i]) >= radix) return null;
@@ -2190,6 +2212,36 @@ test "decimal fast path agrees with the correctly rounded reference" {
         const got = parseNumberExact(text, 10, .{}).?;
         try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(got)));
     }
+}
+
+test "exact integer radix tables match the handwritten literals" {
+    const pow5_low = [_]u32{
+        0x00000005, 0x00000019, 0x0000007d, 0x00000271,
+        0x00000c35, 0x00003d09, 0x0001312d, 0x0005f5e1,
+        0x001dcd65, 0x009502f9, 0x02e90edd, 0x0e8d4a51,
+        0x48c27395, 0x6bcc41e9, 0x1afd498d, 0x86f26fc1,
+        0xa2bc2ec5,
+    };
+    const pow5_high = [_]u8{ 0x01, 0x07, 0x23, 0xb1 };
+    const digits = [_]u8{
+        32, 20, 16, 13, 12, 11, 10, 10, 9, 9, 8, 8, 8, 8, 8, 7, 7, 7,
+        7,  7,  7,  7,  6,  6,  6,  6,  6, 6, 6, 6, 6, 6, 6, 6, 6,
+    };
+    const base = [_]u32{
+        0x00000000, 0xcfd41b91, 0x00000000, 0x48c27395,
+        0x81bf1000, 0x75db9c97, 0x40000000, 0xcfd41b91,
+        0x3b9aca00, 0x8c8b6d2b, 0x19a10000, 0x309f1021,
+        0x57f6c100, 0x98c29b81, 0x00000000, 0x18754571,
+        0x247dbc80, 0x3547667b, 0x4c4b4000, 0x6b5a6e1d,
+        0x94ace180, 0xcaf18367, 0x0b640000, 0x0e8d4a51,
+        0x1269ae40, 0x17179149, 0x1cb91000, 0x23744899,
+        0x2b73a840, 0x34e63b41, 0x40000000, 0x4cfa3cc1,
+        0x5c13d840, 0x6d91b519, 0x81bf1000,
+    };
+    try std.testing.expectEqualSlices(u32, &pow5_low, &pow5_table);
+    try std.testing.expectEqualSlices(u8, &pow5_high, &pow5h_table);
+    try std.testing.expectEqualSlices(u8, &digits, &digits_per_word_table);
+    try std.testing.expectEqualSlices(u32, &base, &radix_base_table);
 }
 
 test "parseNumberPrefix follows JS number scan rules" {

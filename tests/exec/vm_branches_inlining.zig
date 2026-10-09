@@ -4,6 +4,7 @@ const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
 const helpers = @import("../harness.zig");
+const BareRuntime = @import("../harness/bare_runtime.zig").BareRuntime;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
 
@@ -13,27 +14,14 @@ const inline_calls = zjs.exec.inline_calls;
 // exec-owned bootstrap seam before installation.
 
 test "host global bootstrap installs and tears down builtin plus host domains" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
-
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{ .ensure_realm_payload = true });
+    defer host.deinit();
 }
 
 test "engine eval host globals and throw intrinsic tear down cleanly" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
-
-    try helpers.installHostGlobalsBare(ctx, global);
+    var host = try BareRuntime.init(.{ .ensure_realm_payload = true });
+    defer host.deinit();
+    const ctx = host.ctx;
 
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);

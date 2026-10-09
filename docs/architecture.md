@@ -74,7 +74,7 @@ Runtime methods of the same name are aliases where the signature allows.
 | `gc_block_heap.zig` | Production block heap: 2 MiB superblocks, 64 KiB blocks, classed cells, extents, and the four per-block bitmaps (alloc / mark / doomed / `finalizerBits`) |
 | `gc_generation.zig` | Generational state: young lists and extents, remembered set, promotion, `young_trigger_count` |
 | `gc_conservative.zig` | Conservative native stack/register scan (the production root net) |
-| `gc_incremental.zig` | Mark epoch and per-kind morgue buckets (the incremental major it is named for is retired) |
+| `gc_mark_epoch.zig` | Mark epoch and per-kind morgue buckets (the incremental major is retired) |
 | `gc_nursery.zig` | Opt-in copying nursery (`ZJS_GC_NURSERY=1`; off by default) |
 | `gc_trace_stw.zig` | The collector: stop-the-world minor and major, condemnation and sweep |
 | `gc_driver.zig` | Collection orchestration: full/teardown/forced collection, poll routing, allocation triggers, the static heap-limit retry |

@@ -11,16 +11,12 @@ pub const makeFixture = helpers.makeFixture;
 pub const runFixture = helpers.runFixture;
 pub const createTailOpcodeFixture = helpers.createTailOpcodeFixture;
 
-pub const InterruptTestState = struct {
-    hits: usize = 0,
-    stop: bool = false,
+pub const InterruptTestState = @import("../harness/interrupts.zig").State;
 
-    pub fn run(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.hits += 1;
-        return self.stop;
-    }
-};
+pub fn getGlobalObject(rt: *core.JSRuntime, global: *core.Object, name: []const u8) !*core.Object {
+    const value = try global.getProperty(try rt.internAtom(name));
+    return core.Object.fromHeader(value.refHeader().?);
+}
 
 pub const CrossRealmNativeProbe = struct {
     seen_realm: ?*core.RealmContext = null,

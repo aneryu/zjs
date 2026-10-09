@@ -542,22 +542,6 @@ pub const String = struct {
         return atom_id;
     }
 
-    /// Concatenate two latin1 string buffers into a single freshly allocated
-    /// latin1 string. The runtime owns the result.
-    ///
-    /// Used by the `+` operator string fast path so we skip the per-call
-    /// `ArrayList(u8)` intermediate (and its `deinit`).
-    pub fn createLatin1Concat(rt: *JSRuntime, a: []const u8, b: []const u8) !*String {
-        const total = a.len + b.len;
-        const self = try createUninitialized(rt, .latin1, total);
-        errdefer destroyFlat(rt, self);
-        const out = self.latin1Mut();
-        @memcpy(out[0..a.len], a);
-        @memcpy(out[a.len..], b);
-        writeLatin1Terminator(out);
-        return self;
-    }
-
     /// Create a flat concat result from strings and already-unboxed int32
     /// values (the primitive concat fast path). No user coercion or rope
     /// materialization occurs. Registers the actual writable slots before
@@ -640,24 +624,6 @@ pub const String = struct {
         }
         std.debug.assert(offset == source_len);
         return self;
-    }
-
-    /// Compatibility entry for caller-owned or explicitly pinned backing.
-    /// Heap values should use createValueAsciiSuffix to rederive after GC.
-    pub fn createAsciiSuffix(rt: *JSRuntime, source: ResolvedData, suffix: []const u8) !*String {
-        std.debug.assert(isAsciiBytes(suffix));
-        return switch (source) {
-            .latin1 => |bytes| createLatin1Concat(rt, bytes, suffix),
-            .utf16 => |units| blk: {
-                const total = try std.math.add(usize, units.len, suffix.len);
-                const self = try createUninitialized(rt, .utf16, total);
-                errdefer destroyFlat(rt, self);
-                const out = self.utf16Mut();
-                @memcpy(out[0..units.len], units);
-                for (suffix, units.len..) |byte, index| out[index] = byte;
-                break :blk self;
-            },
-        };
     }
 
     pub fn createLatin1(rt: *JSRuntime, bytes: []const u8) !*String {
@@ -2456,14 +2422,14 @@ test "ASCII suffix concatenation preserves source width with one result allocati
 
     const narrow_source = try String.createLatin1(rt, "ab");
     const narrow_allocations = rt.allocation_diagnostics.allocation_count;
-    const narrow = try String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
+    const narrow = try String.createValueAsciiSuffix(rt, narrow_source.value(), "y");
     try std.testing.expect(!narrow.isWide());
     try std.testing.expect(narrow.eqlBytes("aby"));
     try std.testing.expectEqual(narrow_allocations + 1, rt.allocation_diagnostics.allocation_count);
 
     const wide_source = try String.createUtf16(rt, &.{ 0x0100, 'a' });
     const wide_allocations = rt.allocation_diagnostics.allocation_count;
-    const wide = try String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
+    const wide = try String.createValueAsciiSuffix(rt, wide_source.value(), "y");
     try std.testing.expect(wide.isWide());
     try std.testing.expectEqual(@as(usize, 3), wide.len());
     try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
@@ -2488,11 +2454,6 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     dropGcPtr(&fixed);
     _ = try rt.collectForTest();
     try std.testing.expectEqual(fixed_allocations, rt.allocation_diagnostics.allocation_count);
-
-    const growable_allocations = rt.allocation_diagnostics.allocation_count;
-    const growable = try String.createLatin1Concat(rt, "ab", "c");
-    try std.testing.expect(growable.eqlBytes("abc"));
-    try std.testing.expectEqual(growable_allocations + 1, rt.allocation_diagnostics.allocation_count);
 }
 
 test "string materialization flat rope wide and tail views support aliases and cached reads" {

@@ -41,7 +41,7 @@ const WeakCollectionEntry = object_mod.WeakCollectionEntry;
 const CollectError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
 /// Edge enumeration for one object, generic over the visitor so the
-/// single-threaded `Collector` and the parallel tracer share one authority.
+/// `Collector` and the audit/verify visitor share one authority.
 /// The visitor must satisfy the complete gc_visit protocol, or explicitly
 /// select its partial policy for a restricted diagnostic walk.
 pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) CollectError!void {
@@ -1037,7 +1037,7 @@ fn condemnListSweep(rt: *JSRuntime, young_only: bool) usize {
                 cursor = next;
                 continue;
             }
-            rt.gc.detachCycleCandidateAfter(previous, header);
+            rt.gc.condemnHeaderAfter(previous, header);
             condemnIntoBucket(rt, header);
             condemned += 1;
             cursor = next;
@@ -1318,7 +1318,7 @@ const Collector = struct {
             // not quiescent. Tests honour the trigger's scan
             // policy: engine-internal triggers (allocation threshold,
             // safepoint, callback boundary) run with mutator native frames
-            // live — frames entitled to hold rc refs without a
+            // live — frames entitled to hold heap pointers without a
             // ValueRootFrame, conservative is their covering mechanism — so
             // precision there is unsound (first caught by Error().stack
             // assembly being swept mid-construction). Host-quiescent
@@ -1511,7 +1511,7 @@ const Collector = struct {
         // cleared its identities -- so the only way here is conservative
         // stack residue resolving a parked slab block that still reads
         // `heap_accounted`. Shading it would trace freed payloads.
-        // `detachCycleCandidate` already writes the stamp; this is the read.
+        // `condemnHeader` already writes the stamp; this is the read.
         if (gc.headerCondemned(header)) return;
         self.rt.gc.setHeaderMarked(header);
         self.work.append(self.allocator(), header) catch |err| {
@@ -2203,7 +2203,7 @@ const Collector = struct {
         // Every condemned kind is freed, not just `.object` -- see
         // `destroyCondemned`. A young var_ref or shape the trace did not reach
         // is exactly as dead as a young object it did not reach. The trace is
-        // the liveness authority; rc cannot mask a missing root or barrier.
+        // the liveness authority; nothing else covers a missing root or barrier.
         if (snapshot_doomed) {
             // Preserve the production producer order even under diagnostics:
             // block Objects first, then the standalone/list population. Pass A
@@ -2306,7 +2306,7 @@ const Collector = struct {
                     else if (!gc.Registry.isNurseryHeader(header))
                         self.rt.gc.condemnNonBlockObject(header);
                 } else {
-                    self.rt.gc.detachCycleCandidate(header);
+                    self.rt.gc.condemnHeader(header);
                     condemnIntoBucket(self.rt, header);
                 }
             }
