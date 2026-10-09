@@ -724,7 +724,7 @@ test "Set.prototype.symmetricDifference sees receiver mutations from set-like ke
 }
 
 test "parser reserved-word and optional-chain early errors plus collection constructor iteration" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const parses = (src) => { try { (0, eval)(src); return "ok"; } catch (e) { return e.name; } };
         \\print(["new a?.b()", "new a?.b", "new a()?.b"].map((s) => parses("var a = function () { return {}; }; " + s)).join());
         \\print(["function let(){}", "(function static(){})", "var static = 1; ({static})", "var {package} = {package:1}",
@@ -1019,7 +1019,7 @@ test "Error stack, URI and microtask review regressions" {
 }
 
 test "primitive receivers and argument list review regressions" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const message = (f) => { try { f(); return "ok"; } catch (e) { return e.name + ":" + e.message; } };
         \\String.prototype[5] = "P5"; Object.prototype[7] = "O7";
         \\print("ab"[5], ""[5], "ab"[7], "ab"[1]);
@@ -1105,7 +1105,7 @@ test "JSON source records, revoked IsArray and eval shadowing review regressions
 }
 
 test "TypedArray exotic methods through Reflect/Proxy, IteratorClose and SpeciesConstructor review regressions" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const message = (f) => { try { f(); return "ok"; } catch (e) { return e.name + ":" + e.message; } };
         \\const ta = new Int8Array(2); const p = new Proxy(ta, {});
         \\Object.prototype["1.5"] = "P"; Object.prototype[5] = "P";
@@ -1265,7 +1265,7 @@ test "Array.prototype.slice defers an oversized length to ArraySpeciesCreate" {
 }
 
 test "Array.from lengths, sparse backward walks, sort order and generic splice review regressions" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const message = (f) => { try { return String(f()); } catch (e) { return e.name + ":" + e.message; } };
         \\let seen; function C(n) { seen = n; throw 0; }
         \\message(() => Array.from.call(C, { length: 2 ** 31 })); print(seen);
@@ -1314,7 +1314,7 @@ test "Array.from lengths, sparse backward walks, sort order and generic splice r
 }
 
 test "Promise finally receiver, async-from-sync return, rejection tracking and AsyncDisposableStack timing" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const message = (f) => { try { return String(f()); } catch (e) { return e.name + ":" + e.message; } };
         \\Number.prototype.then = function () { return "ok"; };
         \\print(message(() => Promise.prototype.finally.call(1, () => {})), message(() => Promise.prototype.finally.call({})), message(() => Promise.prototype.catch.call({})));
@@ -1718,7 +1718,7 @@ test "direct eval skips the Annex B hoist of a block function shadowed by an out
 }
 
 test "Set through Object.assign, typed-array prototype chains, super keys and builtin tags follow the spec" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const r = (f) => { try { return String(f()); } catch (e) { return e.constructor.name; } };
         \\var hit = 0; var assigned = Object.assign(Object.create(new Proxy({}, { set() { hit++; return true; } })), { a: 1 });
         \\var ta = new Uint8Array(8), log = [];
@@ -1782,7 +1782,7 @@ test "object model: typed-array fields and receivers, inherited array length, nu
 }
 
 test "indexOf, includes and sort on huge sparse arrays visit only present indices" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\var a = []; a[4294967294] = 7; a[3] = 1;
         \\print(a.indexOf(7), a.includes(7), a.indexOf(1, 4), a.includes(undefined, 4294967290), a.indexOf(9));
         \\Array.prototype[10] = 9; print(a.indexOf(9)); delete Array.prototype[10];

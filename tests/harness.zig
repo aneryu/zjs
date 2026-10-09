@@ -51,6 +51,7 @@ pub const LegacyProbeState = test_engine.LegacyProbeState;
 pub const scratchDirForProcess = test_engine.scratchDirForProcess;
 
 pub const expectPrints = shared.expectPrints;
+pub const expectPrintsFresh = shared.expectPrintsFresh;
 pub const expectPrintsTs = shared.expectPrintsTs;
 pub const sharedTestEngine = shared.sharedTestEngine;
 pub const deinitSharedTestEngine = shared.deinitSharedTestEngine;

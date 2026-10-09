@@ -19,7 +19,10 @@
 //! job queue, nulls out `context.lexicals` (dropping the previous
 //! test's let / const declarations), and then rebuilds the global's
 //! property array and shape layout from the baseline snapshot taken
-//! after `installHostGlobals`. Tests that mutate built-in objects
+//! after `installHostGlobals`. It then compares `globalThis.[[Prototype]]`
+//! and the own properties of realm prototypes with a baseline. A mismatch
+//! panics in the test that left the realm dirty; the gate does not write
+//! the old state back. Tests that mutate built-in objects
 //! (e.g. `Promise.resolve = ...`) or rely on freshly built closures
 //! referencing the previous test's eval scope still need a fresh
 //! `TestEngine.init` per call.
@@ -36,7 +39,20 @@ const TestEngine = test_engine.TestEngine;
 pub fn expectPrints(source: []const u8, expected: []const u8) !void {
     const js = sharedTestEngine();
     defer endSharedTest();
+    try expectPrintsOn(js, source, expected);
+}
 
+/// Same check as `expectPrints`, on a runtime this call owns.
+/// Use it when the script has to leave a builtin dirty: `delete` of a
+/// property that did not exist keeps a shape tombstone, and the shared
+/// realm cannot be put back.
+pub fn expectPrintsFresh(source: []const u8, expected: []const u8) !void {
+    var js = try test_engine.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try expectPrintsOn(&js, source, expected);
+}
+
+fn expectPrintsOn(js: *TestEngine, source: []const u8, expected: []const u8) !void {
     var output_buffer: [8192]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(source, &output);
@@ -86,6 +102,413 @@ var shared_engine_baseline: Baseline = .{};
 // allocation-count p95 0 and max 7. One extra allocation is the safety margin.
 const shared_engine_allocation_tolerance: usize = 8;
 var shared_engine_teardown_registered: bool = false;
+// `[[Prototype]]` of the shared global, taken once the realm is built.
+// `endSharedTest` compares it and panics on a mismatch. It does not
+// write the pointer back: restoring here would hide the test that
+// left the realm dirty.
+var isolation_global_prototype: ?*core.Object = null;
+var isolation_global_prototype_ready: bool = false;
+
+fn captureGlobalPrototype(eng: *TestEngine) void {
+    const global = eng.context.global orelse return;
+    isolation_global_prototype = global.getPrototype();
+    isolation_global_prototype_ready = true;
+}
+
+fn checkGlobalPrototype(eng: *TestEngine) void {
+    if (!isolation_global_prototype_ready) return;
+    const global = eng.context.global orelse return;
+    if (global.getPrototype() == isolation_global_prototype) return;
+    std.debug.panic(
+        "shared-test isolation gate: test=\"{s}\" changed globalThis.[[Prototype]]",
+        .{runnerTestName()},
+    );
+}
+
+// Own-property fingerprints of realm prototypes. Slot payloads are raw
+// bits and addresses taken after `gc.reclaimNow`. The checker never
+// dereferences them: a later collection may have freed the value.
+const isolation_object_cap = 160;
+const isolation_label_cap = 96;
+const IsolationSlot = struct {
+    atom: core.atom.Atom,
+    flags: u6,
+    a: u64,
+    b: u64,
+};
+const IsolationObject = struct {
+    object: *core.Object,
+    proto: ?*core.Object,
+    shape_identity: u64,
+    prop_count: u32,
+    slots: []IsolationSlot,
+    label: [isolation_label_cap]u8,
+    label_len: u8,
+};
+const IntrinsicVisit = *const fn (*core.Object, []const u8) void;
+const CachedPrototype = struct {
+    slot: core.context.RealmValueSlot,
+    label: []const u8,
+};
+const cached_prototypes = [_]CachedPrototype{
+    .{ .slot = .object_prototype, .label = "Object.prototype" },
+    .{ .slot = .array_prototype, .label = "Array.prototype" },
+    .{ .slot = .string_prototype, .label = "String.prototype" },
+    .{ .slot = .number_prototype, .label = "Number.prototype" },
+    .{ .slot = .boolean_prototype, .label = "Boolean.prototype" },
+    .{ .slot = .bigint_prototype, .label = "BigInt.prototype" },
+    .{ .slot = .symbol_prototype, .label = "Symbol.prototype" },
+    .{ .slot = .async_function_prototype, .label = "AsyncFunction.prototype" },
+    .{ .slot = .generator_prototype, .label = "Generator.prototype" },
+    .{ .slot = .async_iterator_prototype, .label = "AsyncIterator.prototype" },
+    .{ .slot = .async_generator_prototype, .label = "AsyncGenerator.prototype" },
+    .{ .slot = .generator_function_prototype, .label = "GeneratorFunction.prototype" },
+    .{ .slot = .async_generator_function_prototype, .label = "AsyncGeneratorFunction.prototype" },
+    .{ .slot = .iterator_helper_prototype, .label = "IteratorHelper.prototype" },
+    .{ .slot = .wrap_for_valid_iterator_prototype, .label = "WrapForValidIterator.prototype" },
+    .{ .slot = .callsite_prototype, .label = "CallSite.prototype" },
+};
+const native_error_labels = [_][]const u8{
+    "Error.prototype",
+    "EvalError.prototype",
+    "RangeError.prototype",
+    "ReferenceError.prototype",
+    "SyntaxError.prototype",
+    "TypeError.prototype",
+    "URIError.prototype",
+    "InternalError.prototype",
+    "AggregateError.prototype",
+    "SuppressedError.prototype",
+};
+var isolation_objects: [isolation_object_cap]IsolationObject = undefined;
+var isolation_object_count: usize = 0;
+var isolation_objects_ready: bool = false;
+
+comptime {
+    std.debug.assert(native_error_labels.len == @intFromEnum(core.error_names.NativeErrorKind.count));
+}
+
+fn isolationLabel(watched: *const IsolationObject) []const u8 {
+    return watched.label[0..watched.label_len];
+}
+
+fn panicChanged(label: []const u8, rt: *core.JSRuntime, atom_id: core.atom.Atom) noreturn {
+    if (rt.atoms.name(atom_id)) |spelling| {
+        std.debug.panic(
+            "shared-test isolation gate: test=\"{s}\" changed {s}.{s}",
+            .{ runnerTestName(), label, spelling },
+        );
+    }
+    var buf: [16]u8 = undefined;
+    const spelling = if (atom_id.isTaggedInt())
+        std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch "<?>"
+    else if (atom_id == core.atom.null_atom)
+        "<deleted>"
+    else
+        "<shape>";
+    std.debug.panic(
+        "shared-test isolation gate: test=\"{s}\" changed {s}.{s}",
+        .{ runnerTestName(), label, spelling },
+    );
+}
+
+fn panicPrototype(label: []const u8) noreturn {
+    std.debug.panic(
+        "shared-test isolation gate: test=\"{s}\" changed {s}.[[Prototype]]",
+        .{ runnerTestName(), label },
+    );
+}
+
+fn fingerprintSlot(object: *core.Object, index: usize) struct { a: u64, b: u64 } {
+    const flags = object.propFlagsAt(index);
+    if (flags.deleted) return .{ .a = 0, .b = 0 };
+    return switch (flags.kind) {
+        .data => .{ .a = object.asDataAt(index).?.bits, .b = 0 },
+        .accessor => blk: {
+            const accessor = object.asAccessorAt(index).?;
+            break :blk .{
+                .a = if (accessor.getter) |getter| @intFromPtr(getter) else 0,
+                .b = if (accessor.setter) |setter| @intFromPtr(setter) else 0,
+            };
+        },
+        .var_ref => blk: {
+            const cell = object.asVarRefAt(index).?;
+            break :blk .{ .a = @intFromPtr(cell), .b = cell.varRefValue().bits };
+        },
+        // The realm pointer packed into an auto_init slot is rewritten by a
+        // moving collection. The id and the immutable descriptor are not.
+        .auto_init => blk: {
+            const slot = object.propertyEntry(index).*.slot.auto_init;
+            break :blk .{
+                .a = @intFromEnum(slot.realm_and_id.id()),
+                .b = if (slot.opaque_ptr) |pointer| @intFromPtr(pointer) else 0,
+            };
+        },
+    };
+}
+
+fn isLegalMaterialization(before: core.property.Flags, after: core.property.Flags) bool {
+    if (!before.isAutoInit() or after.deleted) return false;
+    if (after.kind != .data and after.kind != .var_ref) return false;
+    return before.writable == after.writable and
+        before.enumerable == after.enumerable and
+        before.configurable == after.configurable;
+}
+
+fn formatClassPrototypeLabel(rt: *core.JSRuntime, class_id: core.class.ClassId, buf: []u8) []const u8 {
+    if (rt.classes.className(class_id)) |name_atom| {
+        if (rt.atoms.name(name_atom)) |spelling| {
+            if (std.fmt.bufPrint(buf, "{s}.prototype", .{spelling})) |written| return written else |_| {}
+        }
+    }
+    return std.fmt.bufPrint(buf, "class-{d}.prototype", .{class_id}) catch "class.prototype";
+}
+
+fn eachIntrinsic(eng: *TestEngine, visit: IntrinsicVisit) void {
+    const ctx = eng.context;
+    const global = ctx.global orelse return;
+    const class_count = @min(ctx.class_prototypes.len, @as(usize, core.class.ids.init_count));
+    var class_index: usize = 0;
+    while (class_index < class_count) : (class_index += 1) {
+        const class_id: core.class.ClassId = @intCast(class_index);
+        const object = ctx.classPrototypeObject(class_id) orelse continue;
+        if (object == global) continue;
+        var label_buf: [isolation_label_cap]u8 = undefined;
+        const label = formatClassPrototypeLabel(eng.runtime, class_id, &label_buf);
+        visit(object, label);
+    }
+    var kind_index: usize = 0;
+    while (kind_index < native_error_labels.len) : (kind_index += 1) {
+        const kind: core.error_names.NativeErrorKind = @enumFromInt(kind_index);
+        const object = ctx.nativeErrorPrototypeObject(kind) orelse continue;
+        if (object == global) continue;
+        visit(object, native_error_labels[kind_index]);
+    }
+    for (cached_prototypes) |entry| {
+        const stored = ctx.cached_values[@intFromEnum(entry.slot)] orelse continue;
+        const object = core.value_semantics.objectFromValue(stored) orelse continue;
+        if (object == global) continue;
+        visit(object, entry.label);
+    }
+    if (ctx.cached_function_proto) |object| {
+        if (object != global) visit(object, "Function.prototype");
+    }
+    if (ctx.cached_promise_proto) |object| {
+        if (object != global) visit(object, "Promise.prototype");
+    }
+    var cursor = global.getPrototype();
+    var depth: usize = 0;
+    while (cursor) |object| {
+        if (depth == 16) break;
+        var label_buf: [isolation_label_cap]u8 = undefined;
+        const label = std.fmt.bufPrint(&label_buf, "proto-chain-{d}", .{depth}) catch "proto-chain";
+        if (object != global) visit(object, label);
+        cursor = object.getPrototype();
+        depth += 1;
+    }
+}
+
+fn noteObject(object: *core.Object, label: []const u8) void {
+    var index: usize = 0;
+    while (index < isolation_object_count) : (index += 1) {
+        if (isolation_objects[index].object == object) return;
+    }
+    if (isolation_object_count == isolation_object_cap) {
+        std.debug.panic("shared-test isolation gate: prototype table cap {d}", .{isolation_object_cap});
+    }
+    const slot_count: usize = object.shape_ref.prop_count;
+    const slots: []IsolationSlot = if (slot_count == 0) &.{} else mustPageAlloc(IsolationSlot, slot_count);
+    var label_buf: [isolation_label_cap]u8 = @splat(0);
+    const label_len = @min(label.len, isolation_label_cap);
+    @memcpy(label_buf[0..label_len], label[0..label_len]);
+    var slot_index: usize = 0;
+    while (slot_index < slot_count) : (slot_index += 1) {
+        const bits = fingerprintSlot(object, slot_index);
+        slots[slot_index] = .{
+            .atom = object.propAtomAt(slot_index),
+            .flags = object.propFlagsAt(slot_index).bits(),
+            .a = bits.a,
+            .b = bits.b,
+        };
+    }
+    isolation_objects[isolation_object_count] = .{
+        .object = object,
+        .proto = object.getPrototype(),
+        .shape_identity = object.shape_ref.identity,
+        .prop_count = object.shape_ref.prop_count,
+        .slots = slots,
+        .label = label_buf,
+        .label_len = @intCast(label_len),
+    };
+    isolation_object_count += 1;
+}
+
+fn visitNote(object: *core.Object, label: []const u8) void {
+    noteObject(object, label);
+}
+
+fn materializeOwnAutoInits(object: *core.Object) void {
+    // A few hundred builtin methods. Restart after each one: materializing
+    // can append or rewrite the shape under us.
+    var guard: usize = 0;
+    while (guard < 4096) : (guard += 1) {
+        const count = object.shape_ref.prop_count;
+        var index: usize = 0;
+        var pending: ?core.atom.Atom = null;
+        while (index < count) : (index += 1) {
+            if (!object.propFlagsAt(index).isAutoInit()) continue;
+            pending = object.propAtomAt(index);
+            break;
+        }
+        const key = pending orelse return;
+        _ = object.getProperty(key) catch |err|
+            std.debug.panic("isolation preheat: {s}", .{@errorName(err)});
+    }
+    std.debug.panic("isolation preheat: auto_init did not settle", .{});
+}
+
+fn visitMaterialize(object: *core.Object, _: []const u8) void {
+    materializeOwnAutoInits(object);
+}
+
+fn mustPublish(object: anytype) void {
+    _ = object catch |err| std.debug.panic("isolation preheat: {s}", .{@errorName(err)});
+}
+
+/// Publish lazy prototypes, then force every watched auto_init slot to its
+/// real builtin value. A later `RegExp.prototype.exec = function(){}` is
+/// then a bit change. A slot that is still auto_init at check time may
+/// become data/var_ref with the same attributes; that update is written
+/// into the baseline and is not a failure. Prototypes that do not exist
+/// yet are adopted on the first `endSharedTest` that sees them, so a test
+/// which both creates and mutates one of those before that snapshot is
+/// not caught.
+fn publishLazyIntrinsicPrototypes(eng: *TestEngine) void {
+    const global = eng.context.global orelse return;
+    const rt = eng.runtime;
+    const ctx = eng.context;
+    mustPublish(exec.array_ops.arrayIteratorPrototypeFromContext(ctx, global));
+    mustPublish(exec.string_ops.stringIteratorPrototypeFromContext(ctx, global));
+    mustPublish(exec.string_ops.regExpStringIteratorPrototype(ctx, global));
+    mustPublish(exec.object_ops.generatorPrototypeFromGlobal(rt, global));
+    mustPublish(exec.object_ops.generatorFunctionPrototypeFromGlobal(rt, global));
+    mustPublish(exec.object_ops.asyncGeneratorFunctionPrototypeFromGlobal(rt, global));
+    mustPublish(exec.promise_ops.asyncFunctionPrototypeFromGlobal(rt, global));
+    mustPublish(exec.promise_ops.asyncIteratorPrototypeFromGlobal(rt, global));
+    mustPublish(exec.promise_ops.asyncGeneratorPrototypeFromGlobal(rt, global));
+    mustPublish(exec.object_ops.wrapForValidIteratorPrototype(rt, global));
+    mustPublish(exec.object_ops.callSitePrototypeFromGlobal(rt, global));
+    mustPublish(exec.iterator_ops.iteratorHelperPrototype(rt, global));
+    _ = exec.iterator_ops.iteratorPrototypeFromGlobal(rt, global);
+    _ = eng.eval("void new Map().keys(); void new Set().values();") catch |err|
+        std.debug.panic("isolation preheat: {s}", .{@errorName(err)});
+    eachIntrinsic(eng, visitMaterialize);
+    while (true) switch (exec.promise_ops.drainOnePendingJob(ctx, null) catch |err|
+        std.debug.panic("drainOnePendingJob: {s}", .{@errorName(err)})) {
+        .empty, .exception => break,
+        .success => {},
+    };
+    clearPendingState(eng);
+    ctx.lexicals = null;
+}
+
+fn captureIsolationBaseline(eng: *TestEngine) void {
+    eachIntrinsic(eng, visitNote);
+    isolation_objects_ready = true;
+}
+
+fn releaseIsolationBaseline() void {
+    var index: usize = 0;
+    while (index < isolation_object_count) : (index += 1) {
+        const slots = isolation_objects[index].slots;
+        if (slots.len != 0) std.heap.page_allocator.free(slots);
+        isolation_objects[index].slots = &.{};
+    }
+    isolation_object_count = 0;
+    isolation_objects_ready = false;
+}
+
+fn liveHasAtom(object: *core.Object, atom_id: core.atom.Atom) bool {
+    var index: usize = 0;
+    while (index < object.shape_ref.prop_count) : (index += 1) {
+        if (object.propFlagsAt(index).deleted) continue;
+        if (object.propAtomAt(index) == atom_id) return true;
+    }
+    return false;
+}
+
+fn baselineHasAtom(watched: *const IsolationObject, atom_id: core.atom.Atom, live_only: bool) bool {
+    var index: usize = 0;
+    while (index < watched.prop_count) : (index += 1) {
+        if (live_only and core.property.Flags.fromBits(watched.slots[index].flags).deleted) continue;
+        if (watched.slots[index].atom == atom_id) return true;
+    }
+    return false;
+}
+
+fn panicShapeDiff(rt: *core.JSRuntime, object: *core.Object, watched: *const IsolationObject) noreturn {
+    const label = isolationLabel(watched);
+    var index: usize = 0;
+    while (index < watched.prop_count) : (index += 1) {
+        if (core.property.Flags.fromBits(watched.slots[index].flags).deleted) continue;
+        const atom_id = watched.slots[index].atom;
+        if (!liveHasAtom(object, atom_id)) panicChanged(label, rt, atom_id);
+    }
+    index = 0;
+    while (index < object.shape_ref.prop_count) : (index += 1) {
+        const atom_id = object.propAtomAt(index);
+        const deleted = object.propFlagsAt(index).deleted;
+        if (deleted) {
+            if (!baselineHasAtom(watched, atom_id, false)) panicChanged(label, rt, atom_id);
+            continue;
+        }
+        if (!baselineHasAtom(watched, atom_id, true)) panicChanged(label, rt, atom_id);
+    }
+    panicChanged(label, rt, core.atom.null_atom);
+}
+
+fn compareIsolationObject(rt: *core.JSRuntime, watched: *IsolationObject) void {
+    const object = watched.object;
+    const label = isolationLabel(watched);
+    if (object.getPrototype() != watched.proto) panicPrototype(label);
+    const live_count: usize = object.shape_ref.prop_count;
+    if (live_count != watched.prop_count) panicShapeDiff(rt, object, watched);
+
+    var materialized = false;
+    var index: usize = 0;
+    while (index < live_count) : (index += 1) {
+        const base = &watched.slots[index];
+        const live_atom = object.propAtomAt(index);
+        if (live_atom != base.atom) panicChanged(label, rt, base.atom);
+        const live_flags = object.propFlagsAt(index);
+        const base_flags = core.property.Flags.fromBits(base.flags);
+        const live_bits = fingerprintSlot(object, index);
+        if (isLegalMaterialization(base_flags, live_flags)) {
+            base.flags = live_flags.bits();
+            base.a = live_bits.a;
+            base.b = live_bits.b;
+            materialized = true;
+            continue;
+        }
+        if (live_flags.bits() != base.flags or
+            (!live_flags.deleted and (live_bits.a != base.a or live_bits.b != base.b)))
+        {
+            panicChanged(label, rt, live_atom);
+        }
+    }
+    const identity = object.shape_ref.identity;
+    if (materialized or identity != watched.shape_identity) watched.shape_identity = identity;
+}
+
+fn checkSharedIsolation(eng: *TestEngine) void {
+    checkGlobalPrototype(eng);
+    if (!isolation_objects_ready) return;
+    var index: usize = 0;
+    while (index < isolation_object_count) : (index += 1) {
+        compareIsolationObject(eng.runtime, &isolation_objects[index]);
+    }
+    eachIntrinsic(eng, visitNote);
+}
 
 fn clearPendingState(eng: *TestEngine) void {
     if (eng.context.hasException()) _ = eng.context.takeException();
@@ -128,6 +551,7 @@ pub fn sharedTestEngine() *TestEngine {
         // namespace.
         _ = eng.eval(";") catch |err| std.debug.panic("baseline eval: {s}", .{@errorName(err)});
         clearPendingState(eng);
+        publishLazyIntrinsicPrototypes(eng);
         if (eng.context.global) |g| {
             shared_engine_baseline.property_count = g.shape_ref.prop_count;
             shared_engine_baseline.shape_prop_count = g.shape_ref.prop_count;
@@ -165,6 +589,8 @@ pub fn sharedTestEngine() *TestEngine {
         shared_engine_baseline.allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
         shared_engine_baseline.allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
         shared_engine_baseline.module_count = eng.context.modules.count();
+        captureGlobalPrototype(eng);
+        captureIsolationBaseline(eng);
         registerSharedEngineProcessTeardown();
     }
     return &shared_engine_storage.?;
@@ -215,11 +641,15 @@ fn releaseSharedEngineBaselineSnapshot() void {
     shared_engine_baseline.shape_prop_count = 0;
     shared_engine_baseline.shape_hash = 0;
     shared_engine_baseline.shape_deleted_count = 0;
+    isolation_global_prototype = null;
+    isolation_global_prototype_ready = false;
+    releaseIsolationBaseline();
 }
 
 pub fn endSharedTest() void {
     const eng = if (shared_engine_storage) |*e| e else return;
     resetSharedEngineAfterTest(eng);
+    checkSharedIsolation(eng);
 
     const allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
     const allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;

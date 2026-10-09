@@ -88,8 +88,8 @@ test "dense parameter arrays spread reserve OOM preserves iterator progress and 
 }
 
 test "dense parameter arrays spread observes iterator methods getters and abrupt completion" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
     _ = try js.eval(
         \\let reads = 0, calls = 0;
         \\const it = { get next() {

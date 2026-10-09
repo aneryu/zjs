@@ -4419,8 +4419,8 @@ test "qjs alignment X-09 VARREF to GETSET detaches the stale cell" {
 }
 
 test "instanceof resident dispatch preserves GetMethod and result coercion semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\const candidate = { marker: 7 };

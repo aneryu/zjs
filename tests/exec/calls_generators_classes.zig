@@ -154,7 +154,7 @@ test "Engine eval preserves dense array pop host output semantics" {
 }
 
 test "Engine eval preserves ordinary array pop fast path semantics" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let a = [1, 2, 3];
         \\let x = a.pop();
         \\print(x, a.length, a.join(","));
@@ -303,7 +303,7 @@ test "Engine eval preserves one-shot array literal host output semantics" {
 }
 
 test "Engine eval preserves one-shot array named property host output semantics" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let tab = [1];
         \\tab.a = 9;
         \\print(tab.a);
@@ -348,7 +348,7 @@ test "Engine eval preserves typed array constructor length host output semantics
 }
 
 test "Engine eval preserves Int32Array indexed read fast path semantics" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let a = new Int32Array(2);
         \\a[0] = 7;
         \\a[1] = -3;
@@ -558,8 +558,8 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
 // qjs:41171 resolves length through ordinary [[Get]] before qjs:41182-41197
 // selects ARRAY/ARGUMENTS/MAPPED_ARGUMENTS or the observable element fallback.
 test "apply resolves arguments length and preserves observable fallback" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\function signature() {
@@ -1885,8 +1885,8 @@ test "forwarded leaf returns with leftover operands route through general teardo
 }
 
 test "method call empty leaf binds receiver as this and balances refcounts" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     _ = try js.eval(
         \\Object.defineProperty(String.prototype, "__leafThis", {
@@ -2082,8 +2082,8 @@ test "strict empty leaf preserves undefined this across call forms" {
 }
 
 test "strict method empty leaf passes primitive receiver uncoerced" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     _ = try js.eval(
         \\Object.defineProperty(String.prototype, "__strictLeafThis", {
@@ -2369,8 +2369,8 @@ test "ordinary root bytecode call carves one operand window" {
 }
 
 test "method calls preserve receiver arguments eval captures and abrupt ownership" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\const receiver = { value: 4 };

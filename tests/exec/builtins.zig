@@ -216,7 +216,7 @@ test "simple numeric bytecode call range fast path preserves side effect fallbac
 }
 
 test "invariant int32 property and dense array range fast path preserves observable reads" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let own = { a: 1, b: 2 };
         \\let ownSum = 0;
         \\for (let i = 0; i < 1000; i++) ownSum += own.a;
@@ -270,7 +270,7 @@ test "dense array modulo field range fast path preserves observable reads" {
 }
 
 test "dense array length indexed sum range fast path preserves observable reads" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const direct = [];
         \\for (let i = 0; i < 1000; i++) direct[i] = i;
         \\let directSum = 0;
@@ -291,7 +291,7 @@ test "dense array length indexed sum range fast path preserves observable reads"
 }
 
 test "array named property simple set cache observes prototype changes" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let first = [1];
         \\first.a = 1;
         \\print(first.a);
@@ -312,7 +312,7 @@ test "array named property simple set cache observes prototype changes" {
 }
 
 test "Array.prototype.push fast path observes inherited indexed setter" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let seen = 0;
         \\Object.defineProperty(Array.prototype, "2", {
         \\  set: function(v) { seen = v; },
@@ -330,8 +330,8 @@ test "Array.prototype.push fast path observes inherited indexed setter" {
 }
 
 test "array dense writers distinguish own Set holes and CreateDataProperty" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\(function () {
@@ -392,8 +392,8 @@ test "array dense writers distinguish own Set holes and CreateDataProperty" {
 }
 
 test "push splice fill and unshift preserve prototype and payload semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\(function () {
@@ -455,8 +455,8 @@ test "push splice fill and unshift preserve prototype and payload semantics" {
 }
 
 test "array indexed setter guards follow the receiver realm" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
     const result = try js.eval(
         \\(function () {
@@ -947,7 +947,7 @@ test "Array.of and Array.from run a Proxy constructor's construct trap" {
 }
 
 test "array for-of fast path preserves iterator observability" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let s = 0;
         \\for (let x of [1, 2, 3]) s += x;
         \\print(s);
@@ -972,7 +972,7 @@ test "array for-of fast path preserves iterator observability" {
 }
 
 test "dense array indexed append range preserves ordinary set guards" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\let fast = [];
         \\for (let i = 0; i < 8; i++) fast[i] = i;
         \\let sum = 0;
@@ -4435,7 +4435,7 @@ test "Atomics index and size conversions follow ToIndex and ToIntegerOrInfinity"
 }
 
 test "Date.prototype.toJSON invokes toISOString on ToObject(this)" {
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\Number.prototype.toISOString = function () { "use strict"; return typeof this; };
         \\print(Date.prototype.toJSON.call(5));
         \\delete Number.prototype.toISOString;
@@ -4563,7 +4563,7 @@ test "Array element writes go through [[Set]] and primitive receivers read their
     // push/unshift on a non-extensible array whose prototype is a Proxy or a
     // TypedArray: the prototype's [[Set]] decides (OrdinarySet step 2.b), so
     // no TypeError; sort/reverse on a Number read LengthOfArrayLike.
-    try helpers.expectPrints(
+    try helpers.expectPrintsFresh(
         \\const typed = Object.preventExtensions(Object.setPrototypeOf([], new Int8Array(0)));
         \\print(Array.prototype.push.call(typed, 5), typed.length, Object.keys(typed).length);
         \\const log = [];
