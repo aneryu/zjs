@@ -428,9 +428,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             if (pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
             const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
             const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
-            if ((s.is_strict or fd.is_strict_mode) and
-                (identifiers.atomNameEquals(s, name, "eval") or identifiers.atomNameEquals(s, name, "arguments")))
-            {
+            if ((s.is_strict or fd.is_strict_mode) and identifiers.isEvalOrArgumentsAtom(name)) {
                 return Error.InvalidAssignmentTarget;
             }
             if (name == atom_this or name == atom_new_target) return Error.InvalidAssignmentTarget;
@@ -2380,9 +2378,7 @@ noinline fn parsePrimaryLeaf(s: *State) Error!void {
                 }
             }
             const ident = identifiers.identifierLikeAtom(s);
-            if (ident == atom_module.ids.arguments and identifiers.argumentsIdentifierIsForbidden(s)) {
-                return s.failWithMessage(null, "'arguments' is not allowed in class field initializer or static initialization block");
-            }
+            try identifiers.rejectForbiddenArguments(s, ident);
             // Identifier production is independent of its consumer.
             // Assignment and call sites rewrite this exact last opcode
             // after the complete operand has been parsed.
@@ -2742,13 +2738,15 @@ const ObjectLiteralCapacityHint = struct {
     }
 };
 
-/// The name and function of an object-literal method after its `*`,
-/// `async` or `async *` prefix.
-fn parsePrefixedObjectMethod(
+/// Object-literal method after a `*` / `async` prefix, or a `get` / `set`
+/// accessor. `define_flags` is 0 for an ordinary method and the accessor
+/// flag for get/set; the method bit is always OR-ed in.
+fn parseObjectMethodProperty(
     s: *State,
     func_kind: ParseFunctionKind,
+    define_flags: u8,
+    source_start: FunctionSourceStart,
     capacity_hint: *ObjectLiteralCapacityHint,
-    property_source_start: FunctionSourceStart,
 ) Error!void {
     if (s.peekKind() == .lbracket) {
         capacity_hint.invalidate();
@@ -2756,16 +2754,16 @@ fn parsePrefixedObjectMethod(
         try parseAssignExpr2(s, ParseFlags.default);
         try s.expectToken(.rbracket);
         if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-        try parseObjectMethodFunction(s, null, func_kind, property_source_start);
-        try Emitter.opU8(s, opcode.op.define_method_computed, 4);
+        try parseObjectMethodFunction(s, null, func_kind, source_start);
+        try Emitter.opU8(s, opcode.op.define_method_computed, define_flags | 4);
         return;
     }
     const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
     const name = name_info.atom;
     capacity_hint.noteStaticProperty(name);
     if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-    try parseObjectMethodFunction(s, null, func_kind, property_source_start);
-    try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
+    try parseObjectMethodFunction(s, null, func_kind, source_start);
+    try Emitter.opAtomU8(s, opcode.op.define_method, name, define_flags | 4);
 }
 
 fn parseObjectProperty(
@@ -2795,7 +2793,7 @@ fn parseObjectProperty(
 
     if (k == .star) {
         try s.advance();
-        return parsePrefixedObjectMethod(s, .generator, capacity_hint, property_source_start);
+        return parseObjectMethodProperty(s, .generator, 0, property_source_start, capacity_hint);
     }
 
     if (k == .ident and s.isIdent("async")) {
@@ -2812,7 +2810,7 @@ fn parseObjectProperty(
                 try s.advance();
                 break :blk .async_generator;
             } else .async;
-            return parsePrefixedObjectMethod(s, func_kind, capacity_hint, property_source_start);
+            return parseObjectMethodProperty(s, func_kind, 0, property_source_start, capacity_hint);
         }
     }
 
@@ -2851,11 +2849,11 @@ fn parseObjectProperty(
             s.peekKind() != .comma and
             s.peekKind() != .rbrace)
         {
-            try parseObjectAccessorProperty(
+            const accessor: classes.AccessorKind = if (is_getter) .get else .set;
+            try parseObjectMethodProperty(
                 s,
-                computed_flags,
-                if (is_getter) .get else .set,
-                if (is_getter) 1 else 2,
+                accessor.funcKind(),
+                accessor.defineFlags(),
                 property_source_start,
                 capacity_hint,
             );
@@ -2880,9 +2878,7 @@ fn parseObjectProperty(
             // Shorthand `{ x }` is an ordinary identifier read. Keep the
             // producer uniform and let scope resolution decide whether a
             // surrounding with-object supplies the value.
-            if (name == atom_module.ids.arguments and identifiers.argumentsIdentifierIsForbidden(s)) {
-                return s.failWithMessage(null, "'arguments' is not allowed in class field initializer or static initialization block");
-            }
+            try identifiers.rejectForbiddenArguments(s, name);
             try typescript.emitIdentifierReference(s, name);
             try Emitter.opAtom(s, opcode.op.define_field, name);
         } else {
@@ -2891,33 +2887,6 @@ fn parseObjectProperty(
         return;
     }
     return s.failUnexpectedToken();
-}
-
-fn parseObjectAccessorProperty(
-    s: *State,
-    flags: ParseFlags,
-    func_kind: ParseFunctionKind,
-    define_flags: u8,
-    source_start: FunctionSourceStart,
-    capacity_hint: *ObjectLiteralCapacityHint,
-) Error!void {
-    if (s.peekKind() == .lbracket) {
-        capacity_hint.invalidate();
-        try s.advance();
-        try parseAssignExpr2(s, flags);
-        try s.expectToken(.rbracket);
-        if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-        try parseObjectMethodFunction(s, null, func_kind, source_start);
-        try Emitter.opU8(s, opcode.op.define_method_computed, define_flags | 4);
-        return;
-    }
-
-    const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
-    const name = name_info.atom;
-    capacity_hint.noteStaticProperty(name);
-    if (!typescript.tsIsMethodStart(s)) return s.failExpectedToken(.lparen);
-    try parseObjectMethodFunction(s, null, func_kind, source_start);
-    try Emitter.opAtomU8(s, opcode.op.define_method, name, define_flags | 4);
 }
 
 pub const ObjectPropertyName = struct {

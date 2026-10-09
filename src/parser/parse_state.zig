@@ -2123,7 +2123,7 @@ pub const State = struct {
     /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`.
     /// `resolve_variables` lowers this temp opcode
     /// to a per-scope binding refresh (TDZ re-arm + captured-slot
-    /// detach, see `enterScopeRefreshSize`) so block-scoped bindings
+    /// detach, see `lowerEnterScope`) so block-scoped bindings
     /// are fresh on every scope entry — the per-iteration semantics of
     /// lexicals declared inside loop bodies.
     ///

@@ -61,14 +61,14 @@ Integration-test harness (`helpers.*` names), not an engine package.
 
 | File | Owns |
 |---|---|
-| `gc.zig` | precise reclaim, weak collections, incremental GC drain |
+| `gc.zig` | precise reclaim (`reclaimNow`), weak-collection entries |
 | `expect.zig` | string / set assertions |
 | `fixture.zig` | hand-written bytecode and parse-then-run |
 | `test_engine.zig` | one-off `TestEngine`, host probes, scratch dirs |
 | `shared.zig` | process-level shared engine and leak gate |
 
 Package unit tests (`src/parser/tests.zig`, `src/bytecode/tests.zig`)
-only reclaim with a local `runObjectCycleRemoval` helper. They do not
+only reclaim with a local `reclaimNow` helper. They do not
 import this package. The engine module does not export it.
 
 ## Attest matrix

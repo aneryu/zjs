@@ -69,6 +69,12 @@ pub inline fn strictUnresolvedAssignmentNeedsReference(s: *State, atom_id: Atom,
     return !hasKnownBinding(s, atom_id);
 }
 
+pub fn rejectForbiddenArguments(s: *State, atom_id: Atom) Error!void {
+    if (atom_id == atom_module.ids.arguments and argumentsIdentifierIsForbidden(s)) {
+        return s.failWithMessage(null, "'arguments' is not allowed in class field initializer or static initialization block");
+    }
+}
+
 pub fn argumentsIdentifierIsForbidden(s: *State) bool {
     // QuickJS parses every field initializer in a synthetic method whose
     // FunctionDef has arguments_allowed=false. Both
@@ -251,6 +257,42 @@ pub fn identifierLikeAtom(s: *State) Atom {
 pub fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {
     return s.peekKind() == .ident and
         escapedIdentifierIsReservedWordForBinding(s, s.token.payload.ident.atom, s.token.payload.ident.has_escape);
+}
+
+pub fn isEvalOrArgumentsAtom(atom_id: Atom) bool {
+    return atom_id == atom_module.ids.eval_ or atom_id == atom_module.ids.arguments;
+}
+
+pub const BindingIdentifierStyle = enum {
+    unexpected_token,
+    binding_name,
+};
+
+pub const BindingIdentifierOptions = struct {
+    missing: BindingIdentifierStyle = .unexpected_token,
+    escape: BindingIdentifierStyle = .unexpected_token,
+    reject_let: bool = false,
+    reject_strict_eval_arguments: bool = true,
+};
+
+fn failBindingIdentifier(s: *State, style: BindingIdentifierStyle) Error {
+    return switch (style) {
+        .unexpected_token => s.failUnexpectedToken(),
+        .binding_name => s.failExpectedDescription("binding name"),
+    };
+}
+
+/// BindingIdentifier at the current token. Does not advance.
+/// `missing` and `escape` keep each caller's existing diagnostic.
+pub fn expectBindingIdentifier(s: *State, opts: BindingIdentifierOptions) Error!Atom {
+    if (!isIdentifierLikeToken(s)) return failBindingIdentifier(s, opts.missing);
+    if (identifierLikeHasInvalidEscapeForBinding(s)) return failBindingIdentifier(s, opts.escape);
+    const atom_id = identifierLikeAtom(s);
+    if (opts.reject_let and atom_id == atom_module.ids.let) return s.failUnexpectedToken();
+    if (opts.reject_strict_eval_arguments and s.isStrict() and isEvalOrArgumentsAtom(atom_id)) {
+        return s.failUnexpectedToken();
+    }
+    return atom_id;
 }
 
 pub fn atomNameEquals(s: *State, atom_id: Atom, name: []const u8) bool {

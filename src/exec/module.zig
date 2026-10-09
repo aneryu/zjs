@@ -3,9 +3,9 @@
 //! Parser artifacts are consumed into `PendingDefinition`; installation moves
 //! owned bytecode and duplicates request atoms or binding cells retained by a
 //! module record. Link diagnostics borrow atoms from those stable records.
-//! Asynchronous host loading and dynamic-import jobs live in this file
-//! alongside the registry and graph-link state, mirroring the QuickJS module
-//! resolver, linker and evaluator.
+//! Host loading is synchronous. Dynamic-import jobs and top-level await
+//! scheduling live in this file alongside the registry and graph-link state,
+//! mirroring the QuickJS module resolver, linker and evaluator.
 
 const std = @import("std");
 
@@ -13,7 +13,6 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const core = @import("../core/root.zig");
-const array_list_erased = @import("../core/array_list_erased.zig");
 const sort_erased = @import("../core/sort_erased.zig");
 const exception_ops = @import("exception_ops.zig");
 const module_auto_init = @import("../core/module_auto_init.zig");
@@ -27,7 +26,7 @@ const value_ops = @import("value_ops.zig");
 
 const atom_default = core.atom.predefinedId("default", .string).?;
 
-pub const LinkDiagnostic = struct {
+const LinkDiagnostic = struct {
     pub const Kind = enum {
         missing_export,
         ambiguous_export,
@@ -69,7 +68,7 @@ pub fn installParsedModuleArtifact(
     var atom_scope = core.atom.CompileAtomScope.init(ctx.runtime.atoms, ctx.runtime);
     defer atom_scope.deinit();
     try atom_scope.activate();
-    var pending = try pendingDefinitionFromArtifact(ctx, artifact, referrer_path, null);
+    var pending = try pendingDefinitionFromArtifact(ctx, artifact, referrer_path);
     defer pending.deinit();
     return installPendingDefinition(ctx, module_name, &pending);
 }
@@ -96,7 +95,6 @@ fn pendingDefinitionFromArtifact(
     ctx: *core.JSContext,
     artifact: parser.ModuleArtifact,
     referrer_path: ?[]const u8,
-    resolved_request_names: ?[]const core.Atom,
 ) !core.module.PendingDefinition {
     const runtime = ctx.runtime;
     var parsed = artifact.record;
@@ -109,8 +107,20 @@ fn pendingDefinitionFromArtifact(
     const function = artifact.function_bytecode;
     if (!function.isModule() or function.realmContext() != ctx) return error.InvalidBytecode;
     const closure_vars = function.closureVar();
+
+    for (parsed.requests, 0..) |request, request_index| {
+        const resolved = try resolvedRequestAtomForParsed(
+            ctx,
+            &parsed,
+            request.module_name,
+            @intCast(request_index),
+            referrer_path,
+        );
+        const installed_index = pending.addRequest(resolved) catch |err|
+            return pendingMetadataError(err);
+        if (installed_index != @as(u32, @intCast(request_index))) return error.InvalidBytecode;
+    }
     for (parsed.imports) |entry| {
-        _ = try requestName(parsed, entry.request_index);
         if (entry.var_idx >= closure_vars.len) return error.InvalidBytecode;
         const closure = closure_vars[entry.var_idx];
         if (closure.var_name != entry.local_name) return error.InvalidBytecode;
@@ -119,36 +129,6 @@ fn pendingDefinitionFromArtifact(
         else
             .module_import;
         if (closure.closureType() != expected_type) return error.InvalidBytecode;
-    }
-    for (parsed.exports) |entry| {
-        if (entry.var_idx >= closure_vars.len) return error.InvalidBytecode;
-        if (closure_vars[entry.var_idx].var_name != entry.local_name) return error.InvalidBytecode;
-    }
-    for (parsed.indirect_exports) |entry| _ = try requestName(parsed, entry.request_index);
-    for (parsed.star_exports) |entry| {
-        _ = try requestName(parsed, entry.request_index);
-    }
-    for (parsed.import_attributes) |entry| _ = try requestName(parsed, entry.request_index);
-    if (resolved_request_names) |names| {
-        if (names.len != parsed.requests.len) return error.InvalidBytecode;
-    }
-
-    for (parsed.requests, 0..) |request, request_index| {
-        const resolved = if (resolved_request_names) |names|
-            names[request_index]
-        else
-            try resolvedRequestAtomForParsed(
-                ctx,
-                &parsed,
-                request.module_name,
-                @intCast(request_index),
-                referrer_path,
-            );
-        const installed_index = pending.addRequest(resolved) catch |err|
-            return pendingMetadataError(err);
-        if (installed_index != @as(u32, @intCast(request_index))) return error.InvalidBytecode;
-    }
-    for (parsed.imports) |entry| {
         pending.addImport(
             entry.request_index,
             entry.import_name,
@@ -158,6 +138,8 @@ fn pendingDefinitionFromArtifact(
         ) catch |err| return pendingMetadataError(err);
     }
     for (parsed.exports) |entry| {
+        if (entry.var_idx >= closure_vars.len) return error.InvalidBytecode;
+        if (closure_vars[entry.var_idx].var_name != entry.local_name) return error.InvalidBytecode;
         pending.addExport(
             entry.export_name,
             entry.local_name,
@@ -194,12 +176,11 @@ fn pendingMetadataError(err: anyerror) error{ OutOfMemory, InvalidBytecode } {
     };
 }
 
-pub fn preloadFileModuleGraphWithOrder(
+fn preloadFileModuleGraph(
     env: ModuleEnv,
     context: *core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
-    postorder: *std.ArrayList([]const u8),
 ) !void {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
@@ -207,7 +188,7 @@ pub fn preloadFileModuleGraphWithOrder(
         while (keys.next()) |path| env.allocator.free(path.*);
         seen.deinit(env.allocator);
     }
-    try preloadFileModuleGraphInner(env, context, root_source, root_path, &seen, postorder);
+    try preloadFileModuleGraphInner(env, context, root_source, root_path, &seen);
 }
 
 fn resolveModuleSource(context: *core.JSContext, allocator: std.mem.Allocator, referrer: ?[]const u8, specifier: []const u8, mode: core.context.ModuleSourceLoader.Resolution) ![]u8 {
@@ -713,11 +694,6 @@ pub fn moduleNamespaceValue(
     return moduleNamespaceValueForRecord(ctx, record);
 }
 
-fn requestName(record: bytecode.module.Record, request_index: u32) !bytecode.module.Request {
-    if (request_index >= record.requests.len) return error.InvalidBytecode;
-    return record.requests[@intCast(request_index)];
-}
-
 fn resolvedRequestAtomForParsed(
     ctx: *core.JSContext,
     parsed: *const bytecode.module.Record,
@@ -940,8 +916,8 @@ fn exportNameBytes(rt: *core.JSRuntime, atom_id: core.Atom, digits: *[10]u8) []c
 }
 
 /// Load the graph below `path` depth-first with an explicit stack, so a long
-/// import chain costs heap, not native stack. `postorder` receives each path
-/// after its dependencies, in request order.
+/// import chain costs heap, not native stack. Dependencies are visited in
+/// request order.
 ///
 /// Skipping already-preloaded modules is not a caller-selectable mode: the
 /// `seen` set plus the "record with resolved requests is done" check give
@@ -952,22 +928,20 @@ fn preloadFileModuleGraphInner(
     source_text: []const u8,
     path: []const u8,
     seen: *std.StringHashMapUnmanaged(void),
-    postorder: *std.ArrayList([]const u8),
 ) !void {
     const allocator = env.allocator;
     const runtime = context.runtime;
-    const Frame = struct { record: *core.module.ModuleRecord, path: []const u8, next_request: usize = 0 };
+    const Frame = struct { record: *core.module.ModuleRecord, next_request: usize = 0 };
     var frames: std.ArrayList(Frame) = .empty;
     defer frames.deinit(allocator);
 
     const root = (try preloadModuleRecord(context, allocator, source_text, path, seen)) orelse return;
-    try frames.append(allocator, .{ .record = root.record, .path = root.path });
+    try frames.append(allocator, .{ .record = root });
     while (frames.items.len != 0) {
         const frame = &frames.items[frames.items.len - 1];
         const record = frame.record;
         if (frame.next_request == record.requests.len) {
             if (!record.requestsResolved()) record.markRequestsResolvedNoFail();
-            try appendTrackedPath(allocator, postorder, frame.path);
             _ = frames.pop();
             continue;
         }
@@ -988,7 +962,7 @@ fn preloadFileModuleGraphInner(
 
         const existing_dependency = request.module orelse
             context.modules.find(request.module_name);
-        var loaded: ?LoadedModule = null;
+        var loaded: ?*core.module.ModuleRecord = null;
         if ((existing_dependency == null or !existing_dependency.?.requestsResolved()) and
             !seen.contains(dependency_name))
         {
@@ -1000,11 +974,9 @@ fn preloadFileModuleGraphInner(
             return error.ModuleNotFound;
         try bindRequestModule(record, request_index, dependency);
         // `frame` may move once another frame is pushed.
-        if (loaded) |child| try frames.append(allocator, .{ .record = child.record, .path = child.path });
+        if (loaded) |child| try frames.append(allocator, .{ .record = child });
     }
 }
-
-const LoadedModule = struct { record: *core.module.ModuleRecord, path: []const u8 };
 
 /// Mark `path` seen and compile it unless the registry already holds its
 /// record. Null when there is nothing left to walk: the path was seen, or its
@@ -1015,7 +987,7 @@ fn preloadModuleRecord(
     source_text: []const u8,
     path: []const u8,
     seen: *std.StringHashMapUnmanaged(void),
-) !?LoadedModule {
+) !?*core.module.ModuleRecord {
     const runtime = context.runtime;
     const seen_entry = try seen.getOrPut(allocator, path);
     if (seen_entry.found_existing) return null;
@@ -1023,7 +995,6 @@ fn preloadModuleRecord(
         seen.removeByPtr(seen_entry.key_ptr);
         return err;
     };
-    const tracked_path = seen_entry.key_ptr.*;
     const module_name = try runtime.internAtom(path);
     // TGC S3 §4 class B: held across compilation of the module source.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
@@ -1032,7 +1003,7 @@ fn preloadModuleRecord(
 
     if (context.modules.find(module_name)) |existing| {
         if (existing.requestsResolved()) return null;
-        return .{ .record = existing, .path = tracked_path };
+        return existing;
     }
     // Realm intrinsics must exist before parse-time constants take them.
     _ = try @import("zjs_vm.zig").contextGlobal(context);
@@ -1063,7 +1034,7 @@ fn preloadModuleRecord(
         artifact,
         path,
     );
-    return .{ .record = installed, .path = tracked_path };
+    return installed;
 }
 
 /// Read a module's source. Allocation failure propagates, a missing file is
@@ -1138,12 +1109,6 @@ fn bindRequestModule(record: *core.module.ModuleRecord, request_index: usize, de
     }
 }
 
-fn appendTrackedPath(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8), path: []const u8) !void {
-    const owned_path = try allocator.dupe(u8, path);
-    errdefer allocator.free(owned_path);
-    try array_list_erased.append(paths, allocator, owned_path);
-}
-
 fn syntheticKindForRequestIndex(
     ctx: *core.JSContext,
     record: *const bytecode.module.Record,
@@ -1162,15 +1127,6 @@ fn syntheticKindForRequestIndex(
     return loader.syntheticKind(loader.ptr, specifier, attribute);
 }
 
-fn syntheticModuleKindName(kind: core.module.SyntheticKind) []const u8 {
-    return switch (kind) {
-        .json => "json",
-        .text => "text",
-        .bytes => "bytes",
-        else => unreachable,
-    };
-}
-
 /// Separates a synthetic module's file path from its kind in the registry
 /// name. A file path cannot contain NUL, and resolution rejects one that
 /// does, so no real path reads as tagged.
@@ -1178,15 +1134,12 @@ const synthetic_kind_marker = "\x00type=";
 
 fn syntheticKindFromRegistryName(path: []const u8) ?core.module.SyntheticKind {
     const marker = std.mem.lastIndexOf(u8, path, synthetic_kind_marker) orelse return null;
-    const kind_name = path[marker + synthetic_kind_marker.len ..];
-    if (std.mem.eql(u8, kind_name, "json")) return .json;
-    if (std.mem.eql(u8, kind_name, "text")) return .text;
-    if (std.mem.eql(u8, kind_name, "bytes")) return .bytes;
-    return null;
+    return core.module.SyntheticKind.fromName(path[marker + synthetic_kind_marker.len ..]);
 }
 
 pub fn syntheticModuleRegistryName(allocator: std.mem.Allocator, path: []const u8, kind: core.module.SyntheticKind) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}" ++ synthetic_kind_marker ++ "{s}", .{ path, syntheticModuleKindName(kind) });
+    const kind_name = kind.name() orelse unreachable;
+    return std.fmt.allocPrint(allocator, "{s}" ++ synthetic_kind_marker ++ "{s}", .{ path, kind_name });
 }
 
 pub fn syntheticModuleFilePath(path: []const u8) []const u8 {
@@ -1425,8 +1378,7 @@ const ModuleEvaluationWaiter = struct {
     reject: core.JSValue,
 };
 
-pub const ImportLoaderType = enum { none, json, text, bytes };
-fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) !ImportLoaderType {
+fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) !core.module.SyntheticKind {
     if (!attributes.is(.object)) return .none;
     const type_atom = core.atom.ids.type_;
     const object = core.value_semantics.objectFromValue(attributes) orelse return .none;
@@ -1435,10 +1387,7 @@ fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(ctx.runtime.nativeAllocator());
     try exec.value_ops.appendRawString(ctx.runtime, &buf, type_value);
-    if (std.mem.eql(u8, buf.items, "json")) return .json;
-    if (std.mem.eql(u8, buf.items, "text")) return .text;
-    if (std.mem.eql(u8, buf.items, "bytes")) return .bytes;
-    return .none;
+    return core.module.SyntheticKind.fromName(buf.items) orelse .none;
 }
 
 /// Host I/O, the allocator that owns loaded module bytes, and the read limit.
@@ -1466,7 +1415,7 @@ pub const DynamicImportState = struct {
     /// (jobs run one at a time on this thread, so a single slot suffices —
     /// mirrors qjs threading `attributes` through js_dynamic_import_job to
     /// js_module_loader, quickjs.c / quickjs-libc.c:703).
-    pending_import_type: ImportLoaderType = .none,
+    pending_import_type: core.module.SyntheticKind = .none,
     /// The capability of the import() promise whose job is loading, set
     /// alongside `pending_import_type`. An import whose module is still
     /// evaluating keeps it in a waiter and sets `import_deferred`, so the
@@ -1478,7 +1427,7 @@ pub const DynamicImportState = struct {
     /// them so a re-entrant graph drain sees the outer job's attribute.
     const JobScope = struct {
         state: *DynamicImportState,
-        prev: ImportLoaderType,
+        prev: core.module.SyntheticKind,
         prev_capability: @FieldType(DynamicImportState, "pending_import_capability"),
         prev_deferred: bool,
 
@@ -1492,7 +1441,7 @@ pub const DynamicImportState = struct {
     /// Jobs run one at a time on this thread, so restoring the previous
     /// value keeps re-entrant graph drains correct. Host-hook loaders resolve
     /// their own module kind and ignore this slot.
-    fn enterJob(self: *DynamicImportState, import_type: ImportLoaderType, resolve: core.JSValue, reject: core.JSValue) JobScope {
+    fn enterJob(self: *DynamicImportState, import_type: core.module.SyntheticKind, resolve: core.JSValue, reject: core.JSValue) JobScope {
         const scope = JobScope{
             .state = self,
             .prev = self.pending_import_type,
@@ -1976,12 +1925,7 @@ pub fn evalModuleGraph(
     const normalized_filename = try resolveModuleSourceOrThrow(context, allocator, null, filename, .entry);
     defer allocator.free(normalized_filename);
 
-    var module_postorder = std.ArrayList([]const u8).empty;
-    defer {
-        for (module_postorder.items) |path| allocator.free(path);
-        module_postorder.deinit(allocator);
-    }
-    try preloadFileModuleGraphWithOrder(env, context, source_text, normalized_filename, &module_postorder);
+    try preloadFileModuleGraph(env, context, source_text, normalized_filename);
     const root_module_name = try runtime.internAtom(normalized_filename);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
@@ -1989,12 +1933,8 @@ pub fn evalModuleGraph(
     defer root_module_name_roots.deactivate(runtime);
     const root_record = context.modules.find(root_module_name) orelse return error.ModuleNotFound;
     root_record.import_meta_main = true;
-    try initializeSyntheticFileModules(runtime, context, env, module_postorder.items);
-    var link_diagnostic: LinkDiagnostic = .{};
-    linkModule(context, root_record, &link_diagnostic) catch |err| {
-        try throwModuleLinkError(runtime, context, normalized_filename, err, &link_diagnostic);
-        return moduleResolutionError(err);
-    };
+    try initializeUnlinkedSyntheticDependencies(context, env, root_record);
+    try linkModuleOrThrow(runtime, context, root_record, normalized_filename);
     var dynamic_import_state = DynamicImportState{
         .runtime = runtime,
         .output = output,
@@ -2032,36 +1972,11 @@ pub fn evalModuleGraph(
     return core.JSValue.undefinedValue();
 }
 
-/// Initialize the not-yet-initialized synthetic (JSON/text/bytes) modules
-/// that the modules named by `graph_paths` import. Synthetic records of other
-/// graphs, including one whose initialization already failed, are left alone.
-fn initializeSyntheticFileModules(
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
-    env: ModuleEnv,
-    graph_paths: []const []const u8,
-) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    for (graph_paths) |path| {
-        var module_name = try runtime.internAtom(path);
-        var module_name_roots = core.runtime.rootAtoms(.{&module_name});
-        module_name_roots.activate(runtime);
-        defer module_name_roots.deactivate(runtime);
-        const importer = context.modules.find(module_name) orelse continue;
-        for (importer.requests) |request| {
-            const record = request.module orelse continue;
-            if (record.synthetic_kind == .none or moduleBindingInitialized(record, atom_default)) continue;
-            const record_path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
-            const source_path = syntheticModuleFilePath(record_path);
-            const module_source = try readModuleSourceOrThrow(context, env, source_path, source_path);
-            defer env.allocator.free(module_source);
-            _ = try initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
-        }
-    }
-}
-
 /// Initialize the synthetic dependencies of every not-yet-linked record
-/// reachable from `root`. A linked record's dependencies already are.
+/// reachable from `root`, in request order. A dependency's own synthetics
+/// are initialized before the importer's, so the first missing file is the
+/// one the postorder walk used to report. A linked record's dependencies
+/// already are initialized.
 fn initializeUnlinkedSyntheticDependencies(
     context: *core.JSContext,
     env: ModuleEnv,
@@ -2072,24 +1987,40 @@ fn initializeUnlinkedSyntheticDependencies(
     const global_object = try exec.zjs_vm.contextGlobal(context);
     var visited: std.AutoHashMapUnmanaged(*core.module.ModuleRecord, void) = .empty;
     defer visited.deinit(native);
-    var pending: std.ArrayList(*core.module.ModuleRecord) = .empty;
-    defer pending.deinit(native);
-    try pending.append(native, root);
-    while (pending.pop()) |importer| {
-        if ((try visited.getOrPut(native, importer)).found_existing) continue;
-        for (importer.requests) |request| {
-            const record = request.module orelse continue;
-            if (record.synthetic_kind == .none) {
-                if (record.status == .unlinked) try pending.append(native, record);
+    const Frame = struct { record: *core.module.ModuleRecord, next_request: usize = 0 };
+    var frames: std.ArrayList(Frame) = .empty;
+    defer frames.deinit(native);
+    try frames.append(native, .{ .record = root });
+    while (frames.items.len != 0) {
+        const frame = &frames.items[frames.items.len - 1];
+        if (frame.next_request == 0) {
+            if ((try visited.getOrPut(native, frame.record)).found_existing) {
+                _ = frames.pop();
                 continue;
             }
-            if (moduleBindingInitialized(record, atom_default)) continue;
-            const record_path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
-            const source_path = syntheticModuleFilePath(record_path);
-            const module_source = try readModuleSourceOrThrow(context, env, source_path, source_path);
-            defer env.allocator.free(module_source);
-            _ = try initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
         }
+        const requests = frame.record.requests;
+        if (frame.next_request == requests.len) {
+            for (requests) |request| {
+                const record = request.module orelse continue;
+                if (record.synthetic_kind == .none or moduleBindingInitialized(record, atom_default)) continue;
+                const record_path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
+                const source_path = syntheticModuleFilePath(record_path);
+                const module_source = try readModuleSourceOrThrow(context, env, source_path, source_path);
+                defer env.allocator.free(module_source);
+                _ = try initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
+            }
+            _ = frames.pop();
+            continue;
+        }
+        const dependency = requests[frame.next_request].module orelse {
+            frame.next_request += 1;
+            continue;
+        };
+        frame.next_request += 1;
+        if (dependency.synthetic_kind != .none or dependency.status != .unlinked) continue;
+        if (visited.contains(dependency)) continue;
+        try frames.append(native, .{ .record = dependency });
     }
 }
 
@@ -2724,7 +2655,7 @@ fn evalDynamicImportModule(
     output: ?*std.Io.Writer,
     referrer_path: []const u8,
     specifier: []const u8,
-    import_type: ImportLoaderType,
+    import_type: core.module.SyntheticKind,
 ) !core.JSValue {
     const runtime = state.runtime;
     std.debug.assert(context.runtime == runtime);
@@ -2747,12 +2678,7 @@ fn evalDynamicImportModule(
     // shared with attribute-tagged static imports so both forms resolve to
     // one module record.
     const source_loader = context.module_source_loader orelse return error.ModuleNotFound;
-    const synthetic_kind = source_loader.syntheticKind(source_loader.ptr, target_path_base, switch (import_type) {
-        .none => null,
-        .json => "json",
-        .text => "text",
-        .bytes => "bytes",
-    });
+    const synthetic_kind = source_loader.syntheticKind(source_loader.ptr, target_path_base, import_type.name());
     const is_synthetic = synthetic_kind != null;
     const target_path = if (synthetic_kind) |kind|
         try syntheticModuleRegistryName(allocator, target_path_base, kind)
@@ -2766,23 +2692,16 @@ fn evalDynamicImportModule(
     module_name_roots.activate(runtime);
     defer module_name_roots.deactivate(runtime);
 
-    var preload_postorder = std.ArrayList([]const u8).empty;
-    defer {
-        for (preload_postorder.items) |item| allocator.free(item);
-        preload_postorder.deinit(allocator);
-    }
     // A record whose graph failed to load earlier still has unresolved
     // requests: load it again so the same failure (or, if the missing file
     // appeared, success) repeats instead of a link-time internal error.
+    // Already-resolved records keep their live bindings and status.
     const existing_record = context.modules.find(module_name);
     if (existing_record == null or !existing_record.?.requestsResolved()) {
         if (!is_synthetic) {
             const source = try readModuleSourceOrThrow(context, env, target_path, target_path);
             defer allocator.free(source);
-            // skip-existing preload: records already in the registry keep
-            // their live bindings and status (re-instantiating them would
-            // reset already-evaluated modules).
-            try preloadFileModuleGraphWithOrder(env, context, source, target_path, &preload_postorder);
+            try preloadFileModuleGraph(env, context, source, target_path);
         } else {
             _ = try preloadSyntheticFileModuleTracked(context, target_path, synthetic_kind.?);
         }
@@ -2799,18 +2718,10 @@ fn evalDynamicImportModule(
             defer allocator.free(module_source);
             const global_object = try exec.zjs_vm.contextGlobal(context);
             _ = try initializeSyntheticFileModule(context, global_object, module_name, module_source);
-        } else if (preload_postorder.items.len != 0) {
-            try initializeSyntheticFileModules(runtime, context, env, preload_postorder.items);
         } else {
-            // The graph loaded on an earlier attempt whose synthetic
-            // dependency failed to initialize: retry every one still pending.
             try initializeUnlinkedSyntheticDependencies(context, env, target_record);
         }
-        var link_diagnostic: LinkDiagnostic = .{};
-        linkModule(context, target_record, &link_diagnostic) catch |err| {
-            try throwModuleLinkError(runtime, context, target_path_base, err, &link_diagnostic);
-            return error.JSException;
-        };
+        try linkModuleOrThrow(runtime, context, target_record, target_path_base);
     }
 
     // ContinueDynamicImport: the import settles in a reaction to the
@@ -2832,7 +2743,20 @@ fn evalDynamicImportModule(
     }
 }
 
-pub fn throwModuleLinkError(
+pub fn linkModuleOrThrow(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    record: *core.module.ModuleRecord,
+    filename: []const u8,
+) !void {
+    var diagnostic: LinkDiagnostic = .{};
+    linkModule(context, record, &diagnostic) catch |err| {
+        try throwModuleLinkError(runtime, context, filename, err, &diagnostic);
+        return moduleResolutionError(err);
+    };
+}
+
+fn throwModuleLinkError(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
     filename: []const u8,

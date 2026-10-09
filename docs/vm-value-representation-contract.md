@@ -101,9 +101,8 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
 
 ### 1.3 全 kind 无引用计数
 
-- tracing 收集器是树中**唯一**收集器:`build.zig` 无 GC 选择选项(仅
-  `-Dzjs_force_gc`、`-Dzjs_gc_roots_diag`、`-Dzjs_ownership_audit`),
-  构建指纹 `gc_layout=obj64_m`(`build/config.zig`)。
+- tracing 收集器是树中**唯一**收集器:`build/config.zig` 的引擎选项里与
+  GC 相关的只有 `-Dzjs_force_gc` 和 `-Dzjs_ownership_audit`。
 - `RefCountHeader`/`StringHeader`、`gc.retain`/`release`、
   `JSValue.dup`/`free`、`AtomTable.dup`/`free`、`DynamicAtom.ref_count`、
   `weakref_count`(对象侧)全部删除(`docs/gc-invariants.md`
@@ -196,7 +195,7 @@ Metadata 8B + 普通对象 slots2 体 56B = 64B 块 cell(objectBodyBytes(ids.obj
     `class_payload_kind == .none`} 且 `capacity != 0`,**由类与臂推导,
     不由 `flags.fast_array` 语义位决定**;trace、footprint 记录器与
     `verifyObjectPropertyStorageLayouts` 审计三处共用同一谓词;
-  - a 类 payload:`hasTracerOwnedPayloadCell` 后的 `callVisitStorageCell`;
+  - a 类 payload:`hasTracerOwnedPayloadCell` 后的 `gc_visit.storageCell(...)`;
   - rope tail:`traceRopeEdges`。
 - 块堆几何:64 KiB 块、2 MiB superblock、一块一个 size class、只整
   superblock 释放(`gc_block_heap.zig` 头注)。
@@ -209,8 +208,8 @@ v2 的 retain→publish→release Slot 序随 rc 一起退役。现行协议:
    初始边(`markPublishedYoungClassified`);发布前的字段写不需要屏障,
    发布后的每次强引用写需要(§3)。对未发布 owner 调屏障 = 调用方 bug。
 2. **强引用写 = 存储 + 屏障**,屏障在存储**之后**、同一函数内同步调用
-   (`Object.setFastArrayElementDup`:`slot.* = v;
-   rt.gc.generationalBarrier(owner, v.cycleMarkHeader())`;
+   (`Object.setFastArrayElement`:`slot.* = new_value;
+   rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader())`;
    `barrierPropertySlot` 同形)。bulk 写(memcpy、采纳整块缓冲、shape
    compaction)在写**之前**调 `rememberOwnerForBulkWrite(owner)`。
 3. **存储 cell 三规则**(`docs/gc-invariants.md`):
@@ -221,7 +220,7 @@ v2 的 retain→publish→release Slot 序随 rc 一起退役。现行协议:
    - **bulk 写记忆 owner**。
 4. 绕过这些入口直写堆引用字段(无屏障)= 契约违规;检出机制是
    `ZJS_GC_AUDIT`(`UNBARRIERED-STORE` 报告,`gc.zig`)与
-   `ZJS_GC_VERIFY_MINOR`。
+   `ZJS_GC_VERIFY`(每次 minor 用全量 trace 对账即将谴责的集合,`gc.zig`)。
 
 ## 3. 屏障形状
 
@@ -235,26 +234,22 @@ rememberOwnerForBulkWrite(owner: *Header)
 
 - **快路径 = 一次 8 字节 owner 元数据加载 AND `hot.barrier_gate`**
   (`barrierOwnerSkips`,JSC 两步门形状)。只有 `young` 与 `remembered`
-  两位可以买到退出;门值由阶段决定(`expectedBarrierGate`):标记进行中
-  或 `--gc-stats` 详细报告时门为 0(每次写都进慢路径)。安全构建在每次
-  屏障调用重算门值断言不陈旧(C1)。
-- **慢路径两臂互斥、不叠加**:
-  - 标记进行中(`incremental.markingActive()`):**incremental-update,
-    染色精确新目标**(`shadeForIncrementalMark`;`gc_incremental.zig`
-    头注)。不读 owner 颜色、无 owner-rescan 位,代价=可能保活一轮
-    floating garbage。Shape / Realm 目标走 owner-requeue 臂(只对已黑
-    owner 重排队)。
-  - 否则:分代 remember-owner——目标 young 且 owner old 未记忆时把 owner
-    记入 remembered set(`rememberGenerationalOwner`,header 字节 6 bit7
-    `trace_remembered_mask`)。
-- bulk 屏障在标记中**重排队 owner**(而非染目标),黑数组的中周期 append
-  因此可见(`rememberOwnerForBulkWrite` 注释)。
-- **线程模型**:增量 major 在 runtime owner 线程上推进,没有 marker
-  worker,`major_marking_active` 是普通 `bool`(`gc_incremental.zig`
-  「Single-threaded, deliberately」);增量之间 mutator 运行,屏障同步
-  完成染色,因此 v2 的 `BarrierCriticalScope`(store 与 shading 之间禁
-  safepoint)在 main **没有对应物**——同一条件由「屏障在存储所在函数内
-  同步调用」满足。S4-b 并行标记**已撤回**(同一注释;若重新引入,
+  两位可以买到退出。`expectedBarrierGate` 只在 `detailed_reports`
+  (`--gc-stats` 会打开它)时返回 0,否则返回 `barrier_skip_bits`。安全构建
+  在每次屏障调用重算门值,并断言已发布的门与它相等(C1)。
+- **慢路径是分代 remember-owner**。增量 major 及其目标染色已经退役,
+  收集是 stop-the-world(`gc_incremental.zig` 头注)。
+  - `detailed_reports` 打开时走 `generationalBarrierDetailed`:先计数,
+    young owner 或 `!flags.young` 的目标直接返回,否则 `rememberGenerationalOwner`。
+  - 其余情况下,开着的门已经说明 owner 是 old 且尚未 remembered。未发布的
+    目标算 young,只有 `!young && heap_accounted` 才跳过,其余调用
+    `rememberGenerationalOwner`。remembered 位是 header 元数据字节 6 的
+    bit7(`trace_remembered_mask`)。
+- bulk 屏障 `rememberOwnerForBulkWrite` 对非 young 的 owner 调用
+  `rememberGenerationalOwner`。
+- **线程模型**:收集在 runtime owner 线程上 stop-the-world 完成,没有
+  marker worker。store 与屏障在同一函数内同步调用,这就是屏障相对存储的
+  同步条件。S4-b 并行标记**已撤回**(`gc_incremental.zig`;若重新引入,
   §8.4 的撕裂前提使 owner-only 记录不 sound,须回到本节修订)。
 - JIT/asm 侧预留的 patchable 位对应上述三个签名(§5.3)。
 
@@ -269,9 +264,10 @@ provider、pin 账本(§4.3);minor 另加 `atoms.traceYoungSymbolBodies`。
 
 `ValueRootFrame`(`runtime.zig:ValueRootFrame`)= `{ previous, slices,
 values, objects, headers, atoms }`;**生产只链接 container/window 帧**
-(`value_root_link_containers_only = !is_test and !zjs_gc_roots_diag`),
-标量 `rootValues`/`rootObjects` 作用域在生产被编译掉;测试与
-`-Dzjs_gc_roots_diag=true` 构建链接每一个 activate。`atoms` 槽
+(`value_root_link_containers_only = !builtin.is_test`,`src/core/roots.zig`),
+标量 `rootValues`/`rootObjects` 作用域在生产被编译掉
+(`value_root_scalar_scopes_enabled = !value_root_link_containers_only`);
+测试构建因 `builtin.is_test` 链接每一个 activate。`atoms` 槽
 (`AtomRootSlot`)是 S3 的 class B 根:跨可 GC 点持有裸 atom id 的原生帧
 必须在此声明。
 
@@ -308,7 +304,7 @@ values, objects, headers, atoms }`;**生产只链接 container/window 帧**
 - **pin 账本是权威**(`gc_registry_pins.zig`):host pin 是绑定层取得的
   正计数(`JS_DupValue` 形所有权,住在 JS 堆之外),构造根是保留的
   `construction_pin_count`;header 上**没有** pin 位(S4-e 删除)。
-- atom 表条目的 `host_pins`(`PropNameID.internStatic`/`release`)是
+- atom 表条目的 `host_pins`(`AtomTable.pinForHost` / `unpinForHost`)是
   tracer 看不见的 ABI 侧根;atom 活性 = `visitAtom` 边 ∨ body 已标记 ∨
   `host_pins != 0` ∨ 本周期黑分配。
   **每个裸 atom id 的持有者必须由拥有它的权威 trace 报告 `visitAtom`**
@@ -362,8 +358,8 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
 - **缓存的原生访问器只存槽位,不存 `NativeEntry`**:`defineProperty` 可以
   在不改动任何 shape flag 的情况下换掉 getter 函数对象,所以命中臂每次
   从被守卫的槽里重读访问器再解析 entry。
-- 站点数组(`FunctionBytecode.prop_sites` FAM 尾)与 `call_sites` 一样
-  **登记为「非 GC 边」**:槽内没有任何堆指针。
+- 站点数组(`FunctionBytecode.prop_sites` FAM 尾)
+  **登记为「非 GC 边」**:槽内没有任何堆指针(`PropSiteCache`)。
 - 站点索引的**唯一性是命中臂的前提**(命中臂不重比 atom):一个
   `cache_idx` 只能属于一个函数的一条指令。`small_inline` 的特化副本因此
   在内联进来的 callee 体上把 `cache_idx` 全部清成 `no_cache_idx`。
@@ -378,8 +374,8 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
 - JIT / AOT native 帧的 GC 正确性由 §4.2 保守扫描覆盖(不需精确 stack
   map 才正确),但 AOT 帧同样贡献残渣 / floating garbage(typed 计划
   R17);safepoint metadata 从 v0 记录(优化项)。
-- 增量之间 mutator 运行:生成代码里的屏障必须与存储在同一不可被
-  safepoint 打断的序列内(与解释器同规则;§3 线程模型)。
+- 生成代码里的屏障必须与存储在同一不可被 safepoint 打断的序列内
+  (与解释器同规则;§3 线程模型)。
 
 ### 5.4 Phase 1-Z / 1A(解释器骨架,条件项)
 
@@ -402,9 +398,3 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
   registry 的 GC 侧对应物)。
 - **本页 v3 为 driver 导出的草案,待 owner 评审**(roadmap v2.0
   VM-CONTRACT-GC);评审通过前 layout_epoch=2 只在本页登记,尚无代码常量承载它。
-
-**已知的旁注(不属本契约,记录以免误引)**:`docs/gc-invariants.md`
-「Heap BigInt」段仍写 tag −9,代码是 −4(`value.zig:Tag.big_int`);
-`gc-representation-trace-snapshot.txt` 的 `heap_accounted ... false for
-string/big_int` 一行早于 S2/S1-c,是否仍成立**未验证**;
-`atom.zig:DynamicAtom.str` 的注释仍提及 ref count。

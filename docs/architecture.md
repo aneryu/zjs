@@ -87,6 +87,20 @@ Runtime methods of the same name are aliases where the signature allows.
 | `vm_stack.zig` | `StackBudget` (call depth, frame bytes, native stack guard) and `VmStackArena` |
 | `context_registry.zig` | Live/constructing realm lists, their iterator and `forGlobal` lookup |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
+| `root.zig` | re-export of the core namespace; ownership stays in the defining modules |
+| `atom.zig` / `atom_predefined.zig` / `atom_list.zig` / `atom_compile_scope.zig` | atom table, predefined ids, atom-id lists, compile-time `CompileAtomScope` |
+| `value_encoding.zig` / `value_heap_layout.zig` / `value_semantics.zig` / `value_string.zig` / `value_format.zig` / `heap_ref.zig` | NaN-box words, heap-reference layout, value predicates, the ToString fallback, number/BigInt formatting, heap identity |
+| `string.zig` / `string_cache.zig` / `string_view.zig` / `symbol.zig` / `bigint.zig` | flat strings and ropes, the string cache, borrowed string views, symbols, heap BigInt |
+| `array.zig` / `typed_array.zig` / `typed_array_names.zig` | array-index classification, TypedArray/ArrayBuffer metadata, element names and sizes |
+| `class.zig` / `object_payloads.zig` / `object_gc.zig` / `object_test.zig` | class definitions, out-of-line payloads, FinalizationRegistry cleanup enqueue, object-model tests |
+| `function.zig` / `var_ref.zig` / `native_object.zig` / `native_entry.zig` / `native_bindings.zig` | native-builtin ids, var-ref cells, NativeObject, NativeEntry, per-runtime native binding records |
+| `module.zig` / `module_source.zig` / `module_auto_init.zig` | module-record graph, host source policy, the AUTOINIT leaf contract |
+| `promise.zig` / `regexp.zig` / `collection.zig` | promise construction, regexp host callbacks, Map/Set hash backend |
+| `gc_visit.zig` / `gc_registry_lists.zig` / `gc_registry_pins.zig` / `gc_registry_heap.zig` / `gc_registry_scheduler.zig` / `gc_registry_diagnostics.zig` | visitor protocol, `Lists` / `IntrusiveHeaderList`, pin ledger, heap ledgers, major scheduling, verification stats |
+| `gc_carrier.zig` / `gc_storage.zig` / `gc_slab.zig` / `gc_scope.zig` / `gc_roots.zig` / `gc_representation_constants.zig` | carrier identity, GC slab routes, size-class arenas, borrowed-view scopes, the root-tracing protocol, shared byte constants |
+| `local.zig` / `exception.zig` / `errors.zig` / `error_names.zig` / `descriptor.zig` | `Local` epoch checks, the pending exception, the error set, error-constructor names, property descriptors |
+| `generator_state.zig` / `global_slots.zig` / `json.zig` / `number.zig` / `uri.zig` | parked generator state, global-style slots, JSON escaping, number parsing, URI decode |
+| `profile.zig` / `bulk_memory.zig` / `bytes_view.zig` / `thread_stack.zig` / `heap_budget.zig` / `sort_erased.zig` / `array_list_erased.zig` | opcode-profile counters, bulk fills, borrowed byte views, native stack bounds, the heap budget, type-erased sort and list helpers |
 
 Lifetime model: a generational (sticky mark bit) stop-the-world tracing
 collector owns every heap kind. There is no reference counting left anywhere
@@ -124,8 +138,8 @@ module per grammar area, every function taking the shared `*State`:
 | `identifiers.zig` | identifier / keyword / atom predicates |
 | `lookahead.zig` | snapshots, balanced scans, arrow-head probes |
 | `emitter.zig` | `Emitter` facade, control frames, break/continue/return/finally, using cleanup |
-| `expressions.zig` | `js_parse_expr` family, lvalues, calls, member chains, literals |
-| `statements.zig` | `js_parse_statement_or_decl`, variables, loops, switch, try |
+| `expressions.zig` | `parseExpr` family (qjs `js_parse_expr`), lvalues, calls, member chains, literals |
+| `statements.zig` | `parseStatementOrDecl` (qjs `js_parse_statement_or_decl`), variables, loops, switch, try |
 | `functions.zig` | functions, arrows, parameters, destructuring, child FunctionDef lifecycle |
 | `classes.zig` | class tail, elements, private names, field initializers |
 | `modules.zig` | import/export and the module record |
@@ -218,9 +232,9 @@ File and function naming conventions in `exec/`:
 | --- | --- |
 | `zjs_vm.zig` | interpreter loop |
 | `call_runtime.zig` / `call_site.zig` | unique `[[Call]]` / `[[Construct]]` terminals and CallSite |
-| `call.zig` | engine globals, unique Bound create, Object data-plane leftovers, `evalGlobalScriptSource` |
+| `call.zig` | engine globals, unique Bound create, Object data-plane leftovers |
 | `construct.zig` | unique construct bodies (`objectConstructorValue`, `weakRefWithPrototype`, `constructTypedArrayTypedArrayInput`) |
-| `eval_entry.zig` | eval |
+| `eval_entry.zig` | eval, including `evalGlobalScriptSource` |
 | `module.zig` | modules |
 | `promise_ops.zig` | Promise abstract operations |
 | `standard_globals.zig` | global bootstrap |

@@ -86,6 +86,8 @@ become another owner of Runtime, Realm, module evaluation, or GC semantics.
 
 ## Starting state and target
 
+The event-loop move in the first row and the H2 file move below have landed at `src/host/event_loop.zig`.
+
 | Area | Starting source and coupling | Target |
 | --- | --- | --- |
 | Event loop | `src/event_loop.zig`; exported by `src/root.zig` | `src/host/event_loop.zig`; consumers install and drive it explicitly |
@@ -146,6 +148,8 @@ match the selected contract.
 ### H2 — Move event scheduling and preserve lifecycle
 
 Prerequisite: H1.
+
+This move has landed at `src/host/event_loop.zig`.
 
 Files: `src/event_loop.zig` to `src/host/event_loop.zig`, CLI roots,
 `tests/harness/test_engine.zig`, event-loop tests, and embedding examples.

@@ -20,7 +20,7 @@ Predefined and tagged-integer atoms are not recyclable dynamic table entries.
 
 ## Compiler scopes
 
-[`CompileAtomScope`](../src/core/atom.zig) records IDs obtained while compilation
+[`CompileAtomScope`](../src/core/atom_compile_scope.zig) records IDs obtained while compilation
 is active. [`parser.State`](../src/parser/parse_state.zig) owns its scope.
 
 - Initialize the scope detached; activate it only at its final address because

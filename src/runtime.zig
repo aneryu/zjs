@@ -364,8 +364,7 @@ pub const JSRuntime = struct {
 
     fn deinit(self: *JSRuntime) void {
         self.assertOwnerThread();
-        self.assertIdleForTeardown();
-        if (self.openHostScope()) |reason| @panic(reason);
+        if (self.teardownRefusal()) |reason| @panic(reason);
         // The resident host invocation (exec/call_site.zig) is only ever
         // published for the duration of a call, so an idle runtime retires it
         // here; a runtime destroyed mid-call fails the assertion above first.
@@ -442,8 +441,7 @@ pub const JSRuntime = struct {
     /// rejection the Runtime is untouched and remains owned by its creator.
     pub fn tryDestroy(self: *JSRuntime) (RuntimeMutationError || error{RuntimeBusy})!void {
         try self.requireOwnerThread();
-        if (self.teardownBlocker() != null or
-            self.openHostScope() != null or
+        if (self.teardownRefusal() != null or
             self.roots.firstOutstanding() != null or
             context_registry.anyHostRealmRef(self)) return error.RuntimeBusy;
         self.destroy();
@@ -525,6 +523,16 @@ pub const JSRuntime = struct {
         for (self.classes.records) |record| {
             try visitor.atomRoot(record.class_name);
         }
+    }
+
+    /// Idle-execution refusal, then an open host scope. `deinit` panics with
+    /// the text; `tryDestroy` treats it as busy. Outstanding host roots and
+    /// realm refs are not included: deinit checks those later, and the realm
+    /// ref assert is debug-only. Gate audits call `assertIdleForTeardown`
+    /// alone so an open host scope can remain.
+    fn teardownRefusal(self: *const JSRuntime) ?[]const u8 {
+        if (self.teardownBlocker()) |reason| return reason;
+        return self.openHostScope();
     }
 
     /// Stack-local execution/root records are borrowed by Runtime. They must be

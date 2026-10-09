@@ -330,10 +330,11 @@ commit history carries them.
   (`goto SKIP ; NO_MATCH: goto DEFAULT ; SKIP:`) was removed: it materialized
   an instruction pair qjs never emits and perturbed stream probes. Resolved
   semantics identical; identity discipline preserved.
-- Liveness twin: `caseTailCanFallthrough` scans the temp stream from the
-  body start (v2 streams carry no `line_num`/`label` pseudo-ops), same
-  terminator set as `caseCanFallthrough`, plus the incoming-edge rule (a
-  referenced label bound at the current end keeps the tail live).
+- Liveness: `caseTailCanFallthrough` (`src/parser/statements.zig`) scans the
+  temp stream from the body start (v2 streams carry no `line_num`/`label`
+  pseudo-ops). The tail falls through when the last opcode is outside
+  `goto`, `return`, `return_undef`, `return_async`, and `throw`. Those five
+  still fall through when a referenced label is bound at the current end.
 - The no-match label array fails closed on overflow.
 
 ### 4.11 `break` / `continue` (incl. labelled)
@@ -521,7 +522,7 @@ binds ordered, `ref_count` exact under rollback/detach/splice).
 
 ## Production layout and phase boundaries
 
-Production uses `layout=short`; `plain` is a diagnostic configuration.
+Production uses `-Dzjs_compiler_layout=short`; `plain` is a diagnostic configuration.
 Keep the two compiler phase boundaries explicit:
 
 - `compileFunction` in [`src/compiler/root.zig`](../src/compiler/root.zig)

@@ -19,15 +19,14 @@ const atomics_builtin = @import("atomics_ops.zig");
 const reflect_builtin = @import("reflect_ops.zig");
 const typed_array_names = core.typed_array_names;
 pub const internal_builtins = @import("internal_builtins.zig");
+const builtin_glue = @import("builtin_glue.zig");
 const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
 const primitive_builtin = @import("value_ops.zig");
-const promise_method_ids = core.host_function.builtin_method_ids.promise.PrototypeMethod;
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
-const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
 const std = @import("std");
 
 pub const Flags = core.property.Attrs;
@@ -108,6 +107,20 @@ fn comptimeInternalRecordExists(comptime encoded_id: i32) bool {
     return records.get(native_ref.id) != null;
 }
 
+/// First record whose name is `name`. Duplicate names keep the earlier id, so
+/// this is only used where that id is the one the method table installed
+/// before (function/error/promise/weak-ref prototypes, bigint/symbol statics,
+/// Proxy.revocable, Array.prototype.toString). Tables that repeat a name for
+/// a different id — Number `isNaN`/`isFinite`, primitive `toString`/`valueOf`,
+/// Array methods that TypedArray repeats — stay on their filtered lookups.
+/// A miss returns null; `setRequiredMethodNativeBuiltinId` compile-errors.
+fn internalEntryId(comptime entries: []const core.host_function.InternalEntry, name: []const u8) ?u32 {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    }
+    return null;
+}
+
 /// Build the immutable QJS-style function-list metadata once at comptime.
 /// Bootstrap tagging and lazy materialization consume these fields directly;
 /// neither path needs to recover a descriptor's table or dispatch id by name.
@@ -126,26 +139,14 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .standalone_auto_init,
             => {},
             .object_static => setRequiredMethodNativeBuiltinId(method, .object, object_builtin.staticMethodId(name)),
-            .function_prototype => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "call"))
-                    @intFromEnum(function_ops.PrototypeMethod.call)
-                else if (std.mem.eql(u8, name, "apply"))
-                    @intFromEnum(function_ops.PrototypeMethod.apply)
-                else if (std.mem.eql(u8, name, "bind"))
-                    @intFromEnum(function_ops.PrototypeMethod.bind)
-                else if (std.mem.eql(u8, name, "toString"))
-                    @intFromEnum(function_ops.PrototypeMethod.to_string)
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .function, id);
-            },
+            .function_prototype => setRequiredMethodNativeBuiltinId(method, .function, internalEntryId(&function_ops.internal_entries, name)),
             .array_static => setRequiredMethodNativeBuiltinId(method, .array, array_builtin.staticMethodId(name)),
             .array_prototype => setRequiredMethodNativeBuiltinId(method, .array, array_builtin.prototypeMethodId(name)),
             .typed_array_static => setRequiredMethodNativeBuiltinId(method, .array, array_builtin.typedArrayMethodId(name, true)),
             // %TypedArray%.prototype.toString is %Array.prototype.toString%
             // (`publishTypedArrayToStringAlias`).
             .typed_array_prototype => setRequiredMethodNativeBuiltinId(method, .array, if (std.mem.eql(u8, name, "toString"))
-                @intFromEnum(array_builtin.PrototypeMethod.to_string)
+                internalEntryId(&array_builtin.internal_entries, "toString")
             else
                 array_builtin.typedArrayMethodId(name, false)),
             .string_static => setRequiredMethodNativeBuiltinId(method, .string, string_builtin.staticMethodId(name)),
@@ -166,56 +167,16 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     setRequiredMethodNativeBuiltinId(method, .number, number_builtin.prototypeMethodId(name));
                 }
             },
-            .bigint_static => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "asIntN"))
-                    primitive_builtin.bigint_asintn_id
-                else if (std.mem.eql(u8, name, "asUintN"))
-                    primitive_builtin.bigint_asuintn_id
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .primitive, id);
-            },
-            .symbol_static => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "for"))
-                    primitive_builtin.symbol_for_id
-                else if (std.mem.eql(u8, name, "keyFor"))
-                    primitive_builtin.symbol_key_for_id
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .primitive, id);
-            },
-            .proxy_static => {
-                if (!std.mem.eql(u8, name, "revocable")) @compileError("unexpected Proxy static method");
-                method.native_builtin_id = core.function.nativeBuiltinId(.reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
-            },
-            .error_prototype => {
-                if (!std.mem.eql(u8, name, "toString")) @compileError("unexpected Error prototype method");
-                method.native_builtin_id = core.function.nativeBuiltinId(.error_object, @intFromEnum(error_builtin.PrototypeMethod.to_string));
-            },
-            .error_static => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "captureStackTrace"))
-                    @intFromEnum(error_builtin.StaticMethod.capture_stack_trace)
-                else if (std.mem.eql(u8, name, "isError"))
-                    @intFromEnum(error_builtin.StaticMethod.is_error)
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .error_object, id);
-            },
+            .bigint_static => setRequiredMethodNativeBuiltinId(method, .primitive, internalEntryId(&primitive_builtin.bigint_static_entries, name)),
+            .symbol_static => setRequiredMethodNativeBuiltinId(method, .primitive, internalEntryId(&primitive_builtin.symbol_static_entries, name)),
+            .proxy_static => setRequiredMethodNativeBuiltinId(method, .reflect, internalEntryId(&reflect_builtin.internal_entries, name)),
+            .error_prototype => setRequiredMethodNativeBuiltinId(method, .error_object, internalEntryId(&error_builtin.internal_entries, name)),
+            .error_static => setRequiredMethodNativeBuiltinId(method, .error_object, internalEntryId(&error_builtin.internal_entries, name)),
             .date_static => setRequiredMethodNativeBuiltinId(method, .date, if (date_builtin.staticMethod(name)) |m| @intFromEnum(m) else null),
             .date_prototype => setRequiredMethodNativeBuiltinId(method, .date, date_builtin.prototypeMethodId(name)),
             .regexp_prototype => setRequiredMethodNativeBuiltinId(method, .regexp, regexp_builtin.prototypeMethodId(name)),
             .promise_static => setRequiredMethodNativeBuiltinId(method, .promise, promise_ops.legacyStaticMethodId(name)),
-            .promise_prototype => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "then"))
-                    @intFromEnum(promise_method_ids.then)
-                else if (std.mem.eql(u8, name, "catch"))
-                    @intFromEnum(promise_method_ids.catch_)
-                else if (std.mem.eql(u8, name, "finally"))
-                    @intFromEnum(promise_method_ids.finally)
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .promise, id);
-            },
+            .promise_prototype => setRequiredMethodNativeBuiltinId(method, .promise, internalEntryId(&promise_ops.internal_entries, name)),
             .map_static => setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.staticMethodId(name)),
             .map_prototype => {
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
@@ -233,22 +194,8 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
                 method.collection_method_owner_class = core.class.ids.weakset;
             },
-            .weak_ref_prototype => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "deref"))
-                    @intFromEnum(weak_ref_method_ids.deref)
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
-            },
-            .finalization_registry_prototype => {
-                const id: ?u32 = if (std.mem.eql(u8, name, "register"))
-                    @intFromEnum(weak_ref_method_ids.finrec_register)
-                else if (std.mem.eql(u8, name, "unregister"))
-                    @intFromEnum(weak_ref_method_ids.finrec_unregister)
-                else
-                    null;
-                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
-            },
+            .weak_ref_prototype => setRequiredMethodNativeBuiltinId(method, .weak_ref, internalEntryId(&builtin_glue.internal_entries, name)),
+            .finalization_registry_prototype => setRequiredMethodNativeBuiltinId(method, .weak_ref, internalEntryId(&builtin_glue.internal_entries, name)),
             .buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_ops.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_ops.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_ops.staticMethodId(name)),
@@ -1231,107 +1178,133 @@ fn installStandardConstructorWithPrototype(
     constructor.setNativeConstructorKind(nativeConstructorKind(kind));
     constructors[@intFromEnum(kind)] = constructor;
 
+    const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
+    const prototype = constructorPrototypeObject(constructor);
     if (constructorClassPrototypeId(kind)) |class_id| {
-        const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
-        const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-        try realm.setClassPrototype(class_id, prototype);
+        try realm.setClassPrototype(class_id, prototype orelse return error.InvalidBuiltinRegistry);
     }
     if (nativeErrorKind(kind)) |error_kind| {
-        const realm = rt.contexts.forGlobal(global, .include_constructing) orelse return error.InvalidBuiltinRegistry;
-        const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-        realm.setNativeErrorPrototype(error_kind, prototype);
+        realm.setNativeErrorPrototype(error_kind, prototype orelse return error.InvalidBuiltinRegistry);
     }
 
     // The constructor is fresh: static names cannot collide with the visible
     // length/name/prototype fields (Proxy has no prototype field).
     if (!constructorStaticMethodsBeforePrototype(kind)) try defineNativeMethodsAssumingNew(rt, constructor, static_methods);
-    switch (kind) {
-        .object => {
-            const object_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
-        },
-        .symbol => {
-            const symbol_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .symbol_prototype, symbol_proto.value());
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
-            try installSymbolExtras(rt, global, constructor);
-        },
-        .boolean => {
-            const boolean_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .boolean_prototype, boolean_proto.value());
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
-        },
-        .proxy => {},
-        .array => {
-            const array_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .array_prototype, array_proto.value());
-            try installArrayPrototypeSymbols(rt, global, constructor);
-            const values_key = comptime core.atom.predefinedId("values", .string).?;
-            const values = try array_proto.getProperty(values_key);
-            try global.setCachedRealmValue(rt, .array_prototype_values, values);
-        },
-        .string => {
-            const string_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .string_prototype, string_proto.value());
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
-            try installStringPrototypeAliases(rt, global, constructor);
-        },
-        .number => {
-            const number_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .number_prototype, number_proto.value());
-        },
-        .bigint => {
-            const bigint_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .bigint_prototype, bigint_proto.value());
-        },
-        .regexp => {
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
-            try global.setCachedRealmValue(rt, .regexp_constructor, constructor.value());
-            try installRegExpExtras(rt, global, constructor);
-        },
-        .promise => try installPromiseExtras(rt, global, constructor),
-        .error_ => {
-            try installErrorPrototypeExtras(rt, global, constructor);
-            try defineDataAtomAssumingNew(rt, constructor, core.atom.ids.stackTraceLimit, core.JSValue.int32(10), .method);
-        },
-        .date => {
-            setDateConstructorNativeRecord(constructor);
-            try installDatePrototypeAliases(rt, global, constructor);
-        },
-        .function => {
-            try installFunctionPrototypeExtras(rt, global, constructor);
-        },
-        .array_buffer => {
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_ops.ConstructorMethod.array_buffer)));
-            try global.setCachedRealmValue(rt, .array_buffer_constructor, constructor.value());
-            try installArrayBufferExtras(rt, global, constructor);
-        },
-        .shared_array_buffer => {
-            constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_ops.ConstructorMethod.shared_array_buffer)));
-            try global.setCachedRealmValue(rt, .shared_array_buffer_constructor, constructor.value());
-            try installSharedArrayBufferExtras(rt, global, constructor);
-        },
-        .data_view => try installDataViewExtras(rt, global, constructor),
-        inline .int8_array, .uint8_array, .uint8_clamped_array, .int16_array, .uint16_array, .int32_array, .uint32_array, .float16_array, .float32_array, .float64_array, .bigint64_array, .biguint64_array => |tag| {
-            const tag_name = @tagName(tag);
-            try cacheTypedArrayConstructor(rt, global, @field(core.typed_array_names.Kind, tag_name[0 .. tag_name.len - "_array".len]), constructor);
-        },
-        .iterator => try installIteratorExtras(rt, global, constructor),
-        .disposable_stack => try installDisposableStackExtras(rt, global, constructor),
-        .async_disposable_stack => try installAsyncDisposableStackExtras(rt, global, constructor),
-        else => {},
+    // Cache slot, then call id, then constructor slot. That is the order each
+    // kind used when these three facts lived inside its own arm.
+    if (prototypeCacheSlot(kind)) |slot| {
+        try global.setCachedRealmValue(rt, slot, (prototype orelse return error.InvalidBuiltinRegistry).value());
     }
+    if (constructorCallBuiltin(kind)) |builtin| {
+        constructor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(builtin.domain, builtin.id));
+    }
+    if (constructorCacheSlot(kind)) |slot| {
+        try global.setCachedRealmValue(rt, slot, constructor.value());
+    }
+    try installConstructorKindExtras(rt, global, prototype, constructor, name, kind);
 
     switch (kind) {
         .bigint, .promise, .weak_ref, .finalization_registry => try installPrototypeToStringTag(rt, global, name, constructor),
         else => {},
     }
-    if (typed_array_names.element(name)) |element| {
-        try installTypedArrayElementSize(rt, constructor, @intCast(element.size), element.kind);
-    }
-    if (kind == .uint8_array) try installUint8ArrayCodecExtras(rt, global, constructor);
     if (collectionNameForKind(kind)) |collection_name| try installCollectionExtras(rt, global, collection_name, constructor);
+}
+
+const ConstructorCallBuiltin = struct {
+    domain: core.function.NativeBuiltinDomain,
+    id: u32,
+};
+
+fn prototypeCacheSlot(kind: ConstructorKind) ?core.context.RealmValueSlot {
+    return switch (kind) {
+        .object => .object_prototype,
+        .symbol => .symbol_prototype,
+        .boolean => .boolean_prototype,
+        .array => .array_prototype,
+        .string => .string_prototype,
+        .number => .number_prototype,
+        .bigint => .bigint_prototype,
+        else => null,
+    };
+}
+
+fn constructorCallBuiltin(kind: ConstructorKind) ?ConstructorCallBuiltin {
+    return switch (kind) {
+        .object => .{ .domain = .object, .id = @intFromEnum(object_builtin.ConstructorMethod.call) },
+        .symbol => .{ .domain = .primitive, .id = primitive_symbol_ctor_call_id },
+        .boolean => .{ .domain = .primitive, .id = primitive_boolean_ctor_call_id },
+        .string => .{ .domain = .string, .id = @intFromEnum(string_builtin.ConstructorMethod.call) },
+        .regexp => .{ .domain = .regexp, .id = @intFromEnum(regexp_builtin.ConstructorMethod.construct) },
+        .date => .{ .domain = .date, .id = @intFromEnum(date_builtin.ConstructorMethod.construct) },
+        .array_buffer => .{ .domain = .buffer, .id = @intFromEnum(buffer_ops.ConstructorMethod.array_buffer) },
+        .shared_array_buffer => .{ .domain = .buffer, .id = @intFromEnum(buffer_ops.ConstructorMethod.shared_array_buffer) },
+        else => null,
+    };
+}
+
+fn constructorCacheSlot(kind: ConstructorKind) ?core.context.RealmValueSlot {
+    return switch (kind) {
+        .regexp => .regexp_constructor,
+        .array_buffer => .array_buffer_constructor,
+        .shared_array_buffer => .shared_array_buffer_constructor,
+        else => null,
+    };
+}
+
+fn installConstructorKindExtras(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    constructor: *core.Object,
+    name: []const u8,
+    kind: ConstructorKind,
+) !void {
+    switch (kind) {
+        .symbol => try installSymbolExtras(rt, global, constructor),
+        .array => {
+            const array_proto = prototype orelse return error.InvalidBuiltinRegistry;
+            try installArrayPrototypeSymbols(rt, global, constructor);
+            const values_key = comptime core.atom.predefinedId("values", .string).?;
+            const values = try array_proto.getProperty(values_key);
+            try global.setCachedRealmValue(rt, .array_prototype_values, values);
+        },
+        .string => try installStringPrototypeAliases(rt, global, constructor),
+        .regexp => try installRegExpExtras(rt, global, constructor),
+        .promise => try installPromiseExtras(rt, global, constructor),
+        .error_ => {
+            try installErrorPrototypeExtras(rt, global, constructor);
+            try defineDataAtomAssumingNew(rt, constructor, core.atom.ids.stackTraceLimit, core.JSValue.int32(10), .method);
+        },
+        .date => try installDatePrototypeAliases(rt, global, constructor),
+        .function => try installFunctionPrototypeExtras(rt, global, constructor),
+        .array_buffer => try installArrayBufferExtras(rt, global, constructor),
+        .shared_array_buffer => try installSharedArrayBufferExtras(rt, global, constructor),
+        .data_view => try installDataViewExtras(rt, global, constructor),
+        .int8_array, .uint8_array, .uint8_clamped_array, .int16_array, .uint16_array, .int32_array, .uint32_array, .float16_array, .float32_array, .float64_array, .bigint64_array, .biguint64_array => try installConcreteTypedArrayExtras(rt, global, constructor, name, kind),
+        .iterator => try installIteratorExtras(rt, global, constructor),
+        .disposable_stack => try installDisposableStackExtras(rt, global, constructor),
+        .async_disposable_stack => try installAsyncDisposableStackExtras(rt, global, constructor),
+        else => {},
+    }
+}
+
+fn installConcreteTypedArrayExtras(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    constructor: *core.Object,
+    name: []const u8,
+    kind: ConstructorKind,
+) !void {
+    switch (kind) {
+        inline .int8_array, .uint8_array, .uint8_clamped_array, .int16_array, .uint16_array, .int32_array, .uint32_array, .float16_array, .float32_array, .float64_array, .bigint64_array, .biguint64_array => |tag| {
+            const tag_name = @tagName(tag);
+            try cacheTypedArrayConstructor(rt, global, @field(core.typed_array_names.Kind, tag_name[0 .. tag_name.len - "_array".len]), constructor);
+            const element = typed_array_names.element(name) orelse return error.InvalidBuiltinRegistry;
+            try installTypedArrayElementSize(rt, constructor, @intCast(element.size), element.kind);
+            if (tag == .uint8_array) try installUint8ArrayCodecExtras(rt, global, constructor);
+        },
+        else => unreachable,
+    }
 }
 
 fn installStandardConstructors(
@@ -1589,10 +1562,6 @@ fn defineCollectionSizeAccessorAssumingNew(rt: *core.JSRuntime, global: *core.Ob
     );
 }
 
-fn setDateConstructorNativeRecord(ctor: *core.Object) void {
-    ctor.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.ConstructorMethod.construct)));
-}
-
 fn installTypedArrayElementSize(rt: *core.JSRuntime, ctor: *core.Object, size: i32, kind: core.typed_array_names.Kind) !void {
     ctor.typedArrayElementSizeSlot().* = @intCast(size);
     ctor.typedArrayKindSlot().* = kind;
@@ -1621,30 +1590,8 @@ fn installUint8ArrayCodecExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
 
 fn installTypedArrayPrototypeAccessors(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object) !void {
     const flags: Flags = .{ .configurable = true };
-    const accessors = [_]struct {
-        property_name: []const u8,
-        getter_name: []const u8,
-    }{
-        .{ .property_name = "buffer", .getter_name = "get buffer" },
-        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
-        .{ .property_name = "byteOffset", .getter_name = "get byteOffset" },
-        .{ .property_name = "length", .getter_name = "get length" },
-    };
-    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
-    for (accessors) |accessor| {
-        const native_id = if (buffer_ops.typedArrayAccessorMethodId(accessor.property_name)) |id|
-            core.function.nativeBuiltinId(.buffer, id)
-        else
-            0;
-        const key = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineLazyNativeGetterAtomWithRealm(rt, proto, key, accessor.getter_name, native_id, flags, global);
-    }
-
-    const tag_native_id = if (buffer_ops.typedArrayAccessorMethodId("[Symbol.toStringTag]")) |id|
-        core.function.nativeBuiltinId(.buffer, id)
-    else
-        0;
-    try defineLazyNativeGetterAtomWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "get [Symbol.toStringTag]", tag_native_id, flags, global);
+    try installPredefinedStringAccessors(rt, global, proto, &typed_array_prototype_accessors, 1);
+    try defineLazyNativeGetterAtomWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "get [Symbol.toStringTag]", bufferAccessorNativeId(@intFromEnum(buffer_ops.TypedArrayAccessorMethod.to_string_tag)), flags, global);
 }
 
 // Object's constructor properties mirror QuickJS `js_object_funcs` order. The
@@ -2153,28 +2100,18 @@ const iterator_identity_method = Method{
 // Math/JSON method declarations live with their implementations
 // (math.zig/json.zig `internal_entries`); these derived views keep the
 // generic namespace-creation machinery working unchanged.
-const math_methods = methodsFromInternalEntries(&math_builtin.internal_entries, .math);
-
-const json_methods = methodsFromInternalEntries(&json_builtin.internal_entries, .json);
-
-fn methodsFromInternalEntries(
-    comptime entries: []const core.host_function.InternalEntry,
-    comptime domain: core.function.NativeBuiltinDomain,
-) [entries.len]Method {
-    var methods: [entries.len]Method = undefined;
-    for (entries, 0..) |entry, index| {
-        methods[index] = .{
-            .name = entry.name,
-            .length = entry.length,
-            .native_builtin_id = core.function.nativeBuiltinId(domain, entry.id),
-        };
-    }
-    return methods;
+fn keepEveryInternalEntry(_: u32) bool {
+    return true;
 }
+
+const math_methods = methodsFromInternalEntriesWhere(&math_builtin.internal_entries, .math, keepEveryInternalEntry);
+
+const json_methods = methodsFromInternalEntriesWhere(&json_builtin.internal_entries, .json, keepEveryInternalEntry);
 
 /// Derive an install Method table from the subset of `entries` whose id matches
 /// `keep`, preserving declaration order. Used to partition a single internal
 /// entry table (e.g. Object's) into its static and prototype install lists.
+/// A keep-all predicate is the whole table.
 fn methodsFromInternalEntriesWhere(
     comptime entries: []const core.host_function.InternalEntry,
     comptime domain: core.function.NativeBuiltinDomain,
@@ -2214,7 +2151,7 @@ fn reflectNamespaceEntry(id: u32) bool {
 /// revocable helper and its revoke closure.
 const reflect_methods = methodsFromInternalEntriesWhere(&reflect_builtin.internal_entries, .reflect, reflectNamespaceEntry);
 
-const atomics_methods = methodsFromInternalEntries(&atomics_builtin.internal_entries, .atomics);
+const atomics_methods = methodsFromInternalEntriesWhere(&atomics_builtin.internal_entries, .atomics, keepEveryInternalEntry);
 
 fn installSymbolExtras(rt: *core.JSRuntime, global: *core.Object, symbol_ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(symbol_ctor) orelse return error.InvalidBuiltinRegistry;
@@ -2298,6 +2235,31 @@ fn bufferAccessorNativeId(id: u32) i32 {
     return core.function.nativeBuiltinId(.buffer, id);
 }
 
+const typed_array_prototype_accessors = [_]BufferCtorAccessor{
+    .{ .property_name = "buffer", .getter_name = "get buffer", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.TypedArrayAccessorMethod.buffer)) },
+    .{ .property_name = "byteLength", .getter_name = "get byteLength", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.TypedArrayAccessorMethod.byte_length)) },
+    .{ .property_name = "byteOffset", .getter_name = "get byteOffset", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.TypedArrayAccessorMethod.byte_offset)) },
+    .{ .property_name = "length", .getter_name = "get length", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.TypedArrayAccessorMethod.length)) },
+};
+
+/// Predefined string-atom getters shared by TypedArray.prototype and the
+/// ArrayBuffer family. `extra_slots` is the toStringTag installed by the caller
+/// after this loop, so the reserve stays one walk.
+fn installPredefinedStringAccessors(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    proto: *core.Object,
+    accessors: []const BufferCtorAccessor,
+    extra_slots: usize,
+) !void {
+    const accessor_flags: Flags = .{ .configurable = true };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + extra_slots);
+    for (accessors) |accessor| {
+        const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+        try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, accessor.native_id, accessor_flags, global);
+    }
+}
+
 const array_buffer_ctor_accessors = [_]BufferCtorAccessor{
     .{ .property_name = "byteLength", .getter_name = "get byteLength", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.ArrayBufferAccessorMethod.byte_length)) },
     .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength", .native_id = bufferAccessorNativeId(@intFromEnum(buffer_ops.ArrayBufferAccessorMethod.max_byte_length)) },
@@ -2357,8 +2319,9 @@ inline fn installDataViewExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
 }
 
 /// Install ArrayBuffer-family / DataView prototype accessors, methods,
-/// toStringTag, and optionally @@species. TypedArray prototype accessors
-/// differ (getter toStringTag, extra `length`) and are installed elsewhere.
+/// toStringTag, and optionally @@species. The predefined accessor loop is
+/// shared with TypedArray; this path then stores a string toStringTag, while
+/// TypedArray adds `length` and a getter toStringTag.
 noinline fn installBufferConstructorExtras(
     rt: *core.JSRuntime,
     global: *core.Object,
@@ -2376,12 +2339,11 @@ noinline fn installBufferConstructorExtras(
     }
 
     const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
-    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
-    for (accessors) |accessor| {
-        if (predefined_atoms) {
-            const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
-            try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, accessor.native_id, accessor_flags, global);
-        } else {
+    if (predefined_atoms) {
+        try installPredefinedStringAccessors(rt, global, proto, accessors, 1);
+    } else {
+        try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
+        for (accessors) |accessor| {
             const atom = try temporaryStringAtom(rt, accessor.property_name);
             defer freeTemporaryStringAtom(rt, atom);
             try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, accessor.native_id, accessor_flags, global);
@@ -2800,6 +2762,27 @@ fn methodDescriptor(methods: []const Method, name: []const u8) ?*const Method {
 }
 
 comptime {
+    // V4: first-match lookup must keep the ids the handwritten chains installed.
+    std.debug.assert(internalEntryId(&function_ops.internal_entries, "call").? == @intFromEnum(function_ops.PrototypeMethod.call));
+    std.debug.assert(internalEntryId(&function_ops.internal_entries, "apply").? == @intFromEnum(function_ops.PrototypeMethod.apply));
+    std.debug.assert(internalEntryId(&function_ops.internal_entries, "bind").? == @intFromEnum(function_ops.PrototypeMethod.bind));
+    std.debug.assert(internalEntryId(&function_ops.internal_entries, "toString").? == @intFromEnum(function_ops.PrototypeMethod.to_string));
+    std.debug.assert(internalEntryId(&primitive_builtin.bigint_static_entries, "asIntN").? == primitive_builtin.bigint_asintn_id);
+    std.debug.assert(internalEntryId(&primitive_builtin.bigint_static_entries, "asUintN").? == primitive_builtin.bigint_asuintn_id);
+    std.debug.assert(internalEntryId(&primitive_builtin.symbol_static_entries, "for").? == primitive_builtin.symbol_for_id);
+    std.debug.assert(internalEntryId(&primitive_builtin.symbol_static_entries, "keyFor").? == primitive_builtin.symbol_key_for_id);
+    std.debug.assert(internalEntryId(&reflect_builtin.internal_entries, "revocable").? == @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
+    std.debug.assert(internalEntryId(&error_builtin.internal_entries, "toString").? == @intFromEnum(error_builtin.PrototypeMethod.to_string));
+    std.debug.assert(internalEntryId(&error_builtin.internal_entries, "captureStackTrace").? == @intFromEnum(error_builtin.StaticMethod.capture_stack_trace));
+    std.debug.assert(internalEntryId(&error_builtin.internal_entries, "isError").? == @intFromEnum(error_builtin.StaticMethod.is_error));
+    std.debug.assert(internalEntryId(&promise_ops.internal_entries, "then").? == @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.then));
+    std.debug.assert(internalEntryId(&promise_ops.internal_entries, "catch").? == @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.catch_));
+    std.debug.assert(internalEntryId(&promise_ops.internal_entries, "finally").? == @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.finally));
+    std.debug.assert(internalEntryId(&builtin_glue.internal_entries, "deref").? == @intFromEnum(core.host_function.builtin_method_ids.weak_ref.PrototypeMethod.deref));
+    std.debug.assert(internalEntryId(&builtin_glue.internal_entries, "register").? == @intFromEnum(core.host_function.builtin_method_ids.weak_ref.PrototypeMethod.finrec_register));
+    std.debug.assert(internalEntryId(&builtin_glue.internal_entries, "unregister").? == @intFromEnum(core.host_function.builtin_method_ids.weak_ref.PrototypeMethod.finrec_unregister));
+    std.debug.assert(internalEntryId(&array_builtin.internal_entries, "toString").? == @intFromEnum(array_builtin.PrototypeMethod.to_string));
+
     const object_create = methodDescriptor(&object_static, "create") orelse @compileError("missing Object.create descriptor");
     std.debug.assert(object_create.native_builtin_id ==
         core.function.nativeBuiltinId(.object, object_builtin.staticMethodId("create").?));
@@ -2829,7 +2812,7 @@ comptime {
     std.debug.assert(async_dispose.native_builtin_id ==
         core.function.nativeBuiltinId(.disposable, @intFromEnum(disposable_ops.Method.async_dispose_async)));
 
-    // methodsFromInternalEntries copies each entry's id onto the descriptor.
+    // methodsFromInternalEntriesWhere copies each entry's id onto the descriptor.
     // Materialization reads that field; there is no second runtime write.
     for (math_methods, math_builtin.internal_entries) |method, entry| {
         std.debug.assert(std.mem.eql(u8, method.name, entry.name));

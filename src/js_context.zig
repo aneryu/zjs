@@ -93,12 +93,9 @@ pub const Call = struct {
     /// `message` and return the error the function must propagate.
     pub fn throwError(self: *const Call, name: []const u8, message: []const u8) Exception {
         var ctx = self.ctx;
-        _ = ctx.throwError(name, message, .{}) catch |err| switch (err) {
-            error.JSException => {},
-            // Building the Error failed (e.g. out of memory): that failure
-            // becomes the pending exception instead of none at all.
-            else => _ = exec.builtin_dispatch.embedderErrorToValue(ctx.core, err),
-        };
+        // Building the Error failed (e.g. out of memory): that failure
+        // becomes the pending exception instead of none at all.
+        _ = ctx.throwError(name, message, .{}) catch {};
         return error.JSException;
     }
 
@@ -549,8 +546,7 @@ pub const JSContext = struct {
     }
 
     fn toOwnedUtf8Impl(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
-        self.discardStaleException();
-        const string_value = try self.toString(val);
+        const string_value = try self.toStringImpl(val);
         return JSValue.String.valueToOwnedUtf8(self.core.runtime, allocator, string_value, .wtf8);
     }
 
@@ -572,8 +568,7 @@ pub const JSContext = struct {
     }
 
     fn toIntegerOrInfinityImpl(self: *JSContext, val: JSValue) !f64 {
-        self.discardStaleException();
-        const number_value = try self.toNumber(val);
+        const number_value = try self.toNumberImpl(val);
         if (std.math.isNan(number_value) or number_value == 0) return 0;
         if (!std.math.isFinite(number_value)) return number_value;
         return if (number_value < 0) -@floor(@abs(number_value)) else @floor(number_value);
@@ -635,7 +630,7 @@ pub const JSContext = struct {
     }
 
     pub fn throwError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) Error!JSValue {
-        const error_value = try self.createError(name, message, options);
+        const error_value = self.createErrorImpl(name, message, options) catch |err| return self.apiError(err);
         _ = self.throwValue(error_value);
         return error.JSException;
     }
@@ -680,7 +675,7 @@ pub const JSContext = struct {
     }
 
     pub fn realmGlobalObject(self: *JSContext, realm: JSValue) Error!*Object {
-        const global_value = try self.realmGlobal(realm);
+        const global_value = self.realmGlobalImpl(realm) catch |err| return self.apiError(err);
         return Object.expect(global_value) catch |err| self.apiError(err);
     }
 
@@ -700,10 +695,7 @@ pub const JSContext = struct {
 
     fn arrayLengthImpl(self: *JSContext, val: JSValue) !u32 {
         self.discardStaleException();
-        const object = (try arrayObjectFromValue(val)) orelse {
-            _ = try exec.exception_ops.throwTypeErrorMessage(self.core, try self.globalPtr(), "not an array");
-            return error.JSException;
-        };
+        const object = (try arrayObjectFromValue(val)) orelse try self.failTypeError("not an array");
         return object.arrayLength();
     }
 
@@ -781,9 +773,6 @@ pub const JSContext = struct {
         return exec.call_runtime.functionRealmGlobal(self.core, function_value) catch |err| self.apiError(err);
     }
 
-    /// A failed call leaves its exception pending for the embedder to take.
-    /// If it was never taken, the next entry from the host (no JavaScript
-    /// running) discards it, so it cannot leak into unrelated work.
     /// The writer user code run by an API call prints through: the explicit
     /// one, else the active host invocation's (a host function calling back
     /// into the API), else none (top level).
@@ -798,6 +787,9 @@ pub const JSContext = struct {
         unreachable;
     }
 
+    /// A failed call leaves its exception pending for the embedder to take.
+    /// If it was never taken, the next entry from the host (no JavaScript
+    /// running) discards it, so it cannot leak into unrelated work.
     fn discardStaleException(self: *JSContext) void {
         if (self.core.hasException() and !self.core.runtime.isExecuting()) self.core.clearException();
     }
@@ -858,12 +850,14 @@ pub const JSContext = struct {
         return self.evalScriptSourceImpl(source_text, options) catch |err| self.apiError(err);
     }
 
-    fn evalScriptSourceImpl(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
+    fn scriptTarget(self: *JSContext, options: core.ScriptEvalOptions) !*core.JSContext {
         self.discardStaleException();
-        const target = if (options.realm_global) |global|
-            self.core.runtime.contextForGlobal(global) orelse try self.failTypeError("realm_global is not a realm's global object")
-        else
-            self.core;
+        const global = options.realm_global orelse return self.core;
+        return self.core.runtime.contextForGlobal(global) orelse try self.failTypeError("realm_global is not a realm's global object");
+    }
+
+    fn evalScriptSourceImpl(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
+        const target = try self.scriptTarget(options);
         return exec.eval_entry.evalScriptSource(target, source_text, options);
     }
 
@@ -872,11 +866,7 @@ pub const JSContext = struct {
     }
 
     fn evalScriptValueImpl(self: *JSContext, source_value: JSValue, options: core.ScriptEvalOptions) !JSValue {
-        self.discardStaleException();
-        const target = if (options.realm_global) |global|
-            self.core.runtime.contextForGlobal(global) orelse try self.failTypeError("realm_global is not a realm's global object")
-        else
-            self.core;
+        const target = try self.scriptTarget(options);
         return exec.eval_entry.evalScriptValue(target, source_value, options);
     }
 
@@ -955,7 +945,7 @@ pub const JSContext = struct {
     fn createFunctionUnfinalized(self: *JSContext, name: []const u8, spec_or_fn: anytype, options: FunctionOptions) !JSValue {
         const rt = self.core.runtime;
         if (options.finalize != null and options.state == null) return error.InvalidEngineState;
-        const realm_global_value = options.realm_global orelse try self.globalObject();
+        const realm_global_value = options.realm_global orelse (try self.globalPtr()).value();
         const realm_global = try Object.expect(realm_global_value);
         const realm = rt.contexts.forGlobal(realm_global, .include_constructing) orelse return error.InvalidEngineState;
         const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
@@ -999,19 +989,19 @@ pub const JSContext = struct {
         self.discardStaleException();
         const rt = self.runtimePtr();
         const global = try self.globalPtr();
+        const key = try rt.internAtom("scriptArgs");
         if (args.len == 0) {
-            const key = try rt.internAtom("scriptArgs");
             try global.defineEmptyArrayAutoInitProperty(rt, key, core.property.Flags.data(.all), global);
             return;
         }
 
         const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObjectByAtom(global, atom.ids.Array);
-        // Rooted: every `createString` below can collect.
+        // Rooted: every `createStringImpl` below can collect.
         var roots = PublicValueRootWindow(1).init(.{(try Object.createArrayWithOwnPropertyCapacity(rt, array_prototype, args.len)).value()});
         roots.activate(rt);
         defer roots.deactivate(rt);
         for (args, 0..) |item, index| {
-            const item_value = try self.createString(item);
+            const item_value = try self.createStringImpl(item);
             const array = try Object.expect(roots.values[0]);
             // A fresh array takes dense appends, so it prints and behaves as
             // an ordinary list.
@@ -1019,7 +1009,6 @@ pub const JSContext = struct {
                 try array.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), Descriptor.data(item_value, .all));
             }
         }
-        const key = try rt.internAtom("scriptArgs");
         try global.defineOwnProperty(rt, key, Descriptor.data(roots.values[0], .all));
     }
 

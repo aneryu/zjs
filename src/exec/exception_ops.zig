@@ -34,8 +34,8 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
     return error_value;
 }
 
-/// Materialize the JS value for an engine sentinel that `runtimeErrorInfo` /
-/// `promiseErrorInfo` has already classified.
+/// Materialize the JS value for an engine sentinel that `runtimeErrorInfo`
+/// has already classified.
 ///
 /// Identical to `createNamedError` except for `error.OutOfMemory`, which is
 /// delivered as the Realm's preallocated `InternalError: out of memory`
@@ -83,16 +83,7 @@ pub fn createSentinelError(
 /// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
 /// bindings and receiver objects do not participate in Realm selection.
 pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, message: []const u8) !core.JSValue {
-    var rooted_prototype = prototype.value();
-    var root_frame = core.runtime.rootValues(.{&rooted_prototype});
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    const rooted_object = core.value_semantics.objectFromValue(rooted_prototype) orelse return error.InvalidBuiltinRegistry;
-    const object = try core.Object.create(ctx.runtime, core.class.ids.error_, rooted_object);
-    const error_value = object.value();
-    const message_value = try value_ops.createStringValue(ctx.runtime, message);
-    try defineNonEnumValueProperty(ctx.runtime, object, core.atom.ids.message, message_value);
+    const error_value = try buildErrorObjectWithPrototype(ctx.runtime, prototype, message);
     try attachStackToErrorValue(ctx, global, error_value);
     // No own `name` property: it lives on `prototype`, which the caller has
     // already selected (same rule as `errorConstructWithPrototype`).
@@ -113,39 +104,18 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
 pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     // A standard error kind takes the realm's intrinsic prototype (e.g.
     // %TypeError.prototype%), never whatever `globalThis.TypeError` holds now.
-    if (nativeErrorKindFromName(name)) |kind| {
-        if (rt.contexts.forGlobal(global, .include_constructing)) |realm| {
-            if (realm.nativeErrorPrototypeObject(kind)) |prototype| {
+    const realm = rt.contexts.forGlobal(global, .include_constructing);
+    if (core.error_names.nativeErrorKind(name)) |kind| {
+        if (realm) |found| {
+            if (found.nativeErrorPrototypeObject(kind)) |prototype| {
                 return buildErrorObjectWithPrototype(rt, prototype, message);
             }
         }
     }
     const ctor_key = try rt.internAtom(name);
     const ctor_value = try global.getProperty(ctor_key);
-    const error_prototype = if (rt.contexts.forGlobal(global, .include_constructing)) |realm|
-        realm.nativeErrorPrototypeObject(.error_)
-    else
-        null;
+    const error_prototype = if (realm) |found| found.nativeErrorPrototypeObject(.error_) else null;
     return buildNamedErrorObject(rt, ctor_value, error_prototype, name, message);
-}
-
-fn nativeErrorKindFromName(name: []const u8) ?core.context.NativeErrorKind {
-    const names = [_]struct { []const u8, core.context.NativeErrorKind }{
-        .{ "Error", .error_ },
-        .{ "EvalError", .eval_error },
-        .{ "RangeError", .range_error },
-        .{ "ReferenceError", .reference_error },
-        .{ "SyntaxError", .syntax_error },
-        .{ "TypeError", .type_error },
-        .{ "URIError", .uri_error },
-        .{ "InternalError", .internal_error },
-        .{ "AggregateError", .aggregate_error },
-        .{ "SuppressedError", .suppressed_error },
-    };
-    for (names) |entry| {
-        if (std.mem.eql(u8, name, entry[0])) return entry[1];
-    }
-    return null;
 }
 
 fn buildErrorObjectWithPrototype(rt: *core.JSRuntime, prototype: *core.Object, message: []const u8) !core.JSValue {
@@ -342,7 +312,7 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: HostEr
         return ctx.takeException();
     }
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
-    const error_info = promiseErrorInfo(err);
+    const error_info: ErrorInfo = runtimeErrorInfo(err) orelse .{ .name = "Error", .message = "" };
     return createSentinelError(ctx, global, err, error_info) catch |create_err| {
         // Promise jobs must be able to retain an abrupt completion after user
         // code has run. Under a fully exhausted heap, use the same allocation-
@@ -575,12 +545,15 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool {
     if (!ctx.hasException()) return false;
     if (@as(anyerror, err) == error.JSException) return true;
-    const expected = errorNameForRuntimeError(err) orelse return false;
+    // `Interrupted` is excluded: admitting it would let generator catches and
+    // assertion helpers consume an uncatchable error (see `promiseErrorValue`).
+    if (@as(anyerror, err) == error.Interrupted) return false;
+    const info = runtimeErrorInfo(err) orelse return false;
     const object = objectFromValue(ctx.runtime.exception.value) orelse return false;
     var borrow = core.runtime.NoGcScope{};
     borrow.activate(ctx.runtime);
     defer borrow.deactivate();
-    return objectDataStringPropertyMatches(object, core.atom.ids.name, expected);
+    return objectDataStringPropertyMatches(object, core.atom.ids.name, info.name);
 }
 
 /// Error dispatch is already handling an abrupt completion, so it cannot
@@ -728,10 +701,6 @@ pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
     };
 }
 
-fn promiseErrorInfo(err: anyerror) ErrorInfo {
-    return runtimeErrorInfo(err) orelse .{ .name = "Error", .message = "" };
-}
-
 /// Concrete host-I/O producer surface. Keep this exact rather than accepting
 /// `anyerror`: a Zig stdlib change must make this switch fail to compile until
 /// the JS conversion policy is reviewed.
@@ -823,15 +792,6 @@ pub fn throwModuleHostStall(
     );
     _ = ctx.throwValue(error_value);
     return error.JSException;
-}
-
-/// The error name a pending exception must carry to already represent `err`.
-/// `Interrupted` is excluded: admitting it would let generator catches and
-/// assertion helpers consume an uncatchable error (see `promiseErrorValue`).
-fn errorNameForRuntimeError(err: anyerror) ?[]const u8 {
-    if (@as(anyerror, err) == error.Interrupted) return null;
-    const info = runtimeErrorInfo(err) orelse return null;
-    return info.name;
 }
 
 fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_pc: usize) ?core.BacktraceLocation {

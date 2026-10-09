@@ -11,4 +11,17 @@ test {
     _ = public_api;
     _ = core;
     _ = exec;
+    // A `pub const` import does not collect that file's tests. Reference
+    // each area from this existing test so the suite does not grow one.
+    _ = exec.string_boundary;
+    _ = exec.interrupts_spread;
+    _ = exec.native_dispatch;
+    _ = exec.runtime_tails_jobs;
+    _ = exec.calls_generators_classes;
+    _ = exec.realms_modules;
+    _ = exec.vm_branches_inlining;
+    _ = exec.gc_rooting;
+    _ = exec.typescript;
+    _ = exec.builtins;
+    _ = exec.regressions;
 }

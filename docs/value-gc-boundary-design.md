@@ -1123,7 +1123,7 @@ Map/Set 强条目以对象地址哈希。payload 追踪发现键被重定位时�
 在原有桶数组上原地重链（不分配，不会失败）；回滚恢复旧地址只使重链成为空操作。
 iterator next 旁表按对象地址查找：新增 `has_iterator_next` 标志，晋升与回滚统一经
 `gc_weak.relocateObjectIdentities` 同时迁移弱身份与该旁表。两条回归在 minor／major 下修复前
-失败（搬迁后的键查不到、搬迁后的迭代器丢失缓存的 next），修复后通过。（2026-09-27：内建改为按规范持有 Iterator Record 后，iterator next 旁表及 `has_iterator_next` 已删除。）
+失败（搬迁后的键查不到、搬迁后的迭代器丢失缓存的 next），修复后通过。（2026-09-27：内建改为按规范持有 Iterator Record 后，iterator next 旁表及 `has_iterator_next` 已删除。上文的 `gc_weak.relocateObjectIdentities` 现为 `gc_weak.relocateObject`。）
 
 `Vm.return_value` 改由 Machine 根遍历追踪，初值为 JS undefined 而不是未定义字节；
 `HostInvocation` 空闲期间不被追踪，因此在 unpublish 时清空，避免下次发布追踪悬空值。

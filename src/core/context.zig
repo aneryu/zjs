@@ -270,20 +270,9 @@ const class_prototype_inline_capacity: usize = class.ids.init_count;
 
 /// QuickJS `JSErrorEnum` subset whose intrinsic prototypes live in
 /// `RealmContext.native_error_proto[]`. These are realm state, independent of the
-/// mutable constructor bindings on the global object.
-pub const NativeErrorKind = enum(u8) {
-    error_,
-    eval_error,
-    range_error,
-    reference_error,
-    syntax_error,
-    type_error,
-    uri_error,
-    internal_error,
-    aggregate_error,
-    suppressed_error,
-    count,
-};
+/// mutable constructor bindings on the global object. The tags themselves live
+/// in `error_names.zig`.
+pub const NativeErrorKind = @import("error_names.zig").NativeErrorKind;
 
 const native_error_kind_count: usize = @intFromEnum(NativeErrorKind.count);
 

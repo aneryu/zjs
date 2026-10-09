@@ -57,10 +57,11 @@ waiters) or a pin. `EventLoop.realm` is borrowed from the
 host's live `JSContext`. A new native holder without one of these is a
 use-after-free after the next major.
 
-Heap BigInt (S1-c, 2026-09-03) is a leaf on `gc_obj_list`: constructors
+Heap BigInt (S1-c, 2026-09-03) is a leaf on the published non-object list
+(`Lists.objects`, an `IntrusiveHeaderList`; qjs `rt->gc_obj_list`): constructors
 publish through `addInitializedWithSizeNoFail` (`BigInt.register`),
-`cycleMarkHeader`/`isTracerOwned` accept tag −9 with a second compare, and the
-doomed pass has a `.big_int` arm. Parser constant-pool literals are allocated
+`cycleMarkHeader`/`isTracerOwned` accept it as an ordinary heap reference
+(`Tag.big_int` = −4), and the doomed pass has a `.big_int` arm. Parser constant-pool literals are allocated
 **reserved** (`createFromOwnedReserved`: on no list, neither marked nor
 swept) and registered when their FunctionBytecode is published; a builder
 that dies first destroys them by hand (`destroyIfReservedValue`). The qjs
@@ -85,8 +86,8 @@ bytecode arm), and a rope's edge to its tail buffer
   and the install is hoisted ahead of the allocating reserve
   (`ensurePropertyCapacity`).
 - **Bulk writes remember the owner** (`rememberOwnerForBulkWrite`):
-  `Shape.compactProperties`, dependent-slice growth,
-  `adoptDenseArrayElements`.
+  `Shape.compactProperties`, `Object.ensurePropertyCapacity`,
+  `Object.adoptDenseArrayElementsAssumingEmpty`.
 
 The one deliberate exception is
 `initRegExpMatchArrayDenseElementsFromValue`, which keeps a native scratch
@@ -249,7 +250,7 @@ Buffers may be released out of order. Runtime teardown rejects outstanding
 buffers before destroying execution or heap state. Borrowed native windows
 continue to use scoped frames and require stable source storage.
 
-Precise roots: `pin_entries`, value root frames, active jobs, interpreter
+Precise roots: `Registry.pins` (`PinLedger`), value root frames, active jobs, interpreter
 frames and operand stack (`inline_calls.zig` `traceMachine`),
 `JSRuntime.traceActiveRoots`, root providers. **In production only container/window
 value-root frames are linked** (`core/roots.zig`); scalar `rootValues`/`rootObjects` are compiled
@@ -382,7 +383,7 @@ major root set instead delays a holder-less symbol's death by a full cycle
 
 A minor ends by publishing hot blocks back to the allocator in bounded
 rounds: `Heap.publishCompletedHotBlocksSlice` after `clearYoungBlocks`, with
-`minor_hot_publish_superblock_budget = 8` and `Block.flag_hot_rejected`
+`minor_hot_publish_superblock_budget = 8` and `Block.Flags.hot_rejected`
 caching `openBlock`'s "no run of >= 64 free cells" verdict. Before S4-f,
 publication happened only at the end of a major's teardown, so holes punched
 by minors never came back: regexp held 187.6 MB committed against ~5 MB live

@@ -7,29 +7,26 @@
 //! higher property modules; these helpers map to QuickJS's generic property
 //! operations around quickjs.c.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
-
-pub fn getProperty(object: *core.Object, atom_id: core.Atom) !core.JSValue {
-    return try object.getProperty(atom_id);
-}
-
-pub fn setProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    try object.setProperty(rt, atom_id, value);
-}
+const frame_mod = @import("frame.zig");
+const stack_mod = @import("stack.zig");
+const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("exception_ops.zig");
+const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
+const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
+const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
+const throwTdzReferenceError = exception_ops.throwTdzReferenceError;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
+const op = bytecode.opcode.op;
 
 pub fn defineDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn getPropertyValue(value: core.JSValue, atom_id: core.Atom) !core.JSValue {
-    const object_value = try expectObject(value);
-    return try object_value.getProperty(atom_id);
-}
-
-pub fn optionalGetPropertyValue(value: core.JSValue, atom_id: core.Atom) !core.JSValue {
-    if (value.is(.null_value) or value.is(.undefined_value)) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
     return try object_value.getProperty(atom_id);
 }
@@ -358,17 +355,6 @@ test "global own data slot helpers reject readonly and accessor writes" {
 
 // ----- Local, argument, var-ref and global-lexical slots -----
 // Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.
-const builtin = @import("builtin");
-const frame_mod = @import("frame.zig");
-const stack_mod = @import("stack.zig");
-const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("exception_ops.zig");
-const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
-const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
-const throwTdzReferenceError = exception_ops.throwTdzReferenceError;
-const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
-const op = bytecode.opcode.op;
 pub fn execGetLoc(
     _: *core.JSContext,
     frame: *frame_mod.Frame,
@@ -385,7 +371,7 @@ pub fn execGetLoc(
     // every dispatched frame — the same trusted-compiler model as QuickJS's
     // bare `var_buf[idx]`. The stack is pre-sized (reserveEntryFrameCapacity),
     // so the push skips reserveAdditional, mirroring qjs's `*sp++`.
-    stack.pushOwnedAssumeCapacity(frame.locals[idx]);
+    stack.pushAssumeCapacity(frame.locals[idx]);
 }
 
 pub noinline fn execPutLoc(

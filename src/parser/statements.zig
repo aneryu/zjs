@@ -582,11 +582,11 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
             return;
         }
 
-        const label_frame = try s.pushLabelFrame(label_atom, false);
-        errdefer s.unwindLabelFrames(label_frame);
-        var label_block: BlockEnv = undefined;
-        emitter.pushControlBlock(s, &label_block, .{ .label = label_atom, .has_break_target = true, .is_regular_stmt = true, .scope_level = s.scope_level });
-        defer emitter.popControlBlock(s, &label_block);
+        var targets = LoopTargets{ .label = label_atom, .allow_continue = false };
+        try targets.bindLabel(s);
+        errdefer if (targets.label_frame) |idx| s.unwindLabelFrames(idx);
+        targets.pushBlock(s, .{ .label = label_atom, .has_break_target = true, .is_regular_stmt = true, .scope_level = s.scope_level });
+        defer targets.popBlock(s);
         if (labelled_kind == .kw_class or
             (labelled_kind == .kw_function and try s.peekNextKind() == .star) or
             (labelled_kind == .ident and s.isIdent("async") and try s.peekNextKind() == .kw_function))
@@ -598,8 +598,8 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         else
             DeclMask{};
         try parseStatementOrDecl(s, mask);
-        try s.patchLabelBreaks(label_frame);
-        s.popLabelFrame(label_frame);
+        try targets.patchBreaks(s);
+        targets.popLabel(s);
         return;
     }
 
@@ -832,6 +832,49 @@ fn parseIfClause(s: *State, decl_mask: DeclMask) Error!void {
     try s.popScope();
 }
 
+/// Label and control-block targets for one loop, switch, or labelled statement.
+/// `patchBreaks` stays separate so `for await` binds it before AsyncIteratorClose.
+const LoopTargets = struct {
+    label: ?Atom,
+    allow_continue: bool,
+    label_frame: ?usize = null,
+    block: BlockEnv = undefined,
+
+    fn bindLabel(self: *LoopTargets, s: *State) Error!void {
+        self.label_frame = if (self.label) |atom_id|
+            try s.pushLabelFrame(atom_id, self.allow_continue)
+        else
+            null;
+    }
+
+    fn pushBlock(self: *LoopTargets, s: *State, options: emitter.ControlBlockOptions) void {
+        emitter.pushControlBlock(s, &self.block, options);
+    }
+
+    fn popBlock(self: *LoopTargets, s: *State) void {
+        emitter.popControlBlock(s, &self.block);
+    }
+
+    fn patchContinues(self: *const LoopTargets, s: *State) Error!void {
+        try emitter.patchContinueFrame(s);
+        if (self.label_frame) |idx| try s.patchLabelContinues(idx);
+    }
+
+    fn patchBreaks(self: *const LoopTargets, s: *State) Error!void {
+        if (self.label_frame) |idx| try s.patchLabelBreaks(idx);
+    }
+
+    fn popLabel(self: *const LoopTargets, s: *State) void {
+        if (self.label_frame) |idx| s.popLabelFrame(idx);
+    }
+
+    fn popBreakFrame(self: *const LoopTargets, s: *State) Error!void {
+        try emitter.popBreakFrameAndPatch(s);
+        try self.patchBreaks(s);
+        self.popLabel(s);
+    }
+};
+
 /// Shared `while` / `do ... while` parser; `is_do` selects test-first vs
 /// body-first layout. The public entry points are `inline` wrappers.
 noinline fn parseDoOrWhileStatement(s: *State, is_do: bool) Error!void {
@@ -853,13 +896,12 @@ noinline fn parseDoOrWhileStatement(s: *State, is_do: bool) Error!void {
         try s.expectToken(.rparen);
     }
     try emitter.pushBreakFrame(s);
-    const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
-    var loop_block: BlockEnv = undefined;
-    emitter.pushControlBlock(s, &loop_block, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = s.scope_level });
-    defer emitter.popControlBlock(s, &loop_block);
+    var targets = LoopTargets{ .label = loop_label, .allow_continue = true };
+    try targets.bindLabel(s);
+    targets.pushBlock(s, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = s.scope_level });
+    defer targets.popBlock(s);
     try parseStatementOrDecl(s, DeclMask{});
-    try emitter.patchContinueFrame(s);
-    if (label_frame) |idx| try s.patchLabelContinues(idx);
+    try targets.patchContinues(s);
     if (is_do) {
         try s.expectToken(.kw_while);
         try s.expectToken(.lparen);
@@ -871,11 +913,7 @@ noinline fn parseDoOrWhileStatement(s: *State, is_do: bool) Error!void {
         try Emitter.jump(s, opcode.op.goto, loop_top);
         try Emitter.bind(s, exit_label);
     }
-    try emitter.popBreakFrameAndPatch(s);
-    if (label_frame) |idx| {
-        try s.patchLabelBreaks(idx);
-        s.popLabelFrame(idx);
-    }
+    try targets.popBreakFrame(s);
 }
 
 inline fn parseWhileStatement(s: *State) Error!void {
@@ -937,14 +975,13 @@ fn parseForStatement(s: *State) Error!void {
             for_using_block = try openUsingBlock(s);
             try parseUsingDeclaration(s, using_kind);
             try s.expectToken(.semicolon);
-        } else if ((s.peekKind() == .kw_var or s.peekKind() == .kw_let or s.peekKind() == .kw_const) and
+        } else if (VarDeclKind.isDeclarationToken(s.peekKind()) and
             !try s.canTreatLetAsForInitializerExpression())
         {
             const var_tok = s.peekKind();
+            const decl_kind = VarDeclKind.fromToken(var_tok);
             try s.advance();
-            if (var_tok == .kw_let or var_tok == .kw_const) {
-                for_head_is_lexical = true;
-            }
+            if (decl_kind.isLexical()) for_head_is_lexical = true;
             for_has_initializer = true;
             const saved_tdz_at_decl = s.emit_lexical_tdz_at_decl;
             s.emit_lexical_tdz_at_decl = for_head_is_lexical;
@@ -1012,17 +1049,16 @@ fn parseForStatement(s: *State) Error!void {
         try s.expectToken(.rparen);
         // Body.
         try emitter.pushBreakFrame(s);
-        const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
-        var loop_block: BlockEnv = undefined;
-        emitter.pushControlBlock(s, &loop_block, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = s.scope_level });
-        defer emitter.popControlBlock(s, &loop_block);
+        var targets = LoopTargets{ .label = loop_label, .allow_continue = true };
+        try targets.bindLabel(s);
+        targets.pushBlock(s, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = s.scope_level });
+        defer targets.popBlock(s);
         try parseStatementOrDecl(s, DeclMask{});
 
         // Update: run after normal body completion and continue paths. The
         // continue targets land before the scope close so `continue` also
         // makes the per-iteration copy of the `let` bindings.
-        try emitter.patchContinueFrame(s);
-        if (label_frame) |idx| try s.patchLabelContinues(idx);
+        try targets.patchContinues(s);
         try s.closeScopes(s.scope_level, block_scope_level);
         // qjs TOK_FOR: append the detached update after the
         // body and patched continue exits.
@@ -1030,11 +1066,7 @@ fn parseForStatement(s: *State) Error!void {
 
         try Emitter.jump(s, opcode.op.goto, top_label);
         try Emitter.bind(s, exit_label);
-        try emitter.popBreakFrameAndPatch(s);
-        if (label_frame) |idx| {
-            try s.patchLabelBreaks(idx);
-            s.popLabelFrame(idx);
-        }
+        try targets.popBreakFrame(s);
         if (for_using_block) |*block| try block.finalize(s);
         try for_scope.close(s);
     }
@@ -1085,6 +1117,140 @@ fn atClauseEnd(s: *State) bool {
     return kind == .kw_case or kind == .kw_default or kind == .rbrace or kind == .eof;
 }
 
+/// Case and default dispatch labels. Methods run in the same order as the
+/// previous straight-line switch parser, including when each label is bound.
+const SwitchLowering = struct {
+    no_match_label: ?compiler.LabelId = null,
+    fallthrough_label: ?compiler.LabelId = null,
+    has_default: bool = false,
+    default_label: ?compiler.LabelId = null,
+    default_waiting_for_body: bool = false,
+    clause_scan_start: u32,
+
+    fn parseClause(self: *SwitchLowering, s: *State) Error!void {
+        if (s.peekKind() == .kw_case) {
+            try self.parseCase(s);
+        } else if (s.peekKind() == .kw_default) {
+            try self.parseDefault(s);
+        } else {
+            return s.failUnexpectedToken();
+        }
+    }
+
+    fn parseCase(self: *SwitchLowering, s: *State) Error!void {
+        // qjs TOK_SWITCH: label_case binds at
+        // the next case test before dispatch continues.
+        if (self.no_match_label) |label| {
+            try Emitter.bind(s, label);
+            self.no_match_label = null;
+        }
+
+        try s.advance();
+        // dup ; case_expr ; strict_eq ; if_false → next_case
+        try Emitter.op(s, opcode.op.dup);
+        // `case (a): b => {}`: the `:` ends the case test, so a
+        // parenthesized test is never a typed-arrow head.
+        var case_flags = ParseFlags.default;
+        case_flags.arrow_return_type_forbidden = true;
+        try expressions.parseExpr2(s, case_flags);
+        try s.expectToken(.colon);
+        try Emitter.op(s, opcode.op.strict_eq);
+        const next_case_label = try Emitter.newLabel(s);
+        try Emitter.jump(s, opcode.op.if_false, next_case_label);
+        self.no_match_label = next_case_label;
+        if (self.fallthrough_label) |label| {
+            try Emitter.bind(s, label);
+            self.fallthrough_label = null;
+        }
+
+        // Matched: keep the discriminant on stack until the
+        // common switch epilogue, matching QuickJS's case shape.
+        var body_start: u32 = undefined;
+        body_start = s.activeBuilder().code_len;
+        const has_case_body = !atClauseEnd(s);
+        if (self.default_waiting_for_body and has_case_body) {
+            const clause_default_label = try Emitter.newLabel(s);
+            try Emitter.bind(s, clause_default_label);
+            self.default_label = clause_default_label;
+            self.default_waiting_for_body = false;
+        }
+        while (!atClauseEnd(s)) {
+            try parseSwitchClauseStatement(s);
+        }
+        // qjs TOK_SWITCH always emits
+        // the fallthrough goto; js_is_live_code strips dead
+        // tails. Do not also require "no switch-break in the
+        // body" — that drops `case 0: if(false) break; y(); case 1:`.
+        const case_tail_can_fallthrough =
+            caseTailCanFallthrough(s, self.clause_scan_start, body_start);
+        if ((s.peekKind() == .kw_case or s.peekKind() == .kw_default) and
+            case_tail_can_fallthrough)
+        {
+            const clause_fallthrough_label = try Emitter.newLabel(s);
+            try Emitter.jump(s, opcode.op.goto, clause_fallthrough_label);
+            self.fallthrough_label = clause_fallthrough_label;
+        }
+    }
+
+    fn parseDefault(self: *SwitchLowering, s: *State) Error!void {
+        if (self.has_default) return s.failUnexpectedToken();
+        try s.advance();
+        try s.expectToken(.colon);
+        if (self.no_match_label == null) {
+            const label = try Emitter.newLabel(s);
+            try Emitter.jump(s, opcode.op.goto, label);
+            self.no_match_label = label;
+        }
+        var body_start: u32 = undefined;
+        body_start = s.activeBuilder().code_len;
+        if (self.fallthrough_label) |label| {
+            try Emitter.bind(s, label);
+            self.fallthrough_label = null;
+        }
+
+        // Default body label.
+        // Eager candidate: legacy decides default_body_start after parsing the
+        // body; the v2 bind must happen at the body-start position itself.
+        const default_candidate = try Emitter.newLabel(s);
+        try Emitter.bind(s, default_candidate);
+        self.has_default = true;
+        while (!atClauseEnd(s)) {
+            try parseSwitchClauseStatement(s);
+        }
+        if (s.activeBuilder().code_len == body_start and s.peekKind() == .kw_case) {
+            self.default_waiting_for_body = true;
+        } else {
+            self.default_label = default_candidate;
+            self.default_waiting_for_body = false;
+        }
+        const case_tail_can_fallthrough =
+            caseTailCanFallthrough(s, self.clause_scan_start, body_start);
+        if (s.peekKind() == .kw_case and case_tail_can_fallthrough) {
+            const clause_fallthrough_label = try Emitter.newLabel(s);
+            try Emitter.jump(s, opcode.op.goto, clause_fallthrough_label);
+            self.fallthrough_label = clause_fallthrough_label;
+        }
+    }
+
+    fn close(self: *SwitchLowering, s: *State) Error!void {
+        // qjs binds the default label backwards by patching the emitted jump
+        // (the "ugly patch", quickjs.c ~29365). The builder never rewrites a
+        // jump, but the unmatched-dispatch boundary and the default body are
+        // one program point, so the references move onto the default label
+        // (`retargetLabelRefs`) instead of going through a trampoline.
+        if (self.no_match_label) |label| {
+            if (self.default_label) |bound_default_label| {
+                try Emitter.retargetLabel(s, label, bound_default_label);
+            } else {
+                // No default clause: unmatched dispatch falls through to
+                // the common discriminant drop.
+                try Emitter.bind(s, label);
+            }
+        }
+        if (self.fallthrough_label) |label| try Emitter.bind(s, label);
+    }
+};
+
 fn parseSwitchStatement(s: *State) Error!void {
     // Switch lowering: each case tests the discriminant, and its body falls
     // through to the next clause when `caseTailCanFallthrough` says the tail
@@ -1106,147 +1272,72 @@ fn parseSwitchStatement(s: *State) Error!void {
     emitter.setCurrentBreakCrossCleanupDrops(s, 1);
     emitter.enterSwitchContinueCleanup(s);
     defer emitter.leaveSwitchContinueCleanup(s);
-    const label_frame = if (switch_label) |atom_id| try s.pushLabelFrame(atom_id, false) else null;
-    var switch_block: BlockEnv = undefined;
-    emitter.pushControlBlock(s, &switch_block, .{ .label = switch_label, .has_break_target = true, .scope_level = s.scope_level, .drop_count = 1 });
-    defer emitter.popControlBlock(s, &switch_block);
+    var targets = LoopTargets{ .label = switch_label, .allow_continue = false };
+    try targets.bindLabel(s);
+    targets.pushBlock(s, .{ .label = switch_label, .has_break_target = true, .scope_level = s.scope_level, .drop_count = 1 });
+    defer targets.popBlock(s);
 
     // Keep unmatched case-test exits separate from matched
     // fallthrough jumps: once a case has matched, later case tests
     // are skipped and only their bodies run.
-    var no_match_label: ?compiler.LabelId = null;
-    var fallthrough_label: ?compiler.LabelId = null;
-    var has_default = false;
-    var default_label: ?compiler.LabelId = null;
-    var default_waiting_for_body = false;
     // Floor for the v2 clause-tail flow scan: an empty clause body has
     // to fall back to the code emitted before it (see
     // `caseTailCanFallthrough`). Every clause
     // emits its dispatch test (or, for a leading `default`, the
     // dispatch-continuation goto) after this point, so the widened
     // range always carries the answer.
-    const clause_scan_start: u32 = s.activeBuilder().code_len;
-
+    var lowering = SwitchLowering{ .clause_scan_start = s.activeBuilder().code_len };
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
-        if (s.peekKind() == .kw_case) {
-            // qjs TOK_SWITCH: label_case binds at
-            // the next case test before dispatch continues.
-            if (no_match_label) |label| {
-                try Emitter.bind(s, label);
-                no_match_label = null;
-            }
-
-            try s.advance();
-            // dup ; case_expr ; strict_eq ; if_false → next_case
-            try Emitter.op(s, opcode.op.dup);
-            // `case (a): b => {}`: the `:` ends the case test, so a
-            // parenthesized test is never a typed-arrow head.
-            var case_flags = ParseFlags.default;
-            case_flags.arrow_return_type_forbidden = true;
-            try expressions.parseExpr2(s, case_flags);
-            try s.expectToken(.colon);
-            try Emitter.op(s, opcode.op.strict_eq);
-            const next_case_label = try Emitter.newLabel(s);
-            try Emitter.jump(s, opcode.op.if_false, next_case_label);
-            no_match_label = next_case_label;
-            if (fallthrough_label) |label| {
-                try Emitter.bind(s, label);
-                fallthrough_label = null;
-            }
-
-            // Matched: keep the discriminant on stack until the
-            // common switch epilogue, matching QuickJS's case shape.
-            var body_start: u32 = undefined;
-            body_start = s.activeBuilder().code_len;
-            const has_case_body = !atClauseEnd(s);
-            if (default_waiting_for_body and has_case_body) {
-                const clause_default_label = try Emitter.newLabel(s);
-                try Emitter.bind(s, clause_default_label);
-                default_label = clause_default_label;
-                default_waiting_for_body = false;
-            }
-            while (!atClauseEnd(s)) {
-                try parseSwitchClauseStatement(s);
-            }
-            // qjs TOK_SWITCH always emits
-            // the fallthrough goto; js_is_live_code strips dead
-            // tails. Do not also require "no switch-break in the
-            // body" — that drops `case 0: if(false) break; y(); case 1:`.
-            const case_tail_can_fallthrough =
-                caseTailCanFallthrough(s, clause_scan_start, body_start);
-            if ((s.peekKind() == .kw_case or s.peekKind() == .kw_default) and
-                case_tail_can_fallthrough)
-            {
-                const clause_fallthrough_label = try Emitter.newLabel(s);
-                try Emitter.jump(s, opcode.op.goto, clause_fallthrough_label);
-                fallthrough_label = clause_fallthrough_label;
-            }
-        } else if (s.peekKind() == .kw_default) {
-            if (has_default) return s.failUnexpectedToken();
-            try s.advance();
-            try s.expectToken(.colon);
-            if (no_match_label == null) {
-                const label = try Emitter.newLabel(s);
-                try Emitter.jump(s, opcode.op.goto, label);
-                no_match_label = label;
-            }
-            var body_start: u32 = undefined;
-            body_start = s.activeBuilder().code_len;
-            if (fallthrough_label) |label| {
-                try Emitter.bind(s, label);
-                fallthrough_label = null;
-            }
-
-            // Default body label.
-            // Eager candidate: legacy decides default_body_start after parsing the
-            // body; the v2 bind must happen at the body-start position itself.
-            const default_candidate = try Emitter.newLabel(s);
-            try Emitter.bind(s, default_candidate);
-            has_default = true;
-            while (!atClauseEnd(s)) {
-                try parseSwitchClauseStatement(s);
-            }
-            if (s.activeBuilder().code_len == body_start and s.peekKind() == .kw_case) {
-                default_waiting_for_body = true;
-            } else {
-                default_label = default_candidate;
-                default_waiting_for_body = false;
-            }
-            const case_tail_can_fallthrough =
-                caseTailCanFallthrough(s, clause_scan_start, body_start);
-            if (s.peekKind() == .kw_case and case_tail_can_fallthrough) {
-                const clause_fallthrough_label = try Emitter.newLabel(s);
-                try Emitter.jump(s, opcode.op.goto, clause_fallthrough_label);
-                fallthrough_label = clause_fallthrough_label;
-            }
-        } else {
-            return s.failUnexpectedToken();
-        }
+        try lowering.parseClause(s);
     }
     try s.expectToken(.rbrace);
-
-    // qjs binds the default label backwards by patching the emitted jump
-    // (the "ugly patch", quickjs.c ~29365). The builder never rewrites a
-    // jump, but the unmatched-dispatch boundary and the default body are
-    // one program point, so the references move onto the default label
-    // (`retargetLabelRefs`) instead of going through a trampoline.
-    if (no_match_label) |label| {
-        if (default_label) |bound_default_label| {
-            try Emitter.retargetLabel(s, label, bound_default_label);
-        } else {
-            // No default clause: unmatched dispatch falls through to
-            // the common discriminant drop.
-            try Emitter.bind(s, label);
-        }
-    }
-    if (fallthrough_label) |label| try Emitter.bind(s, label);
+    try lowering.close(s);
     try emitter.popBreakOnlyFrameAndPatch(s);
-    if (label_frame) |idx| {
-        try s.patchLabelBreaks(idx);
-        s.popLabelFrame(idx);
-    }
+    try targets.patchBreaks(s);
+    targets.popLabel(s);
     try Emitter.op(s, opcode.op.drop);
     try s.popScope();
+}
+
+fn emitTryLiveTail(s: *State, label_finally: compiler.LabelId, label_end: compiler.LabelId) Error!void {
+    if (!emitter.isLiveCode(s)) return;
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.opNoSource(s, opcode.op.undefined);
+    try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
+    try Emitter.opNoSource(s, opcode.op.drop);
+    try Emitter.jumpNoSource(s, opcode.op.goto, label_end);
+}
+
+fn emitRethrowViaFinally(s: *State, catch_label: compiler.LabelId, label_finally: compiler.LabelId) Error!void {
+    try Emitter.bindParser(s, catch_label);
+    try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
+    try Emitter.opNoSource(s, opcode.op.throw);
+}
+
+fn parseCatchParameter(s: *State) Error!void {
+    try s.expectToken(.lparen);
+    if (s.peekKind() == .lbracket or s.peekKind() == .lbrace) {
+        _ = try functions.parseDestructuringElement(s, .{ .binding = .{
+            .define_type = .let_,
+            .is_parameter = false,
+            .export_flag = false,
+            .is_catch_parameter = true,
+        } }, .{ .has_value = true, .allow_outer_initializer = true }, ParseFlags.default);
+        const fd = s.curFunc();
+        var var_index = fd.scopes[@intCast(s.scope_level)].first;
+        while (var_index >= 0) : (var_index = fd.vars[@intCast(var_index)].scope_next) {
+            const vd = &fd.vars[@intCast(var_index)];
+            if (vd.scope_level != s.scope_level) break;
+            vd.is_catch_pattern = true;
+        }
+    } else {
+        const catch_atom = try identifiers.expectBindingIdentifier(s, .{});
+        _ = try declarations.defineVar(s, catch_atom, .catch_);
+        try s.advance();
+        try typescript.tsParseTypeAnnotationOpt(s);
+        try s.emitScopePutVar(catch_atom);
+    }
+    try s.expectToken(.rparen);
 }
 
 fn parseTryStatement(s: *State) Error!void {
@@ -1273,14 +1364,8 @@ fn parseTryStatement(s: *State) Error!void {
 
     try_region.leave(s);
 
-    if (emitter.isLiveCode(s)) {
-        // qjs TOK_TRY live try tail: drop, undefined, gosub finally, drop, goto end.
-        try Emitter.opNoSource(s, opcode.op.drop);
-        try Emitter.opNoSource(s, opcode.op.undefined);
-        try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
-        try Emitter.opNoSource(s, opcode.op.drop);
-        try Emitter.jumpNoSource(s, opcode.op.goto, label_end);
-    }
+    // qjs TOK_TRY live try tail: drop, undefined, gosub finally, drop, goto end.
+    try emitTryLiveTail(s, label_finally, label_end);
 
     if (s.peekKind() == .kw_catch) {
         try s.advance();
@@ -1296,35 +1381,7 @@ fn parseTryStatement(s: *State) Error!void {
             // qjs TOK_TRY optional catch binding: drop the exception object.
             try Emitter.opNoSource(s, opcode.op.drop);
         } else {
-            try s.expectToken(.lparen);
-            if (s.peekKind() == .lbracket or s.peekKind() == .lbrace) {
-                _ = try functions.parseDestructuringElement(s, .{ .binding = .{
-                    .define_type = .let_,
-                    .is_parameter = false,
-                    .export_flag = false,
-                    .is_catch_parameter = true,
-                } }, .{ .has_value = true, .allow_outer_initializer = true }, ParseFlags.default);
-                const fd = s.curFunc();
-                var var_index = fd.scopes[@intCast(s.scope_level)].first;
-                while (var_index >= 0) : (var_index = fd.vars[@intCast(var_index)].scope_next) {
-                    const vd = &fd.vars[@intCast(var_index)];
-                    if (vd.scope_level != s.scope_level) break;
-                    vd.is_catch_pattern = true;
-                }
-            } else {
-                if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
-                const catch_atom = identifiers.identifierLikeAtom(s);
-                if (s.isStrict() and
-                    (identifiers.atomNameEquals(s, catch_atom, "eval") or identifiers.atomNameEquals(s, catch_atom, "arguments")))
-                {
-                    return s.failUnexpectedToken();
-                }
-                _ = try declarations.defineVar(s, catch_atom, .catch_);
-                try s.advance();
-                try typescript.tsParseTypeAnnotationOpt(s);
-                try s.emitScopePutVar(catch_atom);
-            }
-            try s.expectToken(.rparen);
+            try parseCatchParameter(s);
         }
 
         // qjs TOK_TRY catch body: create and target the second catch handler.
@@ -1344,24 +1401,14 @@ fn parseTryStatement(s: *State) Error!void {
         try catch_wrapper_scope.close(s);
         try catch_binding_scope.close(s);
 
-        if (emitter.isLiveCode(s)) {
-            // qjs TOK_TRY live catch tail: drop, undefined, gosub finally, drop, goto end.
-            try Emitter.opNoSource(s, opcode.op.drop);
-            try Emitter.opNoSource(s, opcode.op.undefined);
-            try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
-            try Emitter.opNoSource(s, opcode.op.drop);
-            try Emitter.jumpNoSource(s, opcode.op.goto, label_end);
-        }
+        // qjs TOK_TRY live catch tail: drop, undefined, gosub finally, drop, goto end.
+        try emitTryLiveTail(s, label_finally, label_end);
 
         // qjs TOK_TRY catch rethrow: bind catch2, gosub finally, then throw.
-        try Emitter.bindParser(s, label_catch2);
-        try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
-        try Emitter.opNoSource(s, opcode.op.throw);
+        try emitRethrowViaFinally(s, label_catch2, label_finally);
     } else if (s.peekKind() == .kw_finally) {
         // qjs TOK_TRY finally-only rethrow: bind catch, gosub finally, then throw.
-        try Emitter.bindParser(s, label_catch);
-        try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
-        try Emitter.opNoSource(s, opcode.op.throw);
+        try emitRethrowViaFinally(s, label_catch, label_finally);
     } else {
         return s.failUnexpectedToken();
     }
@@ -1428,15 +1475,7 @@ fn parseUsingDeclaration(s: *State, kind: DisposalHint) Error!void {
     try s.advance(); // consume `using`
 
     while (true) {
-        if (!identifiers.isIdentifierLikeToken(s)) return s.failUnexpectedToken();
-        if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
-        const atom_id = identifiers.identifierLikeAtom(s);
-        if (identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-        if (s.isStrict() and
-            (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
-        {
-            return s.failUnexpectedToken();
-        }
+        const atom_id = try identifiers.expectBindingIdentifier(s, .{ .reject_let = true });
         if (module_top_level and identifiers.hasKnownBinding(s, atom_id)) return s.failUnexpectedToken();
         _ = try declarations.defineVar(s, atom_id, .const_);
         try s.advance();
@@ -1533,6 +1572,39 @@ fn parseLetKeywordExpressionStatement(s: *State) Error!void {
     try emitExpressionStatementCompletion(s, keep_completion);
 }
 
+/// `var` / `let` / `const` after the namespace `var` → `let` remap.
+/// Any other token is a non-lexical declaration, matching the old
+/// `tok == let or tok == const` tests.
+pub const VarDeclKind = enum {
+    var_,
+    let_,
+    const_,
+
+    fn fromToken(kind: tok.Kind) VarDeclKind {
+        return switch (kind) {
+            .kw_let => .let_,
+            .kw_const => .const_,
+            else => .var_,
+        };
+    }
+
+    fn isDeclarationToken(kind: tok.Kind) bool {
+        return kind == .kw_var or kind == .kw_let or kind == .kw_const;
+    }
+
+    fn isLexical(self: VarDeclKind) bool {
+        return self != .var_;
+    }
+
+    fn defineType(self: VarDeclKind) declarations.DefineVarType {
+        return switch (self) {
+            .var_ => .var_,
+            .let_ => .let_,
+            .const_ => .const_,
+        };
+    }
+};
+
 /// Mirror `js_parse_var`.
 ///
 /// Registers each identifier in `function_def.vars` with the correct
@@ -1542,8 +1614,8 @@ fn parseLetKeywordExpressionStatement(s: *State) Error!void {
 /// variable is attached at the function's var/arg scope (level 0)
 /// per QuickJS hoisting rules; for `let`/`const`, it attaches at the
 /// current lexical scope.
-pub fn needVarReference(s: *State, var_tok: tok.Kind) bool {
-    if (var_tok != .kw_var) return false;
+pub fn needVarReference(s: *State, decl_kind: VarDeclKind) bool {
+    if (decl_kind != .var_) return false;
 
     const fd = s.curFunc();
     if (!s.is_strict and !fd.is_strict_mode and !s.lex.is_module) return true;
@@ -1556,37 +1628,15 @@ pub fn needVarReference(s: *State, var_tok: tok.Kind) bool {
 pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flags: ParseFlags) Error!void {
     // TypeScript `namespace N { var x }`: tsc scopes the binding to the
     // namespace's IIFE, so it is lowered as a block-level `let` here.
-    const var_tok = if (s.ctx.in_namespace and declared_tok == .kw_var) .kw_let else declared_tok;
-    const is_lexical = var_tok == .kw_let or var_tok == .kw_const;
-    const is_const = var_tok == .kw_const;
+    const decl_kind = if (s.ctx.in_namespace and declared_tok == .kw_var)
+        VarDeclKind.let_
+    else
+        VarDeclKind.fromToken(declared_tok);
     while (true) {
-        const sloppy_keyword_var = (s.peekKind() == .kw_yield or
-            s.peekKind() == .kw_static or
-            s.peekKind() == .kw_let or
-            s.peekKind() == .kw_await or
-            identifiers.isSloppyFutureReservedBindingToken(s)) and
-            !s.isStrict() and
-            !(s.peekKind() == .kw_yield and s.ctx.in_generator) and
-            !(s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s));
-        const binding_identifier = identifiers.isIdentifierLikeToken(s);
-        if (binding_identifier or sloppy_keyword_var) {
-            // Simple identifier binding
-            const token_atom = if (s.peekKind() == .ident) s.token.payload.ident.atom else s.peekKind().keywordAtom();
-            // qjs js_parse_var takes its own `name` reference before
-            // next_token frees the identifier token (quickjs.c:
-            // Keep that owner through this declarator.
-            const atom_id = token_atom;
-            if (binding_identifier and s.peekKind() == .ident and
-                identifiers.escapedIdentifierIsReservedWordForBinding(s, atom_id, s.token.payload.ident.has_escape))
-            {
-                return s.failUnexpectedToken();
-            }
-            if (is_lexical and identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-            if (s.isStrict() and
-                (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
-            {
-                return s.failUnexpectedToken();
-            }
+        if (identifiers.isIdentifierLikeToken(s)) {
+            // Simple identifier binding. The atom stays valid past advance
+            // because the enclosing CompileAtomScope roots it.
+            const atom_id = try identifiers.expectBindingIdentifier(s, .{ .reject_let = decl_kind.isLexical() });
             var local_lexical_idx: ?u16 = null;
             try s.advance();
             // TypeScript `let x!: T` / `let x: T`.
@@ -1597,10 +1647,10 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             // vars/global_vars until module resolution.  Preserve that
             // QJS module-name collision at the token wrapper boundary;
             // all ordinary declaration collisions are owned by defineVar.
-            if (is_lexical) try declarations.rejectModuleRefRedeclaration(s, atom_id);
+            if (decl_kind.isLexical()) try declarations.rejectModuleRefRedeclaration(s, atom_id);
 
             var hoisted_arguments_var_idx: ?u16 = null;
-            if (!is_lexical and identifiers.atomNameEquals(s, atom_id, "arguments") and
+            if (!decl_kind.isLexical() and identifiers.atomNameEquals(s, atom_id, "arguments") and
                 s.curFunc().func_type != .arrow and
                 s.curFunc().func_type != .class_static_init and
                 s.curFunc().has_parameter_expressions and
@@ -1614,11 +1664,8 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 try functions.ensureParameterArgumentsLocals(s.curFunc());
             }
 
-            const defined = try declarations.defineVar(s, atom_id, if (is_lexical)
-                (if (is_const) .const_ else .let_)
-            else
-                .var_);
-            if (is_lexical) {
+            const defined = try declarations.defineVar(s, atom_id, decl_kind.defineType());
+            if (decl_kind.isLexical()) {
                 switch (defined) {
                     .local => |idx| {
                         local_lexical_idx = idx;
@@ -1641,7 +1688,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             if (export_decl) try modules.addModuleExportName(s, atom_id, atom_id);
 
             // No decl-time set_loc_uninitialized: the enter_scope lowering
-            // (qjs OP_enter_scope, writeEnterScopeRefresh) owns the single
+            // (qjs OP_enter_scope, lowerEnterScope) owns the single
             // TDZ arming, exactly as in QuickJS resolve_variables. Emitting
             // here again produced a duplicate arming per for-head lexical.
 
@@ -1649,7 +1696,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             if (s.peekKind() == .assign) {
                 const initializer_source = s.currentSourcePosition();
                 try s.advance();
-                const capture_reference = needVarReference(s, var_tok);
+                const capture_reference = needVarReference(s, decl_kind);
                 var declaration_lvalue: ?LValue = null;
                 if (capture_reference) {
                     // qjs js_parse_var emits the ordinary getter and lets
@@ -1672,14 +1719,14 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 try Emitter.addSourceMarker(s, initializer_source.line_num, initializer_source.col_num);
                 if (declaration_lvalue) |*lvalue| {
                     try expressions.putLValue(s, lvalue, .no_keep);
-                } else if (is_lexical) {
+                } else if (decl_kind.isLexical()) {
                     try s.emitScopePutVarInitNoSource(atom_id);
                 } else {
                     try s.emitScopePutVarNoSource(atom_id);
                 }
             } else {
                 // const requires initializer
-                if (var_tok == .kw_const) {
+                if (decl_kind == .const_) {
                     return s.failExpectedToken(.assign);
                 }
                 // `let x;` (no initializer) implicitly initialises to
@@ -1688,7 +1735,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 // pipeline lowers this to `put_loc_check_init` for
                 // lexical locals (clears TDZ flag) or `put_var_init`
                 // for global lexical vars.
-                if (var_tok == .kw_let) {
+                if (decl_kind == .let_) {
                     try Emitter.op(s, opcode.op.undefined);
                     try s.emitScopePutVarInit(atom_id);
                 }
@@ -1698,10 +1745,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             try Emitter.op(s, opcode.op.undefined);
             const vars_before = s.curFunc().vars.len;
             const has_initializer = try functions.parseDestructuringElement(s, .{ .binding = .{
-                .define_type = if (is_lexical)
-                    (if (is_const) .const_ else .let_)
-                else
-                    .var_,
+                .define_type = decl_kind.defineType(),
                 .is_parameter = false,
                 .export_flag = export_decl,
             } }, .{ .has_value = true, .allow_outer_initializer = true }, parse_flags);
@@ -1788,16 +1832,11 @@ fn parseForInOfUsingTarget(s: *State, using_kind: DisposalHint, target: *ForInOf
         try s.advance();
     }
     try s.advance();
-    if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) {
-        return s.failExpectedDescription("binding name");
-    }
-    const atom_id = identifiers.identifierLikeAtom(s);
-    if (identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-    if (s.isStrict() and
-        (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
-    {
-        return s.failUnexpectedToken();
-    }
+    const atom_id = try identifiers.expectBindingIdentifier(s, .{
+        .missing = .binding_name,
+        .escape = .binding_name,
+        .reject_let = true,
+    });
     _ = try declarations.defineVar(s, atom_id, .const_);
     target.atom = atom_id;
     target.is_lexical_decl = true;
@@ -1813,51 +1852,32 @@ fn parseForInOfUsingTarget(s: *State, using_kind: DisposalHint, target: *ForInOf
 /// `for (var|let|const binding in/of ...)`.
 fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.Kind, target: *ForInOfTarget) Error!void {
     try s.advance();
-    const is_lexical = var_tok == .kw_let or var_tok == .kw_const;
-    const is_const = var_tok == .kw_const;
-    target.is_lexical_decl = is_lexical;
+    const decl_kind = VarDeclKind.fromToken(var_tok);
+    target.is_lexical_decl = decl_kind.isLexical();
 
     if (s.peekKind() == .lbracket or
         s.peekKind() == .lbrace)
     {
         target.is_pattern = true;
         _ = try functions.parseDestructuringElement(s, .{ .binding = .{
-            .define_type = if (is_lexical)
-                (if (is_const) .const_ else .let_)
-            else
-                .var_,
+            .define_type = decl_kind.defineType(),
             .is_parameter = false,
             .export_flag = false,
         } }, .{ .has_value = true }, ParseFlags.default);
     } else {
-        // Must match parseVar's full sloppy_keyword_var predicate
-        // (quickjs.c update_token_ident is the one qjs gate, so
-        // js_parse_var and js_parse_for_in_of cannot diverge).
-        const sloppy_keyword_var = var_tok == .kw_var and
-            (s.peekKind() == .kw_yield or s.peekKind() == .kw_static or
-                s.peekKind() == .kw_let or s.peekKind() == .kw_await or
-                identifiers.isSloppyFutureReservedBindingToken(s)) and
-            !s.isStrict() and
-            !(s.peekKind() == .kw_yield and s.ctx.in_generator) and
-            !(s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s));
-        if (!identifiers.isIdentifierLikeToken(s) and !sloppy_keyword_var) return s.failExpectedDescription("binding name");
-        if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
-        const atom_id = identifiers.identifierLikeAtom(s);
-        if (is_lexical and identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-        if (s.isStrict() and
-            (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
-        {
-            return s.failUnexpectedToken();
-        }
-        if (is_lexical) {
-            _ = try declarations.defineVar(s, atom_id, if (is_const) .const_ else .let_);
+        const atom_id = try identifiers.expectBindingIdentifier(s, .{
+            .missing = .binding_name,
+            .reject_let = decl_kind.isLexical(),
+        });
+        if (decl_kind.isLexical()) {
+            _ = try declarations.defineVar(s, atom_id, decl_kind.defineType());
         } else {
             try declareForInOfVarBinding(s, atom_id);
             target.var_initializer_atom = atom_id;
         }
         target.atom = atom_id;
         try s.advance();
-        if (is_lexical) {
+        if (decl_kind.isLexical()) {
             try s.emitScopePutVarInit(atom_id);
         } else {
             try s.emitScopePutVar(atom_id);
@@ -1986,15 +2006,14 @@ fn emitForInOfEpilogue(
     s: *State,
     kind: IterKind,
     block_scope_level: i32,
-    label_frame: ?usize,
+    targets: *const LoopTargets,
     next_label: compiler.LabelId,
     assign_label: compiler.LabelId,
     throw_close: ?ForAwaitThrowClose,
     for_scope: *parse_state.OpenScope,
 ) Error!void {
     try s.closeScopes(s.scope_level, block_scope_level);
-    try emitter.patchContinueFrame(s);
-    if (label_frame) |idx| try s.patchLabelContinues(idx);
+    try targets.patchContinues(s);
     try Emitter.bind(s, next_label);
     switch (kind) {
         .await_of => {
@@ -2018,7 +2037,7 @@ fn emitForInOfEpilogue(
             // shared AsyncIteratorClose.
             try Emitter.opNoSource(s, opcode.op.drop);
             try emitter.popBreakFrameAndPatch(s);
-            if (label_frame) |idx| try s.patchLabelBreaks(idx);
+            try targets.patchBreaks(s);
             try emitter.emitAsyncIteratorClose(s);
             try emitForAwaitThrowClose(s, throw_close.?);
         },
@@ -2033,10 +2052,8 @@ fn emitForInOfEpilogue(
             try emitter.popBreakFrameAndPatch(s);
         },
     }
-    if (label_frame) |idx| {
-        if (kind != .await_of) try s.patchLabelBreaks(idx);
-        s.popLabelFrame(idx);
-    }
+    if (kind != .await_of) try targets.patchBreaks(s);
+    targets.popLabel(s);
     try for_scope.close(s);
 }
 
@@ -2087,7 +2104,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
 
     if (parse_using_decl) {
         try parseForInOfUsingTarget(s, direct_using_kind.?, &target);
-    } else if ((var_tok == .kw_var or var_tok == .kw_let or var_tok == .kw_const) and
+    } else if (VarDeclKind.isDeclarationToken(var_tok) and
         !let_as_identifier)
     {
         try parseForInOfDeclarationTarget(s, var_tok, &target);
@@ -2150,10 +2167,9 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         .of => emitter.setCurrentBreakCleanupDrops(s, direct_iterator_close_marker),
         .in => emitter.setCurrentBreakCleanupDrops(s, 1),
     }
-    const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
-
-    var loop_block: BlockEnv = undefined;
-    emitter.pushControlBlock(s, &loop_block, .{
+    var targets = LoopTargets{ .label = loop_label, .allow_continue = true };
+    try targets.bindLabel(s);
+    targets.pushBlock(s, .{
         .label = loop_label,
         .has_break_target = true,
         .has_continue_target = true,
@@ -2165,7 +2181,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         .has_iterator = kind != .in,
         .is_async_iterator = kind == .await_of,
     });
-    defer emitter.popControlBlock(s, &loop_block);
+    defer targets.popBlock(s);
 
     // The throw-close catch marker sits above the loop record: break,
     // continue and return out of the body drop it like a `try` marker.
@@ -2187,7 +2203,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         s.active_catch_marker_depth = loop_catch_depth;
     }
 
-    try emitForInOfEpilogue(s, kind, block_scope_level, label_frame, next_label, assign_label, throw_close, &for_scope);
+    try emitForInOfEpilogue(s, kind, block_scope_level, &targets, next_label, assign_label, throw_close, &for_scope);
 }
 
 /// Tokens that can begin a ForBinding after `let`: an identifier (including

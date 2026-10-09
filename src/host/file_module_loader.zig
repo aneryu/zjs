@@ -78,9 +78,7 @@ pub fn readFile(io: std.Io, path: []const u8, allocator: std.mem.Allocator, limi
 
 fn syntheticKind(_: ?*anyopaque, path: []const u8, attribute: ?[]const u8) ?zjs.core.module.SyntheticKind {
     if (attribute) |kind| {
-        if (std.mem.eql(u8, kind, "json")) return .json;
-        if (std.mem.eql(u8, kind, "text")) return .text;
-        if (std.mem.eql(u8, kind, "bytes")) return .bytes;
+        if (zjs.core.module.SyntheticKind.fromName(kind)) |parsed| return parsed;
     }
     return if (std.mem.endsWith(u8, path, ".json")) .json else null;
 }

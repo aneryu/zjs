@@ -78,7 +78,7 @@ and retired gates. Command details live in [GUIDE.md](GUIDE.md) Part B.6.
 
 Preserve command exit status (`pipefail` for pipelines). Empty selections,
 missing corpus, and partial output do not establish a pass. Debug is the
-iteration default; shipped builds use `-Doptimize=ReleaseFast`, `layout=short`,
+iteration default; shipped builds use `-Doptimize=ReleaseFast`, `-Dzjs_compiler_layout=short`,
 NaN-boxed `JSValue`, and `force_gc` / `ownership_audit` off.
 
 ## Engineering constraints

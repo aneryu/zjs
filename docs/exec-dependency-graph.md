@@ -1,11 +1,11 @@
 # Exec call and import graph
 
 How `src/exec/` is entered, which files own which runtime step, and why a
-complete `@import` DAG does not exist. Current file list is the 40 Zig
+complete `@import` DAG does not exist. Current file list is the 41 Zig
 modules after the 2026-09-21 consolidation. Layering rules:
 [architecture.md](architecture.md), [api-boundary.md](api-boundary.md).
 
-Zig allows circular `@import`. **38 of the 40 files form one strongly
+Zig allows circular `@import`. **39 of the 41 files form one strongly
 connected component.** `frame.zig` and `stack.zig` are the only modules
 with no exec-internal outgoing imports. Do not read the compile graph as
 a call DAG. The maps below are **runtime control flow** and **role
@@ -19,8 +19,8 @@ Direct `@import("exec/….zig")` is limited to a few compile tests.
 
 | Caller | Exec names it uses | Why |
 | --- | --- | --- |
-| `src/js_context.zig` | `eval_entry`, `zjs_vm`, `call_site`, `call_runtime`, `standard_globals`, `object_ops`, `exception_ops`, `coercion_ops`, `string_ops`, `builtin_dispatch` | Public `Context`: eval, property get, `callFunction`, drain, host-function thunks |
-| `src/host/event_loop.zig` | `zjs_vm`, `call_runtime`, `atomics_ops`, `object_ops`, `promise_ops` | Timers/fd callbacks, microtasks, Atomics waiter wake |
+| `src/js_context.zig` | `eval_entry`, `zjs_vm`, `call_site`, `call_runtime`, `call`, `object_ops`, `exception_ops`, `coercion_ops`, `string_ops`, `value_ops`, `builtin_dispatch`, `module` | Public `Context`: eval, property get, `callFunction`, drain, host-function thunks |
+| `src/host/event_loop.zig` | `zjs_vm`, `call_runtime`, `atomics_ops` | Timers, microtasks, Atomics waiter wake |
 | `src/root.zig` | `exceptions`, `opcodeName`, `small_inline` | Public error aliases; opcode-profile name provider |
 | CLI (`zjs`, `run-test262`) | `module` / `module_graph`, `atomics_ops`, `call_runtime`, `buffer_ops` | File modules, agents, harness helpers |
 | In-tree tests | many `exec.*` aliases | Direct domain probes; keep `root.zig` compatibility names |
@@ -64,7 +64,7 @@ Context.eval / evalScriptSource
         ▼
  eval_entry.eval*
         │  parser.compile  (outside exec)
-        ├─ script  → call.evalGlobalScriptSource
+        ├─ script  → eval_entry.evalGlobalScriptSource
         │              → zjs_vm.runWithCallEnv
         └─ module  → module.preload* / evaluate*
                        → zjs_vm.runWithCallEnv
@@ -201,25 +201,26 @@ is not a ranking of runtime cost.
 
 | File | In | Out | Role |
 | --- | ---: | ---: | --- |
-| `exception_ops.zig` | 35 | 9 | Throw helpers, Error objects, stack capture |
-| `object_ops.zig` | 30 | 21 | Property/proxy/function-object algorithms |
+| `exception_ops.zig` | 37 | 8 | Throw helpers, Error objects, stack capture |
+| `object_ops.zig` | 31 | 23 | Property/proxy/function-object algorithms |
+| `value_ops.zig` | 29 | 6 | ToNumber/ToString/ToLength, bigint kernels |
 | `frame.zig` | 28 | 0 | `Frame` / slab / open VarRefs |
-| `builtin_dispatch.zig` | 27 | 4 | NativeCall view, thunk adapters |
-| `value_ops.zig` | 27 | 7 | ToNumber/ToString/ToLength, bigint kernels |
-| `call_runtime.zig` | 26 | 23 | Call/construct/eval/generator router |
-| `array_ops.zig` | 23 | 18 | Array / TypedArray algorithms |
-| `property_ops.zig` | 20 | 5 | Key conversion, slot get/set, direct shape paths |
-| `string_ops.zig` | 18 | 13 | String + RegExp-string integration |
-| `stack.zig` | 17 | 0 | Operand stack |
-| `iterator_ops.zig` | 16 | 13 | Iterator protocol, for-in/of, helpers |
-| `promise_ops.zig` | 15 | 18 | Promise AO, async function/generator |
+| `builtin_dispatch.zig` | 28 | 5 | NativeCall view, thunk adapters |
+| `call_runtime.zig` | 26 | 20 | Call/construct/eval/generator router |
+| `array_ops.zig` | 22 | 16 | Array / TypedArray algorithms |
+| `string_ops.zig` | 19 | 13 | String + RegExp-string integration |
+| `property_ops.zig` | 17 | 5 | Key conversion, slot get/set, direct shape paths |
+| `stack.zig` | 16 | 0 | Operand stack |
+| `iterator_ops.zig` | 16 | 17 | Iterator protocol, for-in/of, helpers |
+| `promise_ops.zig` | 15 | 15 | Promise AO, async function/generator |
 
 Leaves (no exec-internal outgoing `@import`): `frame.zig`, `stack.zig`.
 They still import `core`.
 
-`call_runtime.zig` is the widest *outgoing* hub (23 exec imports). New
-call-shaped helpers belong there or in the domain `*_ops.zig` that already
-owns the algorithm — not in a new satellite.
+`object_ops.zig` is the widest outgoing domain hub (23 exec imports).
+`call_runtime.zig` has 20. `root.zig`'s 36 imports are the re-export barrel.
+New call-shaped helpers belong in `call_runtime.zig` or in the domain
+`*_ops.zig` that already owns the algorithm — not in a new satellite.
 
 ## 5. Domain files and the native table
 
@@ -246,7 +247,7 @@ owns the algorithm — not in a new satellite.
 | error_object | `exception_ops.zig` |
 | primitive | `value_ops.zig` |
 | weak_ref / leftovers | `builtin_glue.zig` |
-| performance | `builtin_glue.zig` (`performance_internal_entries`) |
+| disposable | `disposable_ops.zig` |
 
 `standard_globals.zig` installs constructors, prototypes, and method
 tables onto the realm and points `JSRuntime.internal_builtins` at that

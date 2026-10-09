@@ -239,11 +239,7 @@ noinline fn prepareRootFunction(
         prepared.module_record = record;
         switch (record.status) {
             .unlinked => {
-                var diagnostic: module_mod.LinkDiagnostic = .{};
-                module_mod.linkModule(ctx, record, &diagnostic) catch |err| {
-                    try module_mod.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
-                    return module_mod.moduleResolutionError(err);
-                };
+                try module_mod.linkModuleOrThrow(rt, ctx, record, options.filename);
                 if (record.status != .linked) return error.InvalidBytecode;
                 prepared.should_evaluate_module = true;
             },

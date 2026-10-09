@@ -197,12 +197,12 @@ pub fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: 
     // Parse function name (required for declarations)
     // BindingIdentifier[?Yield, ?Await] in the enclosing context; sloppy code
     // also accepts `let`, `static`, and the other strict-reserved words.
-    if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) {
-        return s.failUnexpectedToken();
-    }
     // qjs js_parse_function_decl2 retains the identifier before
-    // next_token releases the token.
-    const name_atom = identifiers.identifierLikeAtom(s);
+    // next_token releases the token. Strict eval/arguments are rejected
+    // later, when the function body is known to be strict.
+    const name_atom = try identifiers.expectBindingIdentifier(s, .{
+        .reject_strict_eval_arguments = false,
+    });
     s.setLastDeclaredAtom(name_atom);
     if (s.lex.is_module and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, name_atom)) {
         return s.failUnexpectedToken();
@@ -264,11 +264,7 @@ pub fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: 
         owned_name = name_atom;
         if (is_generator and identifiers.atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
         if (func_kind == .async and identifiers.atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
-        if (s.isStrict() and
-            (identifiers.atomNameEquals(s, name_atom, "eval") or identifiers.atomNameEquals(s, name_atom, "arguments")))
-        {
-            return s.failUnexpectedToken();
-        }
+        if (s.isStrict() and identifiers.isEvalOrArgumentsAtom(name_atom)) return s.failUnexpectedToken();
         try s.advance();
     }
 
@@ -483,9 +479,7 @@ fn parseNamedParameter(s: *State, list: *ParameterListState, has_modifier: bool)
     }
     const arg_index = list.param_count;
     const strict_params = s.isStrict();
-    if (func_kind == .set and strict_params and
-        (identifiers.atomNameEquals(s, param_atom, "eval") or identifiers.atomNameEquals(s, param_atom, "arguments")))
-    {
+    if (func_kind == .set and strict_params and identifiers.isEvalOrArgumentsAtom(param_atom)) {
         return s.failUnexpectedToken();
     }
     if (list.parameters.simple_names.contains(param_atom)) {
@@ -1403,14 +1397,12 @@ fn checkPatternParameterDuplicate(s: *State, name: Atom) Error!void {
 }
 
 fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) Error!PatternTarget {
-    if (s.isStrict() and
-        (identifiers.atomNameEquals(s, name, "eval") or identifiers.atomNameEquals(s, name, "arguments")))
-    {
+    if (s.isStrict() and identifiers.isEvalOrArgumentsAtom(name)) {
         return s.failExpectedDescription("valid strict-mode binding name");
     }
     if ((binding.define_type == .let_ or binding.define_type == .const_) and
         !binding.is_parameter and !binding.is_catch_parameter and
-        identifiers.atomNameEquals(s, name, "let"))
+        name == atom_module.ids.let)
     {
         return s.failExpectedDescription("valid lexical binding name");
     }
@@ -1437,7 +1429,7 @@ fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) 
     }
     if (binding.export_flag) try modules.addModuleExportName(s, name, name);
 
-    if (binding.define_type == .var_ and statements.needVarReference(s, .kw_var)) {
+    if (binding.define_type == .var_ and statements.needVarReference(s, .var_)) {
         try s.emitScopeGetVar(name);
         return .{ .lvalue = try expressions.getLValue(s, false) };
     }
@@ -1449,10 +1441,11 @@ fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) 
 }
 
 fn parsePatternBindingTarget(s: *State, binding: PatternBindingMode) Error!PatternTarget {
-    if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) {
-        return s.failExpectedDescription("binding name");
-    }
-    const name = identifiers.identifierLikeAtom(s);
+    const name = try identifiers.expectBindingIdentifier(s, .{
+        .missing = .binding_name,
+        .escape = .binding_name,
+        .reject_strict_eval_arguments = false,
+    });
     const target = try definePatternBindingAtom(s, binding, name);
     try s.advance();
     return target;
@@ -1493,7 +1486,7 @@ fn shorthandPatternTarget(
 
 fn shorthandPatternCanUseGetField2(s: *State, mode: PatternMode) bool {
     return switch (mode) {
-        .binding => |binding| binding.define_type != .var_ or !statements.needVarReference(s, .kw_var),
+        .binding => |binding| binding.define_type != .var_ or !statements.needVarReference(s, .var_),
         .assignment => false,
     };
 }

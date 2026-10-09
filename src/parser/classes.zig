@@ -30,6 +30,29 @@ const State = parse_state.State;
 const SourcePosition = parse_state.SourcePosition;
 const Emitter = emitter.Emitter;
 
+pub const AccessorKind = enum(u8) {
+    get = 1,
+    set = 2,
+
+    pub fn funcKind(self: AccessorKind) ParseFunctionKind {
+        return switch (self) {
+            .get => .get,
+            .set => .set,
+        };
+    }
+
+    pub fn defineFlags(self: AccessorKind) u8 {
+        return @intFromEnum(self);
+    }
+
+    pub fn privateKind(self: AccessorKind) ClassPrivateElementKind {
+        return switch (self) {
+            .get => .getter,
+            .set => .setter,
+        };
+    }
+};
+
 /// Parse class heritage (extends clause)
 /// Part of `js_parse_class` in quickjs.c
 fn parseClassHeritage(s: *State) Error!void {
@@ -80,7 +103,7 @@ fn parseClassElement(s: *State) Error!void {
     const method_kind_override = try parseClassMethodPrefix(s);
     // After `async` or `*`, `get`/`set` can only be the method name.
     if (method_kind_override == null) {
-        if (try classAccessorKind(s)) |is_getter| return parseClassAccessor(s, is_getter, modifiers.is_abstract, element_source_start);
+        if (try classAccessorKind(s)) |accessor| return parseClassAccessor(s, accessor, modifiers.is_abstract, element_source_start);
     }
     if (s.peekKind() == .private_name) return parseClassPrivateElement(s, modifiers.is_abstract, method_kind_override, element_source_start);
     if (s.peekKind() == .lbracket) {
@@ -183,28 +206,26 @@ fn parseClassMethodPrefix(s: *State) Error!?ParseFunctionKind {
 }
 
 /// `get name() {}` / `set name(v) {}`, private, computed or named.
-fn parseClassAccessor(s: *State, is_getter: bool, is_abstract: bool, element_source_start: FunctionSourceStart) Error!void {
+fn parseClassAccessor(s: *State, accessor: AccessorKind, is_abstract: bool, element_source_start: FunctionSourceStart) Error!void {
     try s.advance();
     // Check if this is a private getter/setter (get #x() or set #x())
     if (s.peekKind() == .private_name) {
         const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
         if (identifiers.atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
-        try registerClassPrivateElement(s, private_atom, if (is_getter) .getter else .setter);
-        try preparePrivateAccessorBinding(s, private_atom, is_getter);
+        try registerClassPrivateElement(s, private_atom, accessor.privateKind());
+        try preparePrivateAccessorBinding(s, private_atom, accessor == .get);
         try s.advance();
         if (!typescript.tsIsMethodStart(s)) {
             return s.failExpectedToken(.lparen);
         }
         if (!(try typescript.tsFunctionHasBodyAhead(s))) return typescript.tsSkipMethodSignature(s, is_abstract);
-        // Parse parameters with proper function kind for private getter/setter
-        const kind: ParseFunctionKind = if (is_getter) .get else .set;
-        try parseClassElementFunction(s, kind, element_source_start);
+        try parseClassElementFunction(s, accessor.funcKind(), element_source_start);
         try markPrivateBrandNeeded(s);
         try emitStaticClassStackRotate(s);
         // qjs js_parse_class: private accessors retain the class as
         // their home object for super and brand checks.
         try Emitter.op(s, opcode.op.set_home_object);
-        if (is_getter) {
+        if (accessor == .get) {
             try s.emitScopePutVarInit(private_atom);
         } else {
             const setter_atom = try privateSetterAtom(s, private_atom);
@@ -214,7 +235,7 @@ fn parseClassAccessor(s: *State, is_getter: bool, is_abstract: bool, element_sou
         try emitStaticClassStackSwap(s);
     } else if (s.peekKind() == .lbracket) {
         if (try typescript.tsComputedMemberIsErased(s, is_abstract)) return typescript.tsSkipErasedComputedMember(s, is_abstract);
-        try parseClassComputedMethod(s, if (is_getter) .get else .set, if (is_getter) 1 else 2, element_source_start);
+        try parseClassComputedMethod(s, accessor.funcKind(), accessor.defineFlags(), element_source_start);
     } else {
         // Regular getter/setter - parse property name (identifier, string, or number)
         const prop_name = (try expressions.parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
@@ -225,13 +246,11 @@ fn parseClassAccessor(s: *State, is_getter: bool, is_abstract: bool, element_sou
             return s.failExpectedToken(.lparen);
         }
         if (!(try typescript.tsFunctionHasBodyAhead(s))) return typescript.tsSkipMethodSignature(s, is_abstract);
-        // Parse parameters with proper function kind for getter/setter
-        const kind: ParseFunctionKind = if (is_getter) .get else .set;
-        try parseClassElementFunction(s, kind, element_source_start);
+        try parseClassElementFunction(s, accessor.funcKind(), element_source_start);
         try emitStaticClassStackRotate(s);
         // qjs js_parse_class: define a named getter/setter with
         // OP_DEFINE_METHOD_GETTER/SETTER flags.
-        try Emitter.opAtomU8(s, opcode.op.define_method, prop_atom, if (is_getter) 1 else 2);
+        try Emitter.opAtomU8(s, opcode.op.define_method, prop_atom, accessor.defineFlags());
         try emitStaticClassStackSwap(s);
     }
     return;
@@ -330,29 +349,24 @@ fn parseClassNamedElement(s: *State, prop_atom: Atom, is_abstract: bool, method_
         // An abstract property is a type-only declaration: no field.
         if (s.peekKind() == .assign) return s.failWithMessage(null, "abstract property cannot have an initializer");
         _ = try s.expectSemicolon();
-    } else if (s.peekKind() == .assign) {
-        // Field with initializer
-        if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
-        try s.advance();
-        try emitFieldInitializer(s, prop_atom, .{ .has_initializer = true, .is_static = s.class.is_static });
-        _ = try s.expectSemicolon();
-    } else if (s.peekKind() == .semicolon) {
-        // Field without initializer, with semicolon
-        if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
-        try emitPublicFieldNoInitializer(s, prop_atom);
-        try s.advance();
     } else {
         if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
-        try emitPublicFieldNoInitializer(s, prop_atom);
-        if (s.peekKind() == .semicolon) {
+        if (s.peekKind() == .assign) {
             try s.advance();
-        } else if (!(has_line_terminator_after_name or s.peekKind() == .eof or s.peekKind() == .rbrace)) {
-            return s.failUnexpectedToken();
+            try emitFieldInitializer(s, prop_atom, .{ .has_initializer = true, .is_static = s.class.is_static });
+            _ = try s.expectSemicolon();
+        } else {
+            try emitPublicFieldNoInitializer(s, prop_atom);
+            if (s.peekKind() == .semicolon) {
+                try s.advance();
+            } else if (!(has_line_terminator_after_name or s.peekKind() == .eof or s.peekKind() == .rbrace)) {
+                return s.failUnexpectedToken();
+            }
         }
     }
 }
 
-fn classAccessorKind(s: *State) Error!?bool {
+fn classAccessorKind(s: *State) Error!?AccessorKind {
     if (!(s.peekKind() == .ident and (s.isIdent("get") or s.isIdent("set")))) return null;
 
     // ClassElement has no [no LineTerminator here] after `get`/`set`:
@@ -372,7 +386,7 @@ fn classAccessorKind(s: *State) Error!?bool {
     {
         return null;
     }
-    return s.isIdent("get");
+    return if (s.isIdent("get")) .get else .set;
 }
 
 fn registerClassPrivateElement(s: *State, atom_id: Atom, kind: ClassPrivateElementKind) Error!void {

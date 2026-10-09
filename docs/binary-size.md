@@ -11,7 +11,7 @@ only. `ReleaseSmall` was not measured.
 | Commit | `9e915ba0` |
 | Host | Linux aarch64 (ELF, dynamically linked) |
 | Artifact | `zig build zjs-size -Doptimize=ReleaseFast` |
-| Zig | 0.16.0, LLVM backend, `layout=short`, nan-boxed `JSValue` |
+| Zig | 0.16.0, LLVM backend, `-Dzjs_compiler_layout=short`, nan-boxed `JSValue` |
 
 `zjs-size` is the same engine as `zjs` under a second install name so a
 later `ReleaseSmall` build does not overwrite the shipped CLI

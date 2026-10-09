@@ -43,6 +43,20 @@ pub const SyntheticKind = enum {
     json,
     text,
     bytes,
+
+    /// Host `type` attribute and registry tag. `.none` and any other spelling
+    /// are not synthetic kinds.
+    pub fn fromName(spelling: []const u8) ?SyntheticKind {
+        const kind = std.meta.stringToEnum(SyntheticKind, spelling) orelse return null;
+        if (kind == .none) return null;
+        return kind;
+    }
+
+    /// Host-visible type name. `.none` has none.
+    pub fn name(kind: SyntheticKind) ?[]const u8 {
+        if (kind == .none) return null;
+        return @tagName(kind);
+    }
 };
 
 /// One resolved module request. `module` is a borrowed pointer into the same
@@ -158,13 +172,6 @@ pub const ResolvedExport = union(enum) {
     resolved: ResolvedBinding,
 };
 
-/// Fully-owned, unpublished module definition. Load/compile code builds this
-/// value off-registry, including the initial FunctionBytecode value, before
-/// asking the registry for a target. An allocation failure therefore cannot
-/// erase or partially rewrite an already-loaded module generation.
-///
-/// `module_ns` is intentionally absent: a namespace is published only after a
-/// fresh record has been completely installed and linked.
 /// The six definition arrays shared by `PendingDefinition` and
 /// `ModuleRecord`, detached from their owner so they can be released.
 const DefinitionArrays = struct {
@@ -195,6 +202,20 @@ const DefinitionArrays = struct {
         };
     }
 
+    fn assertEmpty(self: DefinitionArrays) void {
+        std.debug.assert(self.requests.len == 0 and self.imports.len == 0 and self.exports.len == 0 and
+            self.indirect_exports.len == 0 and self.star_exports.len == 0 and self.import_attributes.len == 0);
+    }
+
+    fn install(self: DefinitionArrays, owner: anytype) void {
+        owner.requests = self.requests;
+        owner.imports = self.imports;
+        owner.exports = self.exports;
+        owner.indirect_exports = self.indirect_exports;
+        owner.star_exports = self.star_exports;
+        owner.import_attributes = self.import_attributes;
+    }
+
     fn free(self: DefinitionArrays, rt: *@import("../runtime.zig").JSRuntime) void {
         for (self.exports) |*entry| {
             if (entry.retained_cell) |cell| {
@@ -210,6 +231,13 @@ const DefinitionArrays = struct {
     }
 };
 
+/// Fully-owned, unpublished module definition. Load/compile code builds this
+/// value off-registry, including the initial FunctionBytecode value, before
+/// asking the registry for a target. An allocation failure therefore cannot
+/// erase or partially rewrite an already-loaded module generation.
+///
+/// `module_ns` is intentionally absent: a namespace is published only after a
+/// fresh record has been completely installed and linked.
 pub const PendingDefinition = struct {
     runtime: *@import("../runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
@@ -443,34 +471,19 @@ pub const ModuleRecord = struct {
         std.debug.assert(!self.requests_resolved);
         std.debug.assert(self.runtime == pending.runtime);
         std.debug.assert(self.atoms == pending.atoms);
-        std.debug.assert(self.requests.len == 0);
-        std.debug.assert(self.imports.len == 0);
-        std.debug.assert(self.exports.len == 0);
-        std.debug.assert(self.indirect_exports.len == 0);
-        std.debug.assert(self.star_exports.len == 0);
-        std.debug.assert(self.import_attributes.len == 0);
+        DefinitionArrays.take(self).assertEmpty();
         std.debug.assert(self.func_obj.is(.undefined_value));
         std.debug.assert(self.module_ns.is(.undefined_value));
         for (pending.requests) |entry| std.debug.assert(entry.module == null);
         for (pending.exports) |entry| std.debug.assert(entry.retained_cell == null);
 
-        self.requests = pending.requests;
-        self.imports = pending.imports;
-        self.exports = pending.exports;
-        self.indirect_exports = pending.indirect_exports;
-        self.star_exports = pending.star_exports;
-        self.import_attributes = pending.import_attributes;
+        const moved = DefinitionArrays.take(pending);
+        moved.install(self);
         self.func_obj = pending.func_obj;
         self.synthetic_kind = pending.synthetic_kind;
         self.has_top_level_await = pending.has_top_level_await;
         self.definition_installed = true;
 
-        pending.requests = &.{};
-        pending.imports = &.{};
-        pending.exports = &.{};
-        pending.indirect_exports = &.{};
-        pending.star_exports = &.{};
-        pending.import_attributes = &.{};
         pending.func_obj = value_mod.JSValue.undefinedValue();
         pending.synthetic_kind = .none;
         pending.has_top_level_await = false;

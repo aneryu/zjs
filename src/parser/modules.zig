@@ -62,10 +62,8 @@ pub fn parseImport(s: *State) Error!void {
 
     // Default import: import x from 'module'
     if (s.peekKind() == .ident) {
-        const local_name = s.token.payload.ident.atom;
+        const local_name = try expectImportBinding(s);
         default_local_name = local_name;
-        try validateModuleImportBindingName(s, local_name);
-        try s.advance();
 
         if (s.peekKind() != .comma) {
             const request_index = try parseFromClause(s);
@@ -85,13 +83,7 @@ pub fn parseImport(s: *State) Error!void {
             return s.failExpectedDescription("'as'");
         }
         try s.advance();
-        // Expect namespace identifier
-        if (s.peekKind() != .ident) {
-            return s.failExpectedDescription("binding name");
-        }
-        const local_name = s.token.payload.ident.atom;
-        try validateModuleImportBindingName(s, local_name);
-        try s.advance();
+        const local_name = try expectImportBinding(s);
         const request_index = try parseFromClause(s);
         if (default_local_name) |default_name| {
             try addModuleImportBinding(s, request_index, atom_default, default_name, false);
@@ -129,12 +121,7 @@ pub fn parseImport(s: *State) Error!void {
             var local_name: Atom = undefined;
             if (s.isIdent("as")) {
                 try s.advance();
-                if (s.peekKind() != .ident) {
-                    return s.failExpectedDescription("binding name");
-                }
-                local_name = s.token.payload.ident.atom;
-                try validateModuleImportBindingName(s, local_name);
-                try s.advance();
+                local_name = try expectImportBinding(s);
             } else if (import_name_was_string) {
                 return s.failExpectedDescription("'as'");
             } else {
@@ -169,6 +156,14 @@ pub fn parseImport(s: *State) Error!void {
     }
 
     return s.failExpectedDescription("import clause");
+}
+
+fn expectImportBinding(s: *State) Error!Atom {
+    if (s.peekKind() != .ident) return s.failExpectedDescription("binding name");
+    const local_name = s.token.payload.ident.atom;
+    try validateModuleImportBindingName(s, local_name);
+    try s.advance();
+    return local_name;
 }
 
 fn validateModuleImportBindingName(s: *State, atom_id: Atom) Error!void {
